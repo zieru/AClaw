@@ -18,13 +18,23 @@ type OpenAIProvider struct {
 	name         string
 	providerType string
 	baseURL      string
-	apiKey       string
+	keyPool      *KeyPool
 	defaultModel string
+	models       []string
 	client       *http.Client
 }
 
 // NewOpenAIProvider creates an OpenAI, 9Router, or compatible provider instance
 func NewOpenAIProvider(name, providerType, baseURL, apiKey, defaultModel string) *OpenAIProvider {
+	var keys []string
+	if apiKey != "" {
+		keys = []string{apiKey}
+	}
+	return NewOpenAIProviderWithKeys(name, providerType, baseURL, keys, "round-robin", defaultModel, nil)
+}
+
+// NewOpenAIProviderWithKeys creates a provider with multiple keys and model definitions
+func NewOpenAIProviderWithKeys(name, providerType, baseURL string, keys []string, keyStrategy string, defaultModel string, models []string) *OpenAIProvider {
 	if baseURL == "" {
 		switch providerType {
 		case "9router":
@@ -40,6 +50,9 @@ func NewOpenAIProvider(name, providerType, baseURL, apiKey, defaultModel string)
 		}
 	}
 	baseURL = strings.TrimSuffix(baseURL, "/")
+	baseURL = strings.TrimSuffix(baseURL, "/chat/completions")
+	baseURL = strings.TrimSuffix(baseURL, "/chat")
+	baseURL = strings.TrimSuffix(baseURL, "/completions")
 
 	if defaultModel == "" {
 		switch providerType {
@@ -56,12 +69,17 @@ func NewOpenAIProvider(name, providerType, baseURL, apiKey, defaultModel string)
 		}
 	}
 
+	if len(models) == 0 {
+		models = []string{defaultModel}
+	}
+
 	return &OpenAIProvider{
 		name:         name,
 		providerType: providerType,
 		baseURL:      baseURL,
-		apiKey:       apiKey,
+		keyPool:      NewKeyPool(keys, keyStrategy),
 		defaultModel: defaultModel,
+		models:       models,
 		client:       &http.Client{Timeout: 90 * time.Second},
 	}
 }
@@ -69,6 +87,14 @@ func NewOpenAIProvider(name, providerType, baseURL, apiKey, defaultModel string)
 func (p *OpenAIProvider) Name() string         { return p.name }
 func (p *OpenAIProvider) Type() string         { return p.providerType }
 func (p *OpenAIProvider) DefaultModel() string { return p.defaultModel }
+func (p *OpenAIProvider) Models() []string     { return p.models }
+func (p *OpenAIProvider) KeyPool() *KeyPool    { return p.keyPool }
+
+func (p *OpenAIProvider) SetHTTPClient(client interface{}) {
+	if c, ok := client.(*http.Client); ok && c != nil {
+		p.client = c
+	}
+}
 
 type openAIToolCall struct {
 	ID       string `json:"id"`
@@ -196,29 +222,68 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 	}
 
 	endpoint := fmt.Sprintf("%s/chat/completions", p.baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(payloadBytes))
-	if err != nil {
-		return nil, err
+
+	keyCount := p.keyPool.Count()
+	if keyCount == 0 {
+		keyCount = 1
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
-	if p.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	var lastErr error
+	var bodyBytes []byte
+
+	for attempt := 0; attempt < keyCount; attempt++ {
+		apiKey := p.keyPool.GetNextKey()
+
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(payloadBytes))
+		if err != nil {
+			return nil, err
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+
+		httpResp, err := p.client.Do(httpReq)
+		if err != nil {
+			if apiKey != "" {
+				p.keyPool.MarkError(apiKey, false)
+			}
+			lastErr = fmt.Errorf("http call failed: %w", err)
+			continue
+		}
+
+		bodyBytes, err = io.ReadAll(httpResp.Body)
+		httpResp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read response: %w", err)
+			continue
+		}
+
+		if httpResp.StatusCode == 429 || httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
+			if apiKey != "" {
+				p.keyPool.MarkError(apiKey, httpResp.StatusCode == 429)
+			}
+			lastErr = fmt.Errorf("api error (%d): %s", httpResp.StatusCode, string(bodyBytes))
+			if attempt < keyCount-1 {
+				continue // retry with next key
+			}
+			return nil, lastErr
+		}
+
+		if httpResp.StatusCode >= 400 {
+			return nil, fmt.Errorf("api error (%d): %s", httpResp.StatusCode, string(bodyBytes))
+		}
+
+		if apiKey != "" {
+			p.keyPool.MarkSuccess(apiKey)
+		}
+		lastErr = nil
+		break
 	}
 
-	httpResp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("http call failed: %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if httpResp.StatusCode >= 400 {
-		return nil, fmt.Errorf("api error (%d): %s", httpResp.StatusCode, string(bodyBytes))
+	if lastErr != nil {
+		return nil, lastErr
 	}
 
 	// 1. Try standard JSON Unmarshal

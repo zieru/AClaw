@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,7 +51,18 @@ func Open(dbPath string) (*DB, error) {
 	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN full_request_payload TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN provider_response TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN tokens_saved INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN proxy_used TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN footer_mode TEXT NOT NULL DEFAULT 'off'")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN token_saver_mode TEXT NOT NULL DEFAULT 'auto'")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN proxy_pool_enabled INTEGER NOT NULL DEFAULT 1")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN api_keys TEXT NOT NULL DEFAULT '[]'")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN models TEXT NOT NULL DEFAULT '[]'")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN strategy TEXT NOT NULL DEFAULT 'failsafe'")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN key_strategy TEXT NOT NULL DEFAULT 'round-robin'")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN proxy_enabled INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN proxy_group TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE proxy_nodes ADD COLUMN group_name TEXT NOT NULL DEFAULT 'default'")
 
 	return &DB{db: db}, nil
 }
@@ -72,8 +84,25 @@ type PolicyRecord struct {
 	AutoCompaction      bool      `json:"auto_compaction"`
 	CompactionThreshold int       `json:"compaction_threshold"`
 	ModelOverride       string    `json:"model_override"`
-	FooterMode          string    `json:"footer_mode"` // 'off', 'tokens', 'full'
+	FooterMode          string    `json:"footer_mode"`      // 'off', 'tokens', 'full'
+	TokenSaverMode      string    `json:"token_saver_mode"` // 'off', 'auto', 'aggressive', 'caveman'
+	ProxyPoolEnabled    bool      `json:"proxy_pool_enabled"`
 	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+type ProxyNodeRecord struct {
+	ID           string     `json:"id"`
+	URL          string     `json:"url"`
+	Protocol     string     `json:"protocol"` // http, https, socks5
+	Label        string     `json:"label"`
+	GroupName    string     `json:"group_name"`
+	IsActive     bool       `json:"is_active"`
+	FailCount    int        `json:"fail_count"`
+	SuccessCount int        `json:"success_count"`
+	AvgLatencyMs int        `json:"avg_latency_ms"`
+	LastChecked  *time.Time `json:"last_checked"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 type ProviderRecord struct {
@@ -82,12 +111,35 @@ type ProviderRecord struct {
 	Type         string    `json:"type"` // 9router, openai, anthropic, gemini, groq, deepseek, ollama, custom
 	BaseURL      string    `json:"base_url"`
 	APIKey       string    `json:"api_key"`
+	APIKeys      []string  `json:"api_keys"`
 	DefaultModel string    `json:"default_model"`
+	Models       []string  `json:"models"`
+	Strategy     string    `json:"strategy"`     // failsafe, round-robin, random
+	KeyStrategy  string    `json:"key_strategy"` // round-robin, random, failover
+	ProxyEnabled bool      `json:"proxy_enabled"`
+	ProxyGroup   string    `json:"proxy_group"`
 	IsActive     bool      `json:"is_active"`
 	Priority     int       `json:"priority"`
 	SettingsJSON string    `json:"settings_json"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type ComboTarget struct {
+	ProviderID string `json:"provider_id"`
+	Model      string `json:"model"`
+	Priority   int    `json:"priority"`
+}
+
+type ModelComboRecord struct {
+	ID          string        `json:"id"`
+	Name        string        `json:"name"`
+	Description string        `json:"description"`
+	Targets     []ComboTarget `json:"targets"`
+	Strategy    string        `json:"strategy"` // failsafe, round-robin, random
+	IsActive    bool          `json:"is_active"`
+	CreatedAt   time.Time     `json:"created_at"`
+	UpdatedAt   time.Time     `json:"updated_at"`
 }
 
 type ChannelRecord struct {
@@ -160,6 +212,8 @@ type AuditLogRecord struct {
 	PromptTokens       int       `json:"prompt_tokens"`
 	CompletionTokens   int       `json:"completion_tokens"`
 	TotalTokens        int       `json:"total_tokens"`
+	TokensSaved        int       `json:"tokens_saved"`
+	ProxyUsed          string    `json:"proxy_used"`
 	LatencyMs          int       `json:"latency_ms"`
 	CostUSD            float64   `json:"cost_usd"`
 	ToolsCalled        string    `json:"tools_called"`
@@ -178,9 +232,13 @@ func (d *DB) GetPolicy(scope, scopeID string) (*PolicyRecord, error) {
 	defer d.mu.RUnlock()
 
 	var p PolicyRecord
-	var autoCompInt int
-	err := d.db.QueryRow("SELECT id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, model_override, COALESCE(footer_mode, 'off'), updated_at FROM channel_policies WHERE scope = ? AND scope_id = ?", scope, scopeID).
-		Scan(&p.ID, &p.Scope, &p.ScopeID, &p.MaxUploadFileMB, &p.MaxTokens, &p.MaxHistoryTurns, &autoCompInt, &p.CompactionThreshold, &p.ModelOverride, &p.FooterMode, &p.UpdatedAt)
+	var autoCompInt, proxyPoolInt int
+	err := d.db.QueryRow(`
+		SELECT id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, 
+		       model_override, COALESCE(footer_mode, 'off'), COALESCE(token_saver_mode, 'auto'), COALESCE(proxy_pool_enabled, 1), updated_at 
+		FROM channel_policies WHERE scope = ? AND scope_id = ?`, scope, scopeID).
+		Scan(&p.ID, &p.Scope, &p.ScopeID, &p.MaxUploadFileMB, &p.MaxTokens, &p.MaxHistoryTurns, &autoCompInt, &p.CompactionThreshold, 
+			&p.ModelOverride, &p.FooterMode, &p.TokenSaverMode, &proxyPoolInt, &p.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -189,6 +247,7 @@ func (d *DB) GetPolicy(scope, scopeID string) (*PolicyRecord, error) {
 		return nil, err
 	}
 	p.AutoCompaction = autoCompInt == 1
+	p.ProxyPoolEnabled = proxyPoolInt == 1
 	return &p, nil
 }
 
@@ -202,14 +261,21 @@ func (d *DB) SavePolicy(p *PolicyRecord) error {
 	if p.FooterMode == "" {
 		p.FooterMode = "off"
 	}
+	if p.TokenSaverMode == "" {
+		p.TokenSaverMode = "auto"
+	}
 	autoCompInt := 0
 	if p.AutoCompaction {
 		autoCompInt = 1
 	}
+	proxyPoolInt := 0
+	if p.ProxyPoolEnabled {
+		proxyPoolInt = 1
+	}
 
 	query := `
-	INSERT INTO channel_policies (id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, model_override, footer_mode, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	INSERT INTO channel_policies (id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, model_override, footer_mode, token_saver_mode, proxy_pool_enabled, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 	ON CONFLICT(scope, scope_id) DO UPDATE SET
 		max_upload_file_mb=excluded.max_upload_file_mb,
 		max_tokens=excluded.max_tokens,
@@ -218,9 +284,11 @@ func (d *DB) SavePolicy(p *PolicyRecord) error {
 		compaction_threshold=excluded.compaction_threshold,
 		model_override=excluded.model_override,
 		footer_mode=excluded.footer_mode,
+		token_saver_mode=excluded.token_saver_mode,
+		proxy_pool_enabled=excluded.proxy_pool_enabled,
 		updated_at=CURRENT_TIMESTAMP
 	`
-	_, err := d.db.Exec(query, p.ID, p.Scope, p.ScopeID, p.MaxUploadFileMB, p.MaxTokens, p.MaxHistoryTurns, autoCompInt, p.CompactionThreshold, p.ModelOverride, p.FooterMode)
+	_, err := d.db.Exec(query, p.ID, p.Scope, p.ScopeID, p.MaxUploadFileMB, p.MaxTokens, p.MaxHistoryTurns, autoCompInt, p.CompactionThreshold, p.ModelOverride, p.FooterMode, p.TokenSaverMode, proxyPoolInt)
 	return err
 }
 
@@ -235,6 +303,8 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 		CompactionThreshold: 15,
 		ModelOverride:       "",
 		FooterMode:          "off",
+		TokenSaverMode:      "auto",
+		ProxyPoolEnabled:    true,
 	}
 
 	// 2. Global overlay
@@ -258,6 +328,10 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 		if glob.FooterMode != "" {
 			res.FooterMode = glob.FooterMode
 		}
+		if glob.TokenSaverMode != "" {
+			res.TokenSaverMode = glob.TokenSaverMode
+		}
+		res.ProxyPoolEnabled = glob.ProxyPoolEnabled
 	}
 
 	// 3. Channel overlay
@@ -282,6 +356,10 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 			if chPol.FooterMode != "" {
 				res.FooterMode = chPol.FooterMode
 			}
+			if chPol.TokenSaverMode != "" {
+				res.TokenSaverMode = chPol.TokenSaverMode
+			}
+			res.ProxyPoolEnabled = chPol.ProxyPoolEnabled
 		}
 	}
 
@@ -307,6 +385,10 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 			if chatPol.FooterMode != "" {
 				res.FooterMode = chatPol.FooterMode
 			}
+			if chatPol.TokenSaverMode != "" {
+				res.TokenSaverMode = chatPol.TokenSaverMode
+			}
+			res.ProxyPoolEnabled = chatPol.ProxyPoolEnabled
 		}
 	}
 
@@ -319,7 +401,12 @@ func (d *DB) ListProviders() ([]ProviderRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	rows, err := d.db.Query("SELECT id, name, type, base_url, api_key, default_model, is_active, priority, settings_json, created_at, updated_at FROM providers ORDER BY priority ASC, name ASC")
+	rows, err := d.db.Query(`
+		SELECT id, name, type, base_url, api_key, COALESCE(api_keys, '[]'), default_model, COALESCE(models, '[]'), 
+		       COALESCE(strategy, 'failsafe'), COALESCE(key_strategy, 'round-robin'), 
+		       COALESCE(proxy_enabled, 0), COALESCE(proxy_group, ''),
+		       is_active, priority, settings_json, created_at, updated_at 
+		FROM providers ORDER BY priority ASC, name ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -328,11 +415,18 @@ func (d *DB) ListProviders() ([]ProviderRecord, error) {
 	var list []ProviderRecord
 	for rows.Next() {
 		var p ProviderRecord
-		var activeInt int
-		if err := rows.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.DefaultModel, &activeInt, &p.Priority, &p.SettingsJSON, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		var activeInt, proxyEnabledInt int
+		var apiKeysJSON, modelsJSON string
+		if err := rows.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &apiKeysJSON, &p.DefaultModel, &modelsJSON, &p.Strategy, &p.KeyStrategy, &proxyEnabledInt, &p.ProxyGroup, &activeInt, &p.Priority, &p.SettingsJSON, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		p.IsActive = activeInt == 1
+		p.ProxyEnabled = proxyEnabledInt == 1
+		_ = json.Unmarshal([]byte(apiKeysJSON), &p.APIKeys)
+		_ = json.Unmarshal([]byte(modelsJSON), &p.Models)
+		if len(p.APIKeys) == 0 && p.APIKey != "" {
+			p.APIKeys = []string{p.APIKey}
+		}
 		list = append(list, p)
 	}
 	return list, nil
@@ -343,9 +437,15 @@ func (d *DB) GetProvider(id string) (*ProviderRecord, error) {
 	defer d.mu.RUnlock()
 
 	var p ProviderRecord
-	var activeInt int
-	err := d.db.QueryRow("SELECT id, name, type, base_url, api_key, default_model, is_active, priority, settings_json, created_at, updated_at FROM providers WHERE id = ?", id).
-		Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.DefaultModel, &activeInt, &p.Priority, &p.SettingsJSON, &p.CreatedAt, &p.UpdatedAt)
+	var activeInt, proxyEnabledInt int
+	var apiKeysJSON, modelsJSON string
+	err := d.db.QueryRow(`
+		SELECT id, name, type, base_url, api_key, COALESCE(api_keys, '[]'), default_model, COALESCE(models, '[]'), 
+		       COALESCE(strategy, 'failsafe'), COALESCE(key_strategy, 'round-robin'), 
+		       COALESCE(proxy_enabled, 0), COALESCE(proxy_group, ''),
+		       is_active, priority, settings_json, created_at, updated_at 
+		FROM providers WHERE id = ?`, id).
+		Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &apiKeysJSON, &p.DefaultModel, &modelsJSON, &p.Strategy, &p.KeyStrategy, &proxyEnabledInt, &p.ProxyGroup, &activeInt, &p.Priority, &p.SettingsJSON, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -353,6 +453,12 @@ func (d *DB) GetProvider(id string) (*ProviderRecord, error) {
 		return nil, err
 	}
 	p.IsActive = activeInt == 1
+	p.ProxyEnabled = proxyEnabledInt == 1
+	_ = json.Unmarshal([]byte(apiKeysJSON), &p.APIKeys)
+	_ = json.Unmarshal([]byte(modelsJSON), &p.Models)
+	if len(p.APIKeys) == 0 && p.APIKey != "" {
+		p.APIKeys = []string{p.APIKey}
+	}
 	return &p, nil
 }
 
@@ -363,26 +469,52 @@ func (d *DB) SaveProvider(p *ProviderRecord) error {
 	if p.ID == "" {
 		p.ID = uuid.New().String()[:8]
 	}
+	if p.Strategy == "" {
+		p.Strategy = "failsafe"
+	}
+	if p.KeyStrategy == "" {
+		p.KeyStrategy = "round-robin"
+	}
+	if len(p.APIKeys) == 0 && p.APIKey != "" {
+		p.APIKeys = []string{p.APIKey}
+	}
+	if p.APIKey == "" && len(p.APIKeys) > 0 {
+		p.APIKey = p.APIKeys[0]
+	}
+
+	apiKeysBytes, _ := json.Marshal(p.APIKeys)
+	modelsBytes, _ := json.Marshal(p.Models)
+
 	activeInt := 0
 	if p.IsActive {
 		activeInt = 1
 	}
+	proxyEnabledInt := 0
+	if p.ProxyEnabled {
+		proxyEnabledInt = 1
+	}
 
 	query := `
-	INSERT INTO providers (id, name, type, base_url, api_key, default_model, is_active, priority, settings_json, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	INSERT INTO providers (id, name, type, base_url, api_key, api_keys, default_model, models, strategy, key_strategy, proxy_enabled, proxy_group, is_active, priority, settings_json, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 	ON CONFLICT(id) DO UPDATE SET
 		name=excluded.name,
 		type=excluded.type,
 		base_url=excluded.base_url,
 		api_key=excluded.api_key,
+		api_keys=excluded.api_keys,
 		default_model=excluded.default_model,
+		models=excluded.models,
+		strategy=excluded.strategy,
+		key_strategy=excluded.key_strategy,
+		proxy_enabled=excluded.proxy_enabled,
+		proxy_group=excluded.proxy_group,
 		is_active=excluded.is_active,
 		priority=excluded.priority,
 		settings_json=excluded.settings_json,
 		updated_at=CURRENT_TIMESTAMP
 	`
-	_, err := d.db.Exec(query, p.ID, p.Name, p.Type, p.BaseURL, p.APIKey, p.DefaultModel, activeInt, p.Priority, p.SettingsJSON)
+	_, err := d.db.Exec(query, p.ID, p.Name, p.Type, p.BaseURL, p.APIKey, string(apiKeysBytes), p.DefaultModel, string(modelsBytes), p.Strategy, p.KeyStrategy, proxyEnabledInt, p.ProxyGroup, activeInt, p.Priority, p.SettingsJSON)
 	return err
 }
 
@@ -390,6 +522,91 @@ func (d *DB) DeleteProvider(id string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, err := d.db.Exec("DELETE FROM providers WHERE id = ?", id)
+	return err
+}
+
+// --- Model Combo Operations ---
+
+func (d *DB) ListCombos() ([]ModelComboRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT id, name, description, targets_json, strategy, is_active, created_at, updated_at FROM model_combos ORDER BY name ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ModelComboRecord
+	for rows.Next() {
+		var c ModelComboRecord
+		var targetsJSON string
+		var activeInt int
+		if err := rows.Scan(&c.ID, &c.Name, &c.Description, &targetsJSON, &c.Strategy, &activeInt, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, err
+		}
+		c.IsActive = activeInt == 1
+		_ = json.Unmarshal([]byte(targetsJSON), &c.Targets)
+		list = append(list, c)
+	}
+	return list, nil
+}
+
+func (d *DB) GetCombo(name string) (*ModelComboRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var c ModelComboRecord
+	var targetsJSON string
+	var activeInt int
+	err := d.db.QueryRow("SELECT id, name, description, targets_json, strategy, is_active, created_at, updated_at FROM model_combos WHERE name = ?", name).
+		Scan(&c.ID, &c.Name, &c.Description, &targetsJSON, &c.Strategy, &activeInt, &c.CreatedAt, &c.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.IsActive = activeInt == 1
+	_ = json.Unmarshal([]byte(targetsJSON), &c.Targets)
+	return &c, nil
+}
+
+func (d *DB) SaveCombo(c *ModelComboRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if c.ID == "" {
+		c.ID = uuid.New().String()[:8]
+	}
+	if c.Strategy == "" {
+		c.Strategy = "failsafe"
+	}
+	activeInt := 0
+	if c.IsActive {
+		activeInt = 1
+	}
+
+	targetsBytes, _ := json.Marshal(c.Targets)
+
+	query := `
+	INSERT INTO model_combos (id, name, description, targets_json, strategy, is_active, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(name) DO UPDATE SET
+		description=excluded.description,
+		targets_json=excluded.targets_json,
+		strategy=excluded.strategy,
+		is_active=excluded.is_active,
+		updated_at=CURRENT_TIMESTAMP
+	`
+	_, err := d.db.Exec(query, c.ID, c.Name, c.Description, string(targetsBytes), c.Strategy, activeInt)
+	return err
+}
+
+func (d *DB) DeleteCombo(name string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM model_combos WHERE name = ?", name)
 	return err
 }
 
@@ -759,6 +976,235 @@ func (d *DB) DeleteMemoryItem(id string) error {
 	return err
 }
 
+// --- Proxy Node Operations ---
+
+func (d *DB) ListProxyNodes() ([]ProxyNodeRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT id, url, protocol, label, COALESCE(group_name, 'default'), is_active, fail_count, success_count, avg_latency_ms, last_checked, created_at, updated_at FROM proxy_nodes ORDER BY is_active DESC, group_name ASC, avg_latency_ms ASC, created_at ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ProxyNodeRecord
+	for rows.Next() {
+		var n ProxyNodeRecord
+		var activeInt int
+		if err := rows.Scan(&n.ID, &n.URL, &n.Protocol, &n.Label, &n.GroupName, &activeInt, &n.FailCount, &n.SuccessCount, &n.AvgLatencyMs, &n.LastChecked, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			return nil, err
+		}
+		n.IsActive = activeInt == 1
+		list = append(list, n)
+	}
+	return list, nil
+}
+
+func (d *DB) ListProxyNodesByGroup(group string) ([]ProxyNodeRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT id, url, protocol, label, COALESCE(group_name, 'default'), is_active, fail_count, success_count, avg_latency_ms, last_checked, created_at, updated_at FROM proxy_nodes WHERE group_name = ? ORDER BY is_active DESC, avg_latency_ms ASC", group)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ProxyNodeRecord
+	for rows.Next() {
+		var n ProxyNodeRecord
+		var activeInt int
+		if err := rows.Scan(&n.ID, &n.URL, &n.Protocol, &n.Label, &n.GroupName, &activeInt, &n.FailCount, &n.SuccessCount, &n.AvgLatencyMs, &n.LastChecked, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			return nil, err
+		}
+		n.IsActive = activeInt == 1
+		list = append(list, n)
+	}
+	return list, nil
+}
+
+func (d *DB) ListProxyGroups() ([]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT DISTINCT COALESCE(group_name, 'default') FROM proxy_nodes ORDER BY group_name ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var groups []string
+	for rows.Next() {
+		var g string
+		if err := rows.Scan(&g); err == nil && g != "" {
+			groups = append(groups, g)
+		}
+	}
+	if len(groups) == 0 {
+		groups = []string{"default"}
+	}
+	return groups, nil
+}
+
+func (d *DB) GetProxyNode(id string) (*ProxyNodeRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var n ProxyNodeRecord
+	var activeInt int
+	err := d.db.QueryRow("SELECT id, url, protocol, label, COALESCE(group_name, 'default'), is_active, fail_count, success_count, avg_latency_ms, last_checked, created_at, updated_at FROM proxy_nodes WHERE id = ?", id).
+		Scan(&n.ID, &n.URL, &n.Protocol, &n.Label, &n.GroupName, &activeInt, &n.FailCount, &n.SuccessCount, &n.AvgLatencyMs, &n.LastChecked, &n.CreatedAt, &n.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	n.IsActive = activeInt == 1
+	return &n, nil
+}
+
+func (d *DB) SaveProxyNode(n *ProxyNodeRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if n.ID == "" {
+		n.ID = uuid.New().String()[:8]
+	}
+	if n.Protocol == "" {
+		n.Protocol = "http"
+	}
+	if n.GroupName == "" {
+		n.GroupName = "default"
+	}
+	activeInt := 0
+	if n.IsActive {
+		activeInt = 1
+	}
+
+	query := `
+	INSERT INTO proxy_nodes (id, url, protocol, label, group_name, is_active, fail_count, success_count, avg_latency_ms, last_checked, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(id) DO UPDATE SET
+		url=excluded.url,
+		protocol=excluded.protocol,
+		label=excluded.label,
+		group_name=excluded.group_name,
+		is_active=excluded.is_active,
+		fail_count=excluded.fail_count,
+		success_count=excluded.success_count,
+		avg_latency_ms=excluded.avg_latency_ms,
+		last_checked=excluded.last_checked,
+		updated_at=CURRENT_TIMESTAMP
+	`
+	_, err := d.db.Exec(query, n.ID, n.URL, n.Protocol, n.Label, n.GroupName, activeInt, n.FailCount, n.SuccessCount, n.AvgLatencyMs, n.LastChecked)
+	return err
+}
+
+func (d *DB) SaveBatchProxies(nodes []*ProxyNodeRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO proxy_nodes (id, url, protocol, label, group_name, is_active, fail_count, success_count, avg_latency_ms, last_checked, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(id) DO UPDATE SET
+			url=excluded.url,
+			protocol=excluded.protocol,
+			label=excluded.label,
+			group_name=excluded.group_name,
+			is_active=excluded.is_active,
+			updated_at=CURRENT_TIMESTAMP
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, n := range nodes {
+		if n.ID == "" {
+			n.ID = uuid.New().String()[:8]
+		}
+		if n.Protocol == "" {
+			n.Protocol = "http"
+		}
+		if n.GroupName == "" {
+			n.GroupName = "default"
+		}
+		activeInt := 0
+		if n.IsActive {
+			activeInt = 1
+		}
+		if _, err := stmt.Exec(n.ID, n.URL, n.Protocol, n.Label, n.GroupName, activeInt, n.FailCount, n.SuccessCount, n.AvgLatencyMs, n.LastChecked); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (d *DB) ToggleProxyGroup(group string, enable bool) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	activeInt := 0
+	if enable {
+		activeInt = 1
+	}
+	_, err := d.db.Exec("UPDATE proxy_nodes SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE group_name = ?", activeInt, group)
+	return err
+}
+
+func (d *DB) DeleteProxyGroup(group string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM proxy_nodes WHERE group_name = ?", group)
+	return err
+}
+
+func (d *DB) DeleteProxyNode(id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM proxy_nodes WHERE id = ?", id)
+	return err
+}
+
+func (d *DB) UpdateProxyStats(id string, success bool, latencyMs int) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	now := time.Now()
+	if success {
+		query := `
+		UPDATE proxy_nodes 
+		SET success_count = success_count + 1,
+		    avg_latency_ms = CASE WHEN avg_latency_ms = 0 THEN ? ELSE (avg_latency_ms * 3 + ?) / 4 END,
+		    last_checked = ?,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+		`
+		_, err := d.db.Exec(query, latencyMs, latencyMs, now, id)
+		return err
+	}
+
+	query := `
+	UPDATE proxy_nodes 
+	SET fail_count = fail_count + 1,
+	    last_checked = ?,
+	    updated_at = CURRENT_TIMESTAMP
+	WHERE id = ?
+	`
+	_, err := d.db.Exec(query, now, id)
+	return err
+}
+
 // --- Audit Log Operations ---
 
 func (d *DB) InsertAuditLog(l *AuditLogRecord) error {
@@ -770,21 +1216,22 @@ func (d *DB) InsertAuditLog(l *AuditLogRecord) error {
 	}
 
 	query := `
-	INSERT INTO audit_logs (id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message)
-	VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO audit_logs (id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, total_tokens, tokens_saved, proxy_used, latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message)
+	VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
-	_, err := d.db.Exec(query, l.ID, l.ChannelType, l.ChannelID, l.ChatID, l.UserID, l.UserName, l.Provider, l.Model, l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.LatencyMs, l.CostUSD, l.ToolsCalled, l.ClientRequest, l.SystemPrompt, l.FullRequestPayload, l.ProviderResponse, l.Status, l.ErrorMessage)
+	_, err := d.db.Exec(query, l.ID, l.ChannelType, l.ChannelID, l.ChatID, l.UserID, l.UserName, l.Provider, l.Model, l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.TokensSaved, l.ProxyUsed, l.LatencyMs, l.CostUSD, l.ToolsCalled, l.ClientRequest, l.SystemPrompt, l.FullRequestPayload, l.ProviderResponse, l.Status, l.ErrorMessage)
 	return err
 }
 
 type StatsSummary struct {
-	TotalRequests int
-	TotalTokens   int
-	PromptTokens  int
-	CompTokens    int
-	TotalCost     float64
-	AvgLatencyMs  int
-	ErrorCount    int
+	TotalRequests    int
+	TotalTokens      int
+	TotalTokensSaved int
+	PromptTokens     int
+	CompTokens       int
+	TotalCost        float64
+	AvgLatencyMs     int
+	ErrorCount       int
 }
 
 func (d *DB) GetStatsSummary(since time.Time) (*StatsSummary, error) {
@@ -800,6 +1247,7 @@ func (d *DB) GetStatsSummary(since time.Time) (*StatsSummary, error) {
 	SELECT 
 		COUNT(*),
 		COALESCE(SUM(total_tokens), 0),
+		COALESCE(SUM(tokens_saved), 0),
 		COALESCE(SUM(prompt_tokens), 0),
 		COALESCE(SUM(completion_tokens), 0),
 		COALESCE(SUM(cost_usd), 0.0),
@@ -811,7 +1259,7 @@ func (d *DB) GetStatsSummary(since time.Time) (*StatsSummary, error) {
 	row := d.db.QueryRow(query, sinceStr)
 	var s StatsSummary
 	var avgLatency float64
-	if err := row.Scan(&s.TotalRequests, &s.TotalTokens, &s.PromptTokens, &s.CompTokens, &s.TotalCost, &avgLatency, &s.ErrorCount); err != nil {
+	if err := row.Scan(&s.TotalRequests, &s.TotalTokens, &s.TotalTokensSaved, &s.PromptTokens, &s.CompTokens, &s.TotalCost, &avgLatency, &s.ErrorCount); err != nil {
 		return nil, err
 	}
 	s.AvgLatencyMs = int(avgLatency)
@@ -822,7 +1270,7 @@ func (d *DB) GetRecentAuditLogs(limit int) ([]AuditLogRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	query := "SELECT id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message FROM audit_logs ORDER BY timestamp DESC LIMIT ?"
+	query := "SELECT id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, total_tokens, COALESCE(tokens_saved, 0), COALESCE(proxy_used, ''), latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message FROM audit_logs ORDER BY timestamp DESC LIMIT ?"
 	rows, err := d.db.Query(query, limit)
 	if err != nil {
 		return nil, err
@@ -832,7 +1280,7 @@ func (d *DB) GetRecentAuditLogs(limit int) ([]AuditLogRecord, error) {
 	var logs []AuditLogRecord
 	for rows.Next() {
 		var l AuditLogRecord
-		if err := rows.Scan(&l.ID, &l.Timestamp, &l.ChannelType, &l.ChannelID, &l.ChatID, &l.UserID, &l.UserName, &l.Provider, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.LatencyMs, &l.CostUSD, &l.ToolsCalled, &l.ClientRequest, &l.SystemPrompt, &l.FullRequestPayload, &l.ProviderResponse, &l.Status, &l.ErrorMessage); err != nil {
+		if err := rows.Scan(&l.ID, &l.Timestamp, &l.ChannelType, &l.ChannelID, &l.ChatID, &l.UserID, &l.UserName, &l.Provider, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.TokensSaved, &l.ProxyUsed, &l.LatencyMs, &l.CostUSD, &l.ToolsCalled, &l.ClientRequest, &l.SystemPrompt, &l.FullRequestPayload, &l.ProviderResponse, &l.Status, &l.ErrorMessage); err != nil {
 			return nil, err
 		}
 		logs = append(logs, l)
@@ -844,11 +1292,11 @@ func (d *DB) GetAuditLogByID(id string) (*AuditLogRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	query := "SELECT id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message FROM audit_logs WHERE id = ?"
+	query := "SELECT id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, total_tokens, COALESCE(tokens_saved, 0), COALESCE(proxy_used, ''), latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message FROM audit_logs WHERE id = ?"
 	row := d.db.QueryRow(query, id)
 
 	var l AuditLogRecord
-	if err := row.Scan(&l.ID, &l.Timestamp, &l.ChannelType, &l.ChannelID, &l.ChatID, &l.UserID, &l.UserName, &l.Provider, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.LatencyMs, &l.CostUSD, &l.ToolsCalled, &l.ClientRequest, &l.SystemPrompt, &l.FullRequestPayload, &l.ProviderResponse, &l.Status, &l.ErrorMessage); err != nil {
+	if err := row.Scan(&l.ID, &l.Timestamp, &l.ChannelType, &l.ChannelID, &l.ChatID, &l.UserID, &l.UserName, &l.Provider, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.TokensSaved, &l.ProxyUsed, &l.LatencyMs, &l.CostUSD, &l.ToolsCalled, &l.ClientRequest, &l.SystemPrompt, &l.FullRequestPayload, &l.ProviderResponse, &l.Status, &l.ErrorMessage); err != nil {
 		return nil, err
 	}
 	return &l, nil

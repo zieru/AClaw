@@ -16,19 +16,32 @@ import (
 // AnthropicProvider handles Anthropic Claude messages API
 type AnthropicProvider struct {
 	name         string
-	apiKey       string
+	keyPool      *KeyPool
 	defaultModel string
+	models       []string
 	client       *http.Client
 }
 
 func NewAnthropicProvider(name, apiKey, defaultModel string) *AnthropicProvider {
+	var keys []string
+	if apiKey != "" {
+		keys = []string{apiKey}
+	}
+	return NewAnthropicProviderWithKeys(name, keys, "round-robin", defaultModel, nil)
+}
+
+func NewAnthropicProviderWithKeys(name string, keys []string, keyStrategy string, defaultModel string, models []string) *AnthropicProvider {
 	if defaultModel == "" {
 		defaultModel = "claude-3-5-sonnet-20241022"
 	}
+	if len(models) == 0 {
+		models = []string{"claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"}
+	}
 	return &AnthropicProvider{
 		name:         name,
-		apiKey:       apiKey,
+		keyPool:      NewKeyPool(keys, keyStrategy),
 		defaultModel: defaultModel,
+		models:       models,
 		client:       &http.Client{Timeout: 90 * time.Second},
 	}
 }
@@ -36,6 +49,14 @@ func NewAnthropicProvider(name, apiKey, defaultModel string) *AnthropicProvider 
 func (p *AnthropicProvider) Name() string         { return p.name }
 func (p *AnthropicProvider) Type() string         { return "anthropic" }
 func (p *AnthropicProvider) DefaultModel() string { return p.defaultModel }
+func (p *AnthropicProvider) Models() []string     { return p.models }
+func (p *AnthropicProvider) KeyPool() *KeyPool    { return p.keyPool }
+
+func (p *AnthropicProvider) SetHTTPClient(client interface{}) {
+	if c, ok := client.(*http.Client); ok && c != nil {
+		p.client = c
+	}
+}
 
 type anthropicToolDef struct {
 	Name        string                 `json:"name"`
@@ -170,28 +191,68 @@ func (p *AnthropicProvider) GenerateChat(ctx context.Context, req ChatRequest) (
 		return nil, fmt.Errorf("failed to marshal anthropic payload: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewBuffer(payloadBytes))
-	if err != nil {
-		return nil, err
+	keyCount := p.keyPool.Count()
+	if keyCount == 0 {
+		keyCount = 1
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", p.apiKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	var lastErr error
+	var respBytes []byte
 
-	httpResp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("anthropic api call failed: %w", err)
+	for attempt := 0; attempt < keyCount; attempt++ {
+		apiKey := p.keyPool.GetNextKey()
+
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewBuffer(payloadBytes))
+		if err != nil {
+			return nil, err
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("anthropic-version", "2023-06-01")
+		if apiKey != "" {
+			httpReq.Header.Set("x-api-key", apiKey)
+		}
+
+		httpResp, err := p.client.Do(httpReq)
+		if err != nil {
+			if apiKey != "" {
+				p.keyPool.MarkError(apiKey, false)
+			}
+			lastErr = fmt.Errorf("anthropic api call failed: %w", err)
+			continue
+		}
+
+		respBytes, err = io.ReadAll(httpResp.Body)
+		httpResp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read response: %w", err)
+			continue
+		}
+
+		if httpResp.StatusCode == 429 || httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
+			if apiKey != "" {
+				p.keyPool.MarkError(apiKey, httpResp.StatusCode == 429)
+			}
+			lastErr = fmt.Errorf("anthropic api error (%d): %s", httpResp.StatusCode, string(respBytes))
+			if attempt < keyCount-1 {
+				continue // retry with next key
+			}
+			return nil, lastErr
+		}
+
+		if httpResp.StatusCode >= 400 {
+			return nil, fmt.Errorf("anthropic api error (%d): %s", httpResp.StatusCode, string(respBytes))
+		}
+
+		if apiKey != "" {
+			p.keyPool.MarkSuccess(apiKey)
+		}
+		lastErr = nil
+		break
 	}
-	defer httpResp.Body.Close()
 
-	respBytes, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if httpResp.StatusCode >= 400 {
-		return nil, fmt.Errorf("anthropic api error (%d): %s", httpResp.StatusCode, string(respBytes))
+	if lastErr != nil {
+		return nil, lastErr
 	}
 
 	var respBody anthropicRespBody

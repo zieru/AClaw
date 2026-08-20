@@ -10,6 +10,7 @@ import (
 	"goassistant/internal/memory"
 	"goassistant/internal/provider"
 	"goassistant/internal/storage"
+	"goassistant/internal/tokensaver"
 	"goassistant/internal/tools"
 )
 
@@ -62,6 +63,7 @@ type AgentResponse struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	TokensSaved      int
 	Latency          time.Duration
 	ProviderUsed     string
 	ModelUsed        string
@@ -172,15 +174,20 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	var totalPromptTokens int
 	var totalCompletionTokens int
 	var totalTokensUsed int
+	var totalTokensSaved int
 	var totalCostUSD float64
 	var lastModel string
 	var lastProviderName string
 
 	maxTurns := 5
 	for turn := 0; turn < maxTurns; turn++ {
+		// Run Token Saver RTK / Caveman compression pipeline
+		compressedMsgs, saverReport := tokensaver.CompressMessages(messages, policy.TokenSaverMode, policy.MaxTokens*4)
+		totalTokensSaved += saverReport.TokensSaved
+
 		chatReq := provider.ChatRequest{
 			Model:       policy.ModelOverride,
-			Messages:    messages,
+			Messages:    compressedMsgs,
 			Tools:       allowedTools,
 			Temperature: 0.7,
 			MaxTokens:   policy.MaxTokens,
@@ -189,7 +196,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		resp, err := o.providerManager.GenerateWithFallback(ctx, req.PreferredProv, chatReq)
 		if err != nil {
 			// Log failure to audit
-			fullPayloadJSON, _ := json.Marshal(messages)
+			fullPayloadJSON, _ := json.Marshal(compressedMsgs)
 			_ = o.db.InsertAuditLog(&storage.AuditLogRecord{
 				ChannelType:        req.ChannelType,
 				ChannelID:          req.ChannelID,
@@ -198,6 +205,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 				UserName:           req.UserName,
 				Provider:           req.PreferredProv,
 				Model:              policy.ModelOverride,
+				TokensSaved:        totalTokensSaved,
 				LatencyMs:          int(time.Since(start).Milliseconds()),
 				ClientRequest:      req.UserPrompt,
 				SystemPrompt:       sysPrompt,
@@ -239,11 +247,14 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 				toolOut = fmt.Sprintf("Error eksekusi tool %s: %v", tc.Name, toolErr)
 			}
 
+			// Pre-compress tool output before appending to message history
+			compressedToolOut := tokensaver.CompressContent(toolOut, policy.TokenSaverMode)
+
 			toolMsg := provider.ChatMessage{
 				Role:       provider.RoleTool,
 				Name:       tc.Name,
 				ToolCallID: tc.ID,
-				Content:    toolOut,
+				Content:    compressedToolOut,
 			}
 			messages = append(messages, toolMsg)
 		}
@@ -276,6 +287,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		PromptTokens:       totalPromptTokens,
 		CompletionTokens:   totalCompletionTokens,
 		TotalTokens:        totalTokensUsed,
+		TokensSaved:        totalTokensSaved,
 		LatencyMs:          int(latency.Milliseconds()),
 		CostUSD:            totalCostUSD,
 		ToolsCalled:        string(toolsJSON),
@@ -288,7 +300,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 
 	// 12. Format footer according to policy
 	cleanText := strings.TrimSpace(finalContent)
-	footer := FormatFooter(policy.FooterMode, totalPromptTokens, totalCompletionTokens, totalTokensUsed, latency, lastModel, lastProviderName, allToolsCalled)
+	footer := FormatFooter(policy.FooterMode, totalPromptTokens, totalCompletionTokens, totalTokensUsed, totalTokensSaved, latency, lastModel, lastProviderName, allToolsCalled)
 	finalText := cleanText
 	if footer != "" {
 		finalText = finalText + "\n\n" + footer
@@ -302,6 +314,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		PromptTokens:     totalPromptTokens,
 		CompletionTokens: totalCompletionTokens,
 		TotalTokens:      totalTokensUsed,
+		TokensSaved:      totalTokensSaved,
 		Latency:          latency,
 		ProviderUsed:     lastProviderName,
 		ModelUsed:        lastModel,
@@ -309,12 +322,15 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 }
 
 // FormatFooter formats the footer according to policy mode ('off', 'tokens', 'full')
-func FormatFooter(mode string, promptTokens, completionTokens, totalTokens int, latency time.Duration, model, providerName string, toolsCalled []string) string {
+func FormatFooter(mode string, promptTokens, completionTokens, totalTokens, tokensSaved int, latency time.Duration, model, providerName string, toolsCalled []string) string {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch mode {
 	case "tokens":
 		if totalTokens <= 0 {
 			return ""
+		}
+		if tokensSaved > 0 {
+			return fmt.Sprintf("🪙 %s tokens (🌿 hemat: %s)", formatThousands(totalTokens), formatThousands(tokensSaved))
 		}
 		return fmt.Sprintf("🪙 %s tokens", formatThousands(totalTokens))
 
@@ -332,9 +348,17 @@ func FormatFooter(mode string, promptTokens, completionTokens, totalTokens int, 
 		// Tokens
 		if totalTokens > 0 {
 			if promptTokens > 0 && completionTokens > 0 {
-				parts = append(parts, fmt.Sprintf("🪙 %s (in: %s / out: %s)", formatThousands(totalTokens), formatThousands(promptTokens), formatThousands(completionTokens)))
+				tokStr := fmt.Sprintf("🪙 %s (in: %s / out: %s)", formatThousands(totalTokens), formatThousands(promptTokens), formatThousands(completionTokens))
+				if tokensSaved > 0 {
+					tokStr += fmt.Sprintf(" • 🌿 hemat %s", formatThousands(tokensSaved))
+				}
+				parts = append(parts, tokStr)
 			} else {
-				parts = append(parts, fmt.Sprintf("🪙 %s tokens", formatThousands(totalTokens)))
+				tokStr := fmt.Sprintf("🪙 %s tokens", formatThousands(totalTokens))
+				if tokensSaved > 0 {
+					tokStr += fmt.Sprintf(" • 🌿 hemat %s", formatThousands(tokensSaved))
+				}
+				parts = append(parts, tokStr)
 			}
 		}
 

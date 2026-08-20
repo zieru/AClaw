@@ -3,9 +3,11 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"goassistant/internal/storage"
 	"goassistant/internal/tools"
 )
 
@@ -62,14 +64,18 @@ type Provider interface {
 	Name() string
 	Type() string
 	DefaultModel() string
+	Models() []string
 	GenerateChat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
+	SetHTTPClient(client interface{})
 }
 
-// Manager coordinates multiple providers, selection, and fallbacks
+// Manager coordinates multiple providers, selection, model routing, combos, and fallbacks
 type Manager struct {
-	mu        sync.RWMutex
-	providers map[string]Provider
-	order     []string // Priority order
+	mu            sync.RWMutex
+	providers     map[string]Provider
+	order         []string // Priority order
+	combos        map[string]*storage.ModelComboRecord
+	defaultClient interface{}
 }
 
 var globalManager *Manager
@@ -80,17 +86,34 @@ func GetManager() *Manager {
 	managerOnce.Do(func() {
 		globalManager = &Manager{
 			providers: make(map[string]Provider),
+			combos:    make(map[string]*storage.ModelComboRecord),
 		}
 	})
 	return globalManager
+}
+
+// SetDefaultHTTPClient sets the proxy pool or custom HTTP transport client on all providers
+func (m *Manager) SetDefaultHTTPClient(client interface{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.defaultClient = client
+	for _, p := range m.providers {
+		if setter, ok := p.(interface{ SetHTTPClient(interface{}) }); ok {
+			setter.SetHTTPClient(client)
+		}
+	}
 }
 
 // Register adds or updates a provider
 func (m *Manager) Register(p Provider, priority int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.defaultClient != nil {
+		if setter, ok := p.(interface{ SetHTTPClient(interface{}) }); ok {
+			setter.SetHTTPClient(m.defaultClient)
+		}
+	}
 	m.providers[p.Name()] = p
-	// Recompute order if needed
 	m.updateOrderLocked()
 }
 
@@ -108,6 +131,39 @@ func (m *Manager) updateOrderLocked() {
 		list = append(list, k)
 	}
 	m.order = list
+}
+
+// RegisterCombo registers a multi-provider fallback combo
+func (m *Manager) RegisterCombo(c *storage.ModelComboRecord) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.combos[strings.ToLower(c.Name)] = c
+}
+
+// UnregisterCombo removes a combo
+func (m *Manager) UnregisterCombo(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.combos, strings.ToLower(name))
+}
+
+// GetCombo retrieves a combo by name
+func (m *Manager) GetCombo(name string) (*storage.ModelComboRecord, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	c, ok := m.combos[strings.ToLower(name)]
+	return c, ok
+}
+
+// ListCombos returns all registered combos
+func (m *Manager) ListCombos() []*storage.ModelComboRecord {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var list []*storage.ModelComboRecord
+	for _, c := range m.combos {
+		list = append(list, c)
+	}
+	return list
 }
 
 // Get finds a provider by name
@@ -131,26 +187,89 @@ func (m *Manager) ListAll() []Provider {
 	return list
 }
 
-// GenerateWithFallback tries the preferred provider first, and falls back if error
+// GenerateWithFallback executes chat with 9Router Smart Routing, Combo resolution, and Failsafe Fallbacks
 func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string, req ChatRequest) (*ChatResponse, error) {
 	m.mu.RLock()
-	providersList := make([]Provider, 0, len(m.providers))
-	if pref, ok := m.providers[preferredName]; ok {
-		providersList = append(providersList, pref)
-	}
-	for _, p := range m.providers {
-		if p.Name() != preferredName {
-			providersList = append(providersList, p)
+	defer m.mu.RUnlock()
+
+	// 1. Check if model or preferredName is a registered Combo (e.g. "combo:smart" or "smart")
+	comboName := strings.ToLower(strings.TrimPrefix(req.Model, "combo:"))
+	if combo, ok := m.combos[comboName]; ok && combo.IsActive && len(combo.Targets) > 0 {
+		var lastErr error
+		for _, target := range combo.Targets {
+			p, exists := m.providers[target.ProviderID]
+			if !exists {
+				// Try case-insensitive lookup
+				for _, prov := range m.providers {
+					if strings.EqualFold(prov.Name(), target.ProviderID) {
+						p = prov
+						exists = true
+						break
+					}
+				}
+			}
+			if !exists {
+				continue
+			}
+
+			targetReq := req
+			targetReq.Model = target.Model
+
+			resp, err := p.GenerateChat(ctx, targetReq)
+			if err == nil && resp != nil {
+				return resp, nil
+			}
+			lastErr = fmt.Errorf("[%s/%s] %w", target.ProviderID, target.Model, err)
+		}
+		if lastErr != nil {
+			return nil, fmt.Errorf("combo '%s' seluruh target gagal: %w", combo.Name, lastErr)
 		}
 	}
-	m.mu.RUnlock()
 
-	if len(providersList) == 0 {
+	// 2. Build candidate provider list based on requested model and preference
+	var primaryCandidates []Provider
+	var secondaryCandidates []Provider
+
+	for _, p := range m.providers {
+		if req.Model != "" {
+			supportsModel := false
+			if strings.EqualFold(p.DefaultModel(), req.Model) {
+				supportsModel = true
+			} else {
+				for _, mod := range p.Models() {
+					if strings.EqualFold(mod, req.Model) {
+						supportsModel = true
+						break
+					}
+				}
+			}
+			if supportsModel {
+				if strings.EqualFold(p.Name(), preferredName) {
+					primaryCandidates = append([]Provider{p}, primaryCandidates...)
+				} else {
+					primaryCandidates = append(primaryCandidates, p)
+				}
+				continue
+			}
+		}
+
+		if strings.EqualFold(p.Name(), preferredName) {
+			secondaryCandidates = append([]Provider{p}, secondaryCandidates...)
+		} else {
+			secondaryCandidates = append(secondaryCandidates, p)
+		}
+	}
+
+	var executionList []Provider
+	executionList = append(executionList, primaryCandidates...)
+	executionList = append(executionList, secondaryCandidates...)
+
+	if len(executionList) == 0 {
 		return nil, fmt.Errorf("tidak ada provider AI yang aktif atau terdaftar")
 	}
 
 	var lastErr error
-	for _, p := range providersList {
+	for _, p := range executionList {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

@@ -35,6 +35,16 @@ type AppConfig struct {
 		MaxContextTurns int     `yaml:"max_context_turns"`
 		TokenBudget     int     `yaml:"token_budget"`
 	} `yaml:"defaults"`
+
+	ProxyPool struct {
+		Enabled        bool     `yaml:"enabled"`
+		Strategy       string   `yaml:"strategy"`
+		InitialProxies []string `yaml:"initial_proxies"`
+	} `yaml:"proxy_pool"`
+
+	TokenSaver struct {
+		DefaultMode string `yaml:"default_mode"` // off, auto, aggressive, caveman
+	} `yaml:"token_saver"`
 }
 
 var (
@@ -65,6 +75,9 @@ func Load(configPath string) (*AppConfig, error) {
 		cfg.Defaults.MaxTokens = 2048
 		cfg.Defaults.MaxContextTurns = 20
 		cfg.Defaults.TokenBudget = 8000
+		cfg.ProxyPool.Enabled = true
+		cfg.ProxyPool.Strategy = "round-robin"
+		cfg.TokenSaver.DefaultMode = "auto"
 
 		if configPath != "" {
 			if _, statErr := os.Stat(configPath); statErr != nil {

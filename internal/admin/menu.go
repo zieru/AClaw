@@ -9,8 +9,11 @@ func MainMenuKeyboard() *tele.ReplyMarkup {
 	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
 
 	btnProviders := menu.Data("🤖 Provider AI", "menu_providers")
+	btnCombos := menu.Data("🔀 Model Combos", "menu_combos")
 	btnChannels := menu.Data("📱 Channels (WA/TG)", "menu_channels")
-	btnLimits := menu.Data("🛡️ Pembatasan & Limits", "menu_limits")
+	btnProxy := menu.Data("🌐 Proxy Pool (9Router)", "menu_proxy")
+	btnTokenSaver := menu.Data("🌿 Token Saver (RTK)", "menu_tokensaver")
+	btnLimits := menu.Data("🛡️ Limits & Footer", "menu_limits")
 	btnMDFiles := menu.Data("📝 Manage .MD Bot", "menu_md")
 	btnCron := menu.Data("⏰ Cron Scheduler", "menu_cron")
 	btnMemory := menu.Data("🧠 Memory & Session", "menu_memory")
@@ -20,11 +23,13 @@ func MainMenuKeyboard() *tele.ReplyMarkup {
 	btnHelp := menu.Data("❓ Bantuan Command", "menu_help")
 
 	menu.Inline(
-		menu.Row(btnProviders, btnChannels),
-		menu.Row(btnLimits, btnTools),
-		menu.Row(btnMDFiles, btnCron),
-		menu.Row(btnMemory, btnStats),
-		menu.Row(btnBackup, btnHelp),
+		menu.Row(btnProviders, btnCombos),
+		menu.Row(btnChannels, btnTools),
+		menu.Row(btnProxy, btnTokenSaver),
+		menu.Row(btnLimits, btnMDFiles),
+		menu.Row(btnCron, btnMemory),
+		menu.Row(btnStats, btnBackup),
+		menu.Row(btnHelp),
 	)
 
 	return menu

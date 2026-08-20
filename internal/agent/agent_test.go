@@ -40,24 +40,27 @@ func TestMDLoaderAndPromptBuilder(t *testing.T) {
 
 func TestFormatFooter(t *testing.T) {
 	// Mode "off"
-	offFooter := FormatFooter("off", 100, 50, 150, 500*1000*1000, "gpt-4o", "openai", nil)
+	offFooter := FormatFooter("off", 100, 50, 150, 0, 500*1000*1000, "gpt-4o", "openai", nil)
 	if offFooter != "" {
 		t.Fatalf("expected empty footer for mode 'off', got '%s'", offFooter)
 	}
 
 	// Mode "tokens"
-	tokensFooter := FormatFooter("tokens", 1000, 250, 1250, 500*1000*1000, "gpt-4o", "openai", nil)
-	if !strings.Contains(tokensFooter, "🪙 1,250 tokens") {
-		t.Fatalf("expected '🪙 1,250 tokens', got '%s'", tokensFooter)
+	tokensFooter := FormatFooter("tokens", 1000, 250, 1250, 200, 500*1000*1000, "gpt-4o", "openai", nil)
+	if !strings.Contains(tokensFooter, "🪙 1,250 tokens") || !strings.Contains(tokensFooter, "hemat: 200") {
+		t.Fatalf("expected '🪙 1,250 tokens (🌿 hemat: 200)', got '%s'", tokensFooter)
 	}
 
 	// Mode "full"
-	fullFooter := FormatFooter("full", 1120, 300, 1420, 850*1000*1000, "gpt-4o-mini", "9router", []string{"search_web", "read_db"})
+	fullFooter := FormatFooter("full", 1120, 300, 1420, 350, 850*1000*1000, "gpt-4o-mini", "9router", []string{"search_web", "read_db"})
 	if !strings.Contains(fullFooter, "⚡ 850ms") {
 		t.Errorf("expected latency '⚡ 850ms' in full footer, got '%s'", fullFooter)
 	}
 	if !strings.Contains(fullFooter, "🪙 1,420 (in: 1,120 / out: 300)") {
 		t.Errorf("expected token breakdown in full footer, got '%s'", fullFooter)
+	}
+	if !strings.Contains(fullFooter, "hemat 350") {
+		t.Errorf("expected 'hemat 350' in full footer, got '%s'", fullFooter)
 	}
 	if !strings.Contains(fullFooter, "🔧 2 tools") {
 		t.Errorf("expected tools count in full footer, got '%s'", fullFooter)

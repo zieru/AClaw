@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS channel_policies (
     compaction_threshold INTEGER NOT NULL DEFAULT 15,
     model_override TEXT NOT NULL DEFAULT '',
     footer_mode TEXT NOT NULL DEFAULT 'off',
+    token_saver_mode TEXT NOT NULL DEFAULT 'auto', -- 'off', 'auto', 'aggressive', 'caveman'
+    proxy_pool_enabled INTEGER NOT NULL DEFAULT 1,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(scope, scope_id)
 );
@@ -28,10 +30,42 @@ CREATE TABLE IF NOT EXISTS providers (
     type TEXT NOT NULL, -- 9router, openai, anthropic, gemini, groq, deepseek, ollama, custom
     base_url TEXT NOT NULL DEFAULT '',
     api_key TEXT NOT NULL DEFAULT '',
+    api_keys TEXT NOT NULL DEFAULT '[]', -- JSON array of multiple API keys
     default_model TEXT NOT NULL DEFAULT '',
+    models TEXT NOT NULL DEFAULT '[]', -- JSON array of supported model names
+    strategy TEXT NOT NULL DEFAULT 'failsafe', -- failsafe, round-robin, random
+    key_strategy TEXT NOT NULL DEFAULT 'round-robin', -- round-robin, random, failover
+    proxy_enabled INTEGER NOT NULL DEFAULT 0,
+    proxy_group TEXT NOT NULL DEFAULT '',
     is_active INTEGER NOT NULL DEFAULT 1,
     priority INTEGER NOT NULL DEFAULT 10,
     settings_json TEXT NOT NULL DEFAULT '{}',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS model_combos (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    targets_json TEXT NOT NULL DEFAULT '[]', -- [{"provider_id":"openai","model":"gpt-4o","priority":1}, ...]
+    strategy TEXT NOT NULL DEFAULT 'failsafe', -- failsafe, round-robin, random
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS proxy_nodes (
+    id TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    protocol TEXT NOT NULL DEFAULT 'http', -- http, https, socks5
+    label TEXT NOT NULL DEFAULT '',
+    group_name TEXT NOT NULL DEFAULT 'default',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+    last_checked DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -120,6 +154,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     prompt_tokens INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
     total_tokens INTEGER NOT NULL DEFAULT 0,
+    tokens_saved INTEGER NOT NULL DEFAULT 0,
+    proxy_used TEXT NOT NULL DEFAULT '',
     latency_ms INTEGER NOT NULL DEFAULT 0,
     cost_usd REAL NOT NULL DEFAULT 0.0,
     tools_called TEXT NOT NULL DEFAULT '[]',

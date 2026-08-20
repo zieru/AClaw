@@ -18,12 +18,14 @@ import (
 	"goassistant/internal/cron"
 	"goassistant/internal/memory"
 	"goassistant/internal/provider"
+	"goassistant/internal/proxy"
 	"goassistant/internal/storage"
 	"goassistant/internal/tools"
+	"time"
 )
 
 var (
-	version   = "1.0.0"
+	version   = "1.1.0"
 	buildDate = "2026-08-20"
 )
 
@@ -70,6 +72,14 @@ func main() {
 	mdLoader := agent.NewMDLoader(cfg.Server.MDDir)
 	promptBld := agent.NewPromptBuilder(mdLoader)
 
+	// Initialize Proxy Pool (Built-in 9Router Engine)
+	proxyPool := proxy.NewPool(db, cfg.ProxyPool.Enabled, cfg.ProxyPool.Strategy)
+	for _, rawProxy := range cfg.ProxyPool.InitialProxies {
+		_, _ = proxyPool.AddNode(rawProxy, "")
+	}
+	provMgr.SetDefaultHTTPClient(proxyPool.NewHTTPClient(90 * time.Second))
+	log.Printf("🌐 9Router Proxy Pool diinisialisasi (Strategi: %s, Status: %v)", cfg.ProxyPool.Strategy, cfg.ProxyPool.Enabled)
+
 	// 4. Seed Default Global Policy if not exists
 	if globPol, _ := db.GetPolicy("global", "system"); globPol == nil {
 		_ = db.SavePolicy(&storage.PolicyRecord{
@@ -80,6 +90,8 @@ func main() {
 			MaxHistoryTurns:     cfg.Defaults.MaxContextTurns,
 			AutoCompaction:      true,
 			CompactionThreshold: 15,
+			TokenSaverMode:      cfg.TokenSaver.DefaultMode,
+			ProxyPoolEnabled:    cfg.ProxyPool.Enabled,
 		})
 	}
 
@@ -92,29 +104,52 @@ func main() {
 			Type:         "9router",
 			BaseURL:      "https://api.9router.com/v1",
 			APIKey:       os.Getenv("NINEROUTER_API_KEY"),
+			APIKeys:      []string{os.Getenv("NINEROUTER_API_KEY")},
 			DefaultModel: "gpt-4o-mini",
+			Models:       []string{"gpt-4o-mini", "gpt-4o", "deepseek-chat", "claude-3-5-sonnet"},
+			KeyStrategy:  "round-robin",
+			Strategy:     "failsafe",
 			IsActive:     true,
 			Priority:     1,
 		}
 		_ = db.SaveProvider(default9Router)
-		provMgr.Register(provider.NewOpenAIProvider(default9Router.Name, default9Router.Type, default9Router.BaseURL, default9Router.APIKey, default9Router.DefaultModel), 1)
+		provMgr.Register(provider.NewOpenAIProviderWithKeys(default9Router.Name, default9Router.Type, default9Router.BaseURL, default9Router.APIKeys, default9Router.KeyStrategy, default9Router.DefaultModel, default9Router.Models), 1)
 		log.Printf("🤖 Provider default 9Router didaftarkan (%s)", default9Router.DefaultModel)
 	} else {
 		for _, p := range dbProviders {
 			if !p.IsActive {
 				continue
 			}
+			keys := p.APIKeys
+			if len(keys) == 0 && p.APIKey != "" {
+				keys = []string{p.APIKey}
+			}
+			models := p.Models
+			if len(models) == 0 && p.DefaultModel != "" {
+				models = []string{p.DefaultModel}
+			}
+
 			var inst provider.Provider
 			switch p.Type {
 			case "gemini":
-				inst = provider.NewGeminiProvider(p.Name, p.APIKey, p.DefaultModel)
+				inst = provider.NewGeminiProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
 			case "anthropic":
-				inst = provider.NewAnthropicProvider(p.Name, p.APIKey, p.DefaultModel)
+				inst = provider.NewAnthropicProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
 			default:
-				inst = provider.NewOpenAIProvider(p.Name, p.Type, p.BaseURL, p.APIKey, p.DefaultModel)
+				inst = provider.NewOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
 			}
 			provMgr.Register(inst, p.Priority)
-			log.Printf("🤖 Provider aktif: %s (Tipe: %s, Model: %s)", p.Name, p.Type, p.DefaultModel)
+			log.Printf("🤖 Provider aktif: %s (Tipe: %s, Default Model: %s, Keys: %d)", p.Name, p.Type, p.DefaultModel, len(keys))
+		}
+	}
+
+	// 5b. Load Registered Combos
+	dbCombos, _ := db.ListCombos()
+	for _, c := range dbCombos {
+		if c.IsActive {
+			comboCopy := c
+			provMgr.RegisterCombo(&comboCopy)
+			log.Printf("🔀 Combo aktif dimuat: %s (%d targets)", c.Name, len(c.Targets))
 		}
 	}
 
@@ -129,6 +164,10 @@ func main() {
 			continue
 		}
 		if ch.Type == "telegram" {
+			if ch.Identifier == cfg.AdminTelegram.BotToken {
+				log.Printf("ℹ️ Channel Telegram '%s' menggunakan token yang sama dengan Admin Control Plane (dikelola langsung oleh Admin Bot).", ch.Name)
+				continue
+			}
 			adapter, err := tgchannel.NewBotAdapter(ch.ID, ch.Name, ch.Identifier, orchestrator, db)
 			if err == nil {
 				activeChannels[ch.ID] = adapter
@@ -175,6 +214,7 @@ func main() {
 			provMgr,
 			memMgr,
 			sessMgr,
+			proxyPool,
 		)
 		if err != nil {
 			log.Printf("❌ Gagal memulai Telegram Admin Bot: %v", err)

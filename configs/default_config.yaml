@@ -17,3 +17,13 @@ defaults:
   max_tokens: 2048
   max_context_turns: 20
   token_budget: 8000
+
+# 9Router Built-in Engine Configurations
+proxy_pool:
+  enabled: true
+  strategy: "round-robin" # round-robin, least-errors, best-latency, random
+  initial_proxies: [] # Contoh: ["http://user:pass@127.0.0.1:8080", "socks5://127.0.0.1:1080"]
+
+token_saver:
+  default_mode: "auto" # auto (RTK), aggressive, caveman, off
+

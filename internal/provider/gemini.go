@@ -16,19 +16,32 @@ import (
 // GeminiProvider handles Google Gemini API
 type GeminiProvider struct {
 	name         string
-	apiKey       string
+	keyPool      *KeyPool
 	defaultModel string
+	models       []string
 	client       *http.Client
 }
 
 func NewGeminiProvider(name, apiKey, defaultModel string) *GeminiProvider {
+	var keys []string
+	if apiKey != "" {
+		keys = []string{apiKey}
+	}
+	return NewGeminiProviderWithKeys(name, keys, "round-robin", defaultModel, nil)
+}
+
+func NewGeminiProviderWithKeys(name string, keys []string, keyStrategy string, defaultModel string, models []string) *GeminiProvider {
 	if defaultModel == "" {
 		defaultModel = "gemini-2.0-flash"
 	}
+	if len(models) == 0 {
+		models = []string{"gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"}
+	}
 	return &GeminiProvider{
 		name:         name,
-		apiKey:       apiKey,
+		keyPool:      NewKeyPool(keys, keyStrategy),
 		defaultModel: defaultModel,
+		models:       models,
 		client:       &http.Client{Timeout: 90 * time.Second},
 	}
 }
@@ -36,6 +49,14 @@ func NewGeminiProvider(name, apiKey, defaultModel string) *GeminiProvider {
 func (p *GeminiProvider) Name() string         { return p.name }
 func (p *GeminiProvider) Type() string         { return "gemini" }
 func (p *GeminiProvider) DefaultModel() string { return p.defaultModel }
+func (p *GeminiProvider) Models() []string     { return p.models }
+func (p *GeminiProvider) KeyPool() *KeyPool    { return p.keyPool }
+
+func (p *GeminiProvider) SetHTTPClient(client interface{}) {
+	if c, ok := client.(*http.Client); ok && c != nil {
+		p.client = c
+	}
+}
 
 type geminiPart struct {
 	Text             string                 `json:"text,omitempty"`
@@ -189,26 +210,63 @@ func (p *GeminiProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		return nil, fmt.Errorf("failed to marshal gemini payload: %w", err)
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, p.apiKey)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payloadBytes))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("gemini api call failed: %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	respBytes, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+	keyCount := p.keyPool.Count()
+	if keyCount == 0 {
+		keyCount = 1
 	}
 
-	if httpResp.StatusCode >= 400 {
-		return nil, fmt.Errorf("gemini api error (%d): %s", httpResp.StatusCode, string(respBytes))
+	var lastErr error
+	var respBytes []byte
+
+	for attempt := 0; attempt < keyCount; attempt++ {
+		apiKey := p.keyPool.GetNextKey()
+		url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, apiKey)
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payloadBytes))
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		httpResp, err := p.client.Do(httpReq)
+		if err != nil {
+			if apiKey != "" {
+				p.keyPool.MarkError(apiKey, false)
+			}
+			lastErr = fmt.Errorf("gemini api call failed: %w", err)
+			continue
+		}
+
+		respBytes, err = io.ReadAll(httpResp.Body)
+		httpResp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read response: %w", err)
+			continue
+		}
+
+		if httpResp.StatusCode == 429 || httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
+			if apiKey != "" {
+				p.keyPool.MarkError(apiKey, httpResp.StatusCode == 429)
+			}
+			lastErr = fmt.Errorf("gemini api error (%d): %s", httpResp.StatusCode, string(respBytes))
+			if attempt < keyCount-1 {
+				continue // retry with next key
+			}
+			return nil, lastErr
+		}
+
+		if httpResp.StatusCode >= 400 {
+			return nil, fmt.Errorf("gemini api error (%d): %s", httpResp.StatusCode, string(respBytes))
+		}
+
+		if apiKey != "" {
+			p.keyPool.MarkSuccess(apiKey)
+		}
+		lastErr = nil
+		break
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
 	}
 
 	var respBody geminiRespBody
