@@ -116,11 +116,12 @@ func (a *BotAdapter) registerHandlers() {
 		})
 
 		if err != nil {
+			friendlyErr := agent.FormatUserFriendlyError(err)
 			if thinkingMsg != nil {
-				_, _ = a.bot.Edit(thinkingMsg, fmt.Sprintf("❌ Maaf, terjadi kesalahan: %v", err))
+				_, _ = a.bot.Edit(thinkingMsg, friendlyErr, tele.ModeHTML)
 				return nil
 			}
-			return c.Reply(fmt.Sprintf("❌ Maaf, terjadi kesalahan: %v", err))
+			return c.Reply(friendlyErr, tele.ModeHTML)
 		}
 
 		return sendOrEditResponse(c, thinkingMsg, resp.Text)
@@ -162,11 +163,12 @@ func (a *BotAdapter) registerHandlers() {
 		})
 
 		if err != nil {
+			friendlyErr := agent.FormatUserFriendlyError(err)
 			if thinkingMsg != nil {
-				_, _ = a.bot.Edit(thinkingMsg, fmt.Sprintf("❌ Error: %v", err))
+				_, _ = a.bot.Edit(thinkingMsg, friendlyErr, tele.ModeHTML)
 				return nil
 			}
-			return c.Reply(fmt.Sprintf("❌ Error: %v", err))
+			return c.Reply(friendlyErr, tele.ModeHTML)
 		}
 
 		return sendOrEditResponse(c, thinkingMsg, resp.Text)

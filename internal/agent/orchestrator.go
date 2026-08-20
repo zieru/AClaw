@@ -195,25 +195,75 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 
 		resp, err := o.providerManager.GenerateWithFallback(ctx, req.PreferredProv, chatReq)
 		if err != nil {
-			// Log failure to audit
-			fullPayloadJSON, _ := json.Marshal(compressedMsgs)
-			_ = o.db.InsertAuditLog(&storage.AuditLogRecord{
-				ChannelType:        req.ChannelType,
-				ChannelID:          req.ChannelID,
-				ChatID:             req.ChatID,
-				UserID:             req.UserID,
-				UserName:           req.UserName,
-				Provider:           req.PreferredProv,
-				Model:              policy.ModelOverride,
-				TokensSaved:        totalTokensSaved,
-				LatencyMs:          int(time.Since(start).Milliseconds()),
-				ClientRequest:      req.UserPrompt,
-				SystemPrompt:       sysPrompt,
-				FullRequestPayload: string(fullPayloadJSON),
-				Status:             "error",
-				ErrorMessage:       err.Error(),
-			})
-			return nil, err
+			// Check if error is timeout, context length exceeded, or network issue with long context
+			errStr := strings.ToLower(err.Error())
+			isContextOrTimeout := strings.Contains(errStr, "context deadline exceeded") ||
+				strings.Contains(errStr, "timeout") ||
+				strings.Contains(errStr, "context_length_exceeded") ||
+				strings.Contains(errStr, "maximum context length") ||
+				strings.Contains(errStr, "token limit") ||
+				strings.Contains(errStr, "rate limit")
+
+			// If error happened and we had history turns in the request, try auto-compacting and retrying once with minimal context
+			if isContextOrTimeout && len(history) > 0 {
+				if req.OnProgress != nil {
+					req.OnProgress("🧹 <i>Konteks percakapan penuh/timeout, merampingkan riwayat & mencoba ulang...</i>")
+				}
+
+				// Auto clean old session messages in DB (keep only the very latest 2 messages)
+				_ = o.db.TruncateOldMessages(session.ID, 2)
+				history = nil // Clear history from memory for this attempt
+
+				// Rebuild clean messages: system prompt + user prompt
+				messages = []provider.ChatMessage{
+					{
+						Role:    provider.RoleSystem,
+						Content: sysPrompt,
+					},
+					{
+						Role:    provider.RoleUser,
+						Content: req.UserPrompt,
+					},
+				}
+
+				retryCompressedMsgs, retrySaverReport := tokensaver.CompressMessages(messages, "aggressive", policy.MaxTokens*2)
+				totalTokensSaved += retrySaverReport.TokensSaved
+
+				retryChatReq := provider.ChatRequest{
+					Model:       policy.ModelOverride,
+					Messages:    retryCompressedMsgs,
+					Tools:       allowedTools,
+					Temperature: 0.7,
+					MaxTokens:   policy.MaxTokens,
+				}
+
+				// Fresh 2-minute context if original ctx was timed out
+				retryCtx, cancelRetry := context.WithTimeout(context.Background(), 2*time.Minute)
+				resp, err = o.providerManager.GenerateWithFallback(retryCtx, req.PreferredProv, retryChatReq)
+				cancelRetry()
+			}
+
+			if err != nil {
+				// Log failure to audit
+				fullPayloadJSON, _ := json.Marshal(compressedMsgs)
+				_ = o.db.InsertAuditLog(&storage.AuditLogRecord{
+					ChannelType:        req.ChannelType,
+					ChannelID:          req.ChannelID,
+					ChatID:             req.ChatID,
+					UserID:             req.UserID,
+					UserName:           req.UserName,
+					Provider:           req.PreferredProv,
+					Model:              policy.ModelOverride,
+					TokensSaved:        totalTokensSaved,
+					LatencyMs:          int(time.Since(start).Milliseconds()),
+					ClientRequest:      req.UserPrompt,
+					SystemPrompt:       sysPrompt,
+					FullRequestPayload: string(fullPayloadJSON),
+					Status:             "error",
+					ErrorMessage:       err.Error(),
+				})
+				return nil, err
+			}
 		}
 
 		totalPromptTokens += resp.PromptTokens
@@ -398,3 +448,26 @@ func formatThousands(n int) string {
 	}
 	return string(out)
 }
+
+// FormatUserFriendlyError converts internal technical error traces into clean, polite messages for end-users
+func FormatUserFriendlyError(err error) string {
+	if err == nil {
+		return ""
+	}
+	errStr := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(errStr, "context deadline exceeded") || strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline"):
+		return "⏳ <b>Waktu Tunggu Habis (Timeout)</b>\nServer AI membutuhkan waktu terlalu lama untuk memproses (beban server tinggi atau konteks terlalu panjang). Riwayat percakapan telah disederhanakan secara otomatis. Silakan coba kirim ulang pertanyaan Anda, atau gunakan <code>/reset</code> jika kendala berlanjut."
+	case strings.Contains(errStr, "context_length_exceeded") || strings.Contains(errStr, "maximum context length") || strings.Contains(errStr, "token limit"):
+		return "📏 <b>Batas Konteks Terlampaui</b>\nRiwayat percakapan melebihi kapasitas memori model AI. Riwayat telah dibersihkan otomatis. Silakan kirim ulang pertanyaan Anda."
+	case strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "429") || strings.Contains(errStr, "quota"):
+		return "⚠️ <b>Batas Kuota / Rate Limit</b>\nLayanan AI sedang mencapai batas frekuensi panggilan atau kuota provider telah habis. Silakan coba beberapa saat lagi atau hubungi admin."
+	case strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no such host") || strings.Contains(errStr, "dial tcp"):
+		return "🔌 <b>Koneksi Terputus</b>\nGagal terhubung ke endpoint server AI. Mohon periksa koneksi jaringan atau coba beberapa saat lagi."
+	case strings.Contains(errStr, "seluruh target gagal"):
+		return "❌ <b>Layanan AI Sedang Gangguan</b>\nTarget provider/model AI saat ini tidak dapat merespons. Silakan coba lagi nanti atau hubungi admin."
+	default:
+		return "❌ <b>Maaf, terjadi kendala teknis pada layanan AI.</b>\nSilakan coba lagi beberapa saat lagi atau gunakan <code>/reset</code> untuk memulai percakapan baru."
+	}
+}
+

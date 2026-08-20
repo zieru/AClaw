@@ -125,7 +125,13 @@ func (a *BridgeAdapter) HandleIncomingWebhook(w http.ResponseWriter, r *http.Req
 			AttachedFileMB: payload.FileSizeMB,
 		})
 
-		if err == nil && resp != nil && resp.Text != "" {
+		if err != nil {
+			friendlyErr := agent.FormatUserFriendlyError(err)
+			_ = a.SendMessage(chatID, friendlyErr)
+			return
+		}
+
+		if resp != nil && resp.Text != "" {
 			_ = a.SendMessage(chatID, resp.Text)
 		}
 	}()

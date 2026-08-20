@@ -153,7 +153,11 @@ func main() {
 		}
 	}
 
-	// 6. Initialize Orchestrator
+	// 6. Initialize Multi-Agent Delegation Tool & Orchestrator
+	subagentTool := agent.NewSubagentTool(promptBld, toolReg, provMgr)
+	toolReg.Register(subagentTool)
+	log.Printf("🤖 Multi-Agent Delegation Tool ('%s') didaftarkan", subagentTool.Name())
+
 	orchestrator := agent.NewOrchestrator(db, sessMgr, memMgr, promptBld, toolReg, provMgr)
 
 	// 7. Load and Initialize Active Channels

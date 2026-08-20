@@ -47,14 +47,13 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 		sb.WriteString("\n\n")
 	}
 
-	// 3. Load specific AGENTS.md role if requested
-	if ctx.AgentRole != "" && ctx.AgentRole != "default" {
-		agentsMD, err := pb.mdLoader.GetFile("AGENTS.md")
-		if err == nil && agentsMD != "" {
-			sb.WriteString(fmt.Sprintf("## Active Role: %s\n", ctx.AgentRole))
-			sb.WriteString(agentsMD)
-			sb.WriteString("\n\n")
-		}
+	// 3. Load AGENTS.md for Multi-Agent & Specialized Roles
+	agentsMD, err := pb.mdLoader.GetFile("AGENTS.md")
+	if err == nil && agentsMD != "" {
+		sb.WriteString("## Multi-Agent Delegation & Specialized Roles:\n")
+		sb.WriteString("Kamu dapat memecah masalah kompleks dan mendelegasikan sub-tugas ke sub-agen spesialis melalui tool `delegate_task` agar konteks tetap fokus dan tidak membengkak.\n")
+		sb.WriteString(agentsMD)
+		sb.WriteString("\n\n")
 	}
 
 	// 4. Injected Context & Memory
@@ -102,3 +101,25 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 
 	return rawPrompt, nil
 }
+
+// BuildSubagentPrompt constructs a dedicated, focused system prompt for a specialized subagent
+func (pb *PromptBuilder) BuildSubagentPrompt(role string) (string, error) {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("# Specialized Sub-Agent Role: %s\n", strings.ToUpper(role)))
+	sb.WriteString("Kamu adalah Sub-Agen Spesialis independen yang bertugas menyelesaikan satu sub-tugas tertentu dengan fokus penuh, cepat, dan presisi.\n\n")
+
+	agentsMD, err := pb.mdLoader.GetFile("AGENTS.md")
+	if err == nil && agentsMD != "" {
+		sb.WriteString("## Spesialisasi & Aturan Peran:\n")
+		sb.WriteString(agentsMD)
+		sb.WriteString("\n\n")
+	}
+
+	sb.WriteString("## Prinsip Kerja Sub-Agen:\n")
+	sb.WriteString("1. Fokus hanya pada instruksi tugas yang didelegasikan kepadamu.\n")
+	sb.WriteString("2. Gunakan data/konteks terisolasi yang diberikan tanpa memerlukan seluruh riwayat percakapan.\n")
+	sb.WriteString("3. Kembalikan hasil yang padat, akurat, solutif, dan terstruktur tanpa basa-basi pembuka yang berlebihan.\n")
+
+	return sb.String(), nil
+}
+

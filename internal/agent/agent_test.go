@@ -69,3 +69,57 @@ func TestFormatFooter(t *testing.T) {
 		t.Errorf("expected model name in full footer, got '%s'", fullFooter)
 	}
 }
+
+func TestSubagentPromptAndTool(t *testing.T) {
+	tempDir := t.TempDir()
+	agentsContent := "### 1. Agent: Coder (@coder)\n- Fokus: Menulis kode Go & debugging.\n### 2. Agent: Researcher (@researcher)\n- Fokus: Riset data."
+	_ = os.WriteFile(filepath.Join(tempDir, "AGENTS.md"), []byte(agentsContent), 0644)
+
+	loader := NewMDLoader(tempDir)
+	pb := NewPromptBuilder(loader)
+
+	// Test Subagent prompt building
+	subPrompt, err := pb.BuildSubagentPrompt("coder")
+	if err != nil {
+		t.Fatalf("unexpected error building subagent prompt: %v", err)
+	}
+	if !strings.Contains(subPrompt, "CODER") || !strings.Contains(subPrompt, "Menulis kode Go") {
+		t.Errorf("expected coder instructions in subagent prompt, got:\n%s", subPrompt)
+	}
+
+	// Test Subagent Tool Metadata
+	subTool := NewSubagentTool(pb, nil, nil)
+	if subTool.Name() != "delegate_task" {
+		t.Errorf("expected tool name 'delegate_task', got '%s'", subTool.Name())
+	}
+	params := subTool.Parameters()
+	if _, ok := params.Properties["instruction"]; !ok {
+		t.Errorf("expected parameter 'instruction' in schema")
+	}
+	if _, ok := params.Properties["role"]; !ok {
+		t.Errorf("expected parameter 'role' in schema")
+	}
+}
+
+func TestFormatUserFriendlyError(t *testing.T) {
+	errTimeout := &testCustomError{msg: "Post \"https://api.openai.com/v1\": context deadline exceeded"}
+	friendly := FormatUserFriendlyError(errTimeout)
+	if !strings.Contains(friendly, "Waktu Tunggu Habis (Timeout)") {
+		t.Errorf("expected friendly timeout message, got: %s", friendly)
+	}
+
+	errTarget := &testCustomError{msg: "combo 'default' seluruh target gagal: all models down"}
+	friendlyTarget := FormatUserFriendlyError(errTarget)
+	if !strings.Contains(friendlyTarget, "Layanan AI Sedang Gangguan") {
+		t.Errorf("expected friendly provider down message, got: %s", friendlyTarget)
+	}
+}
+
+type testCustomError struct {
+	msg string
+}
+
+func (e *testCustomError) Error() string {
+	return e.msg
+}
+
