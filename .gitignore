@@ -1,0 +1,50 @@
+# Binaries and executable files
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/goassistant
+/goassistant.exe
+
+# Build and distribution directories
+/dist/
+/bin/
+/build/
+
+# SQLite Databases & Runtime Data
+/data/*.db
+/data/*.db-journal
+/data/*.db-wal
+/data/*.db-shm
+*.sqlite
+*.sqlite3
+*.db
+
+# Logs
+/data/logs/
+*.log
+
+# Sensitive / Local Configurations
+.env
+.env.*
+configs/config.yaml
+*.local.yaml
+
+# IDE & Editor Files
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test & Coverage Outputs
+*.test
+*.out
+coverage.html

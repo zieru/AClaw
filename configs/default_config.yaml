@@ -1,0 +1,19 @@
+server:
+  data_dir: "./data"
+  db_path: "./data/goassistant.db"
+  md_dir: "./data/md"
+  log_dir: "./data/logs"
+  log_level: "info"
+
+admin_telegram:
+  bot_token: "5331591811:AAH3lr4DyWkmJJrmUM4EhWmlCErVuCU5Am0" # Masukkan Token Bot Telegram Admin di sini (didapat dari @BotFather)
+  allowed_user_ids: [] # Masukkan Telegram User ID Admin (contoh: [123456789]), kosongkan jika belum tahu
+  poll_timeout: 30
+
+defaults:
+  default_provider: "9router"
+  default_model: "gpt-4o-mini"
+  temperature: 0.7
+  max_tokens: 2048
+  max_context_turns: 20
+  token_budget: 8000
