@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"goassistant/internal/provider"
+	"goassistant/internal/proxy"
 	"goassistant/internal/storage"
 	tele "gopkg.in/telebot.v3"
 )
@@ -21,18 +22,25 @@ const (
 	StepCustomDetails
 	StepEnterAPIKey
 	StepSelectDefaultModel
+	StepEditBaseURL
+	StepEditAddKeys
+	StepEditReplaceKeys
+	StepEditCustomModel
+	StepEditProxyGroup
 )
 
 type WizardSession struct {
-	Step           WizardStep
-	ID             string
-	Name           string
-	Type           string
-	BaseURL        string
-	APIKeys        []string
-	DetectedModels []string
-	DefaultModel   string
-	UpdatedAt      time.Time
+	Step              WizardStep
+	IsEditing         bool
+	EditingProviderID string
+	ID                string
+	Name              string
+	Type              string
+	BaseURL           string
+	APIKeys           []string
+	DetectedModels    []string
+	DefaultModel      string
+	UpdatedAt         time.Time
 }
 
 type ProviderWizard struct {
@@ -40,20 +48,25 @@ type ProviderWizard struct {
 	sessions        map[int64]*WizardSession
 	db              *storage.DB
 	providerManager *provider.Manager
+	proxyPool       *proxy.Pool
 	bot             *tele.Bot
 }
 
-func NewProviderWizard(db *storage.DB, pm *provider.Manager, bot *tele.Bot) *ProviderWizard {
+func NewProviderWizard(db *storage.DB, pm *provider.Manager, pool *proxy.Pool, bot *tele.Bot) *ProviderWizard {
 	return &ProviderWizard{
 		sessions:        make(map[int64]*WizardSession),
 		db:              db,
 		providerManager: pm,
+		proxyPool:       pool,
 		bot:             bot,
 	}
 }
 
-// StartWizard launches the interactive setup wizard
+// StartWizard launches the interactive setup wizard for creating a new provider
 func (w *ProviderWizard) StartWizard(c tele.Context) error {
+	if c.Sender() == nil {
+		return nil
+	}
 	userID := c.Sender().ID
 	w.mu.Lock()
 	w.sessions[userID] = &WizardSession{
@@ -87,8 +100,126 @@ func (w *ProviderWizard) StartWizard(c tele.Context) error {
 	return c.EditOrSend(text, menu, tele.ModeHTML)
 }
 
-// HandleTypeSelect processes provider type choice
+// StartEditWizard launches the interactive editor for existing providers
+func (w *ProviderWizard) StartEditWizard(c tele.Context, targetProvID string) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	userID := c.Sender().ID
+
+	if targetProvID != "" {
+		p, err := w.db.GetProvider(targetProvID)
+		if err != nil || p == nil {
+			return c.Reply(fmt.Sprintf("❌ Provider dengan ID '<code>%s</code>' tidak ditemukan.", html.EscapeString(targetProvID)), tele.ModeHTML)
+		}
+		w.mu.Lock()
+		w.sessions[userID] = &WizardSession{
+			IsEditing:         true,
+			EditingProviderID: p.ID,
+			UpdatedAt:         time.Now(),
+		}
+		w.mu.Unlock()
+		return w.RenderProviderEditDashboard(c, p)
+	}
+
+	// Show list of existing providers to choose from
+	providers, err := w.db.ListProviders()
+	if err != nil || len(providers) == 0 {
+		return c.Reply("⚠️ Belum ada provider AI yang terdaftar. Gunakan tombol <b>🧙‍♂️ Setup Wizard</b> untuk menambahkan provider baru.", tele.ModeHTML)
+	}
+
+	w.mu.Lock()
+	w.sessions[userID] = &WizardSession{
+		IsEditing: true,
+		UpdatedAt: time.Now(),
+	}
+	w.mu.Unlock()
+
+	text := "✏️ <b>WIZARD EDIT PROVIDER AI</b>\n\nPilih provider yang ingin Anda ubah konfigurasinya:"
+
+	menu := &tele.ReplyMarkup{}
+	var rows []tele.Row
+
+	for _, p := range providers {
+		provCopy := p
+		statusIcon := "🟢"
+		if !provCopy.IsActive {
+			statusIcon = "🔴"
+		}
+		btn := menu.Data(fmt.Sprintf("%s %s (%s)", statusIcon, provCopy.Name, provCopy.ID), fmt.Sprintf("wiz_ed_pick_%s", provCopy.ID))
+		rows = append(rows, menu.Row(btn))
+	}
+
+	btnCancel := menu.Data("⬅️ Kembali ke Menu Provider", "menu_providers")
+	rows = append(rows, menu.Row(btnCancel))
+	menu.Inline(rows...)
+
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// RenderProviderEditDashboard displays the full interactive edit options for a provider
+func (w *ProviderWizard) RenderProviderEditDashboard(c tele.Context, p *storage.ProviderRecord) error {
+	statusText := "🟢 <b>Aktif</b>"
+	if !p.IsActive {
+		statusText = "🔴 <b>Nonaktif</b>"
+	}
+
+	keyCount := len(p.APIKeys)
+	if keyCount == 0 && p.APIKey != "" {
+		keyCount = 1
+	}
+
+	proxyStatus := "⚪ <i>Direct / Off</i>"
+	if p.ProxyEnabled {
+		grp := p.ProxyGroup
+		if grp == "" {
+			grp = "default"
+		}
+		proxyStatus = fmt.Sprintf("🟢 <b>Aktif</b> (Group: <code>%s</code>)", html.EscapeString(grp))
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🛠️ <b>EDIT PROVIDER: %s</b> (<code>%s</code>)\n\n", html.EscapeString(p.Name), html.EscapeString(p.ID)))
+	sb.WriteString(fmt.Sprintf("• <b>Status:</b> %s\n", statusText))
+	sb.WriteString(fmt.Sprintf("• <b>Tipe:</b> <code>%s</code>\n", html.EscapeString(p.Type)))
+	sb.WriteString(fmt.Sprintf("• <b>Default Model:</b> <code>%s</code>\n", html.EscapeString(p.DefaultModel)))
+	sb.WriteString(fmt.Sprintf("• <b>Model Terdaftar:</b> %d model\n", len(p.Models)))
+	sb.WriteString(fmt.Sprintf("• <b>Key Pool:</b> %d key (Strategi: <code>%s</code>)\n", keyCount, html.EscapeString(p.KeyStrategy)))
+	sb.WriteString(fmt.Sprintf("• <b>Proxy Upstream:</b> %s\n", proxyStatus))
+	if p.BaseURL != "" {
+		sb.WriteString(fmt.Sprintf("• <b>Base URL:</b> <code>%s</code>\n", html.EscapeString(p.BaseURL)))
+	}
+	sb.WriteString("\nPilih pengaturan yang ingin diubah:")
+
+	menu := &tele.ReplyMarkup{}
+	btnDetect := menu.Data("🔄 Auto-Detect Models", "wiz_ed_detect")
+	btnDefMod := menu.Data("⭐ Ganti Default Model", "wiz_ed_defmod")
+	btnKeysRep := menu.Data("🔑 Ganti Semua Key", "wiz_ed_keys_rep")
+	btnKeysAdd := menu.Data("➕ Tambah Key", "wiz_ed_keys_add")
+	btnKeyStrat := menu.Data("🔀 Strategi Key", "wiz_ed_keystrat")
+	btnBaseURL := menu.Data("🌐 Ubah Base URL", "wiz_ed_baseurl")
+	btnProxy := menu.Data("🛡️ Set Proxy Pool", "wiz_ed_proxy")
+	btnToggle := menu.Data("🔘 Toggle Aktif/Nonaktif", "wiz_ed_toggle")
+	btnDel := menu.Data("🗑️ Hapus Provider", "wiz_ed_del")
+	btnBack := menu.Data("⬅️ Selesai / Kembali", "menu_providers")
+
+	menu.Inline(
+		menu.Row(btnDetect, btnDefMod),
+		menu.Row(btnKeysRep, btnKeysAdd),
+		menu.Row(btnKeyStrat, btnBaseURL),
+		menu.Row(btnProxy, btnToggle),
+		menu.Row(btnDel),
+		menu.Row(btnBack),
+	)
+
+	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
+}
+
+// HandleTypeSelect processes provider type choice for setup wizard
 func (w *ProviderWizard) HandleTypeSelect(c tele.Context, pType string) error {
+	if c.Sender() == nil {
+		return nil
+	}
 	userID := c.Sender().ID
 	w.mu.Lock()
 	sess, exists := w.sessions[userID]
@@ -177,7 +308,7 @@ func (w *ProviderWizard) promptAPIKey(c tele.Context, sess *WizardSession) error
 	return c.EditOrSend(text, menu, tele.ModeHTML)
 }
 
-// HandleTextMessage handles text sent during wizard state
+// HandleTextMessage handles text sent during wizard state (Setup & Edit)
 func (w *ProviderWizard) HandleTextMessage(c tele.Context) (bool, error) {
 	if c.Sender() == nil {
 		return false, nil
@@ -194,8 +325,15 @@ func (w *ProviderWizard) HandleTextMessage(c tele.Context) (bool, error) {
 
 	msgText := strings.TrimSpace(c.Text())
 	if msgText == "/cancel" || strings.EqualFold(msgText, "batal") {
+		provID := sess.EditingProviderID
 		w.CancelWizard(userID)
-		return true, c.Reply("❌ Setup wizard dibatalkan.")
+		if sess.IsEditing && provID != "" {
+			p, _ := w.db.GetProvider(provID)
+			if p != nil {
+				return true, w.RenderProviderEditDashboard(c, p)
+			}
+		}
+		return true, c.Reply("❌ Operasi wizard dibatalkan.")
 	}
 
 	switch sess.Step {
@@ -234,9 +372,109 @@ func (w *ProviderWizard) HandleTextMessage(c tele.Context) (bool, error) {
 		return true, w.autoDiscoverAndPromptModels(c, sess)
 
 	case StepSelectDefaultModel:
-		// Manual model text entry
 		sess.DefaultModel = msgText
 		return true, w.finishWizard(c, sess)
+
+	case StepEditBaseURL:
+		p, err := w.db.GetProvider(sess.EditingProviderID)
+		if err != nil || p == nil {
+			w.CancelWizard(userID)
+			return true, c.Reply("❌ Provider tidak ditemukan.")
+		}
+		rawBaseURL := strings.TrimSpace(msgText)
+		rawBaseURL = strings.TrimSuffix(rawBaseURL, "/")
+		rawBaseURL = strings.TrimSuffix(rawBaseURL, "/chat/completions")
+		rawBaseURL = strings.TrimSuffix(rawBaseURL, "/chat")
+		rawBaseURL = strings.TrimSuffix(rawBaseURL, "/completions")
+		p.BaseURL = rawBaseURL
+		_ = w.db.SaveProvider(p)
+		w.syncProviderToManager(p)
+		sess.Step = StepNone
+		_ = c.Reply(fmt.Sprintf("✅ Base URL untuk <b>%s</b> berhasil diubah ke: <code>%s</code>", html.EscapeString(p.Name), html.EscapeString(p.BaseURL)), tele.ModeHTML)
+		return true, w.RenderProviderEditDashboard(c, p)
+
+	case StepEditReplaceKeys:
+		p, err := w.db.GetProvider(sess.EditingProviderID)
+		if err != nil || p == nil {
+			w.CancelWizard(userID)
+			return true, c.Reply("❌ Provider tidak ditemukan.")
+		}
+		rawKeys := strings.FieldsFunc(msgText, func(r rune) bool {
+			return r == ',' || r == '\n' || r == ';'
+		})
+		var cleanKeys []string
+		for _, k := range rawKeys {
+			k = strings.TrimSpace(k)
+			if k != "" {
+				cleanKeys = append(cleanKeys, k)
+			}
+		}
+		if len(cleanKeys) == 0 {
+			cleanKeys = []string{msgText}
+		}
+		p.APIKeys = cleanKeys
+		p.APIKey = cleanKeys[0]
+		_ = w.db.SaveProvider(p)
+		w.syncProviderToManager(p)
+		sess.Step = StepNone
+		_ = c.Reply(fmt.Sprintf("✅ Key pool untuk <b>%s</b> berhasil diganti (%d key aktif)!", html.EscapeString(p.Name), len(p.APIKeys)), tele.ModeHTML)
+		return true, w.RenderProviderEditDashboard(c, p)
+
+	case StepEditAddKeys:
+		p, err := w.db.GetProvider(sess.EditingProviderID)
+		if err != nil || p == nil {
+			w.CancelWizard(userID)
+			return true, c.Reply("❌ Provider tidak ditemukan.")
+		}
+		rawKeys := strings.FieldsFunc(msgText, func(r rune) bool {
+			return r == ',' || r == '\n' || r == ';'
+		})
+		addedCount := 0
+		for _, k := range rawKeys {
+			k = strings.TrimSpace(k)
+			if k != "" && !contains(p.APIKeys, k) {
+				p.APIKeys = append(p.APIKeys, k)
+				addedCount++
+			}
+		}
+		if len(p.APIKeys) > 0 && p.APIKey == "" {
+			p.APIKey = p.APIKeys[0]
+		}
+		_ = w.db.SaveProvider(p)
+		w.syncProviderToManager(p)
+		sess.Step = StepNone
+		_ = c.Reply(fmt.Sprintf("✅ Berhasil menambahkan %d key baru ke <b>%s</b>! Total pool: %d key.", addedCount, html.EscapeString(p.Name), len(p.APIKeys)), tele.ModeHTML)
+		return true, w.RenderProviderEditDashboard(c, p)
+
+	case StepEditCustomModel:
+		p, err := w.db.GetProvider(sess.EditingProviderID)
+		if err != nil || p == nil {
+			w.CancelWizard(userID)
+			return true, c.Reply("❌ Provider tidak ditemukan.")
+		}
+		p.DefaultModel = msgText
+		if !contains(p.Models, msgText) {
+			p.Models = append(p.Models, msgText)
+		}
+		_ = w.db.SaveProvider(p)
+		w.syncProviderToManager(p)
+		sess.Step = StepNone
+		_ = c.Reply(fmt.Sprintf("✅ Default model untuk <b>%s</b> diset ke: <code>%s</code>", html.EscapeString(p.Name), html.EscapeString(p.DefaultModel)), tele.ModeHTML)
+		return true, w.RenderProviderEditDashboard(c, p)
+
+	case StepEditProxyGroup:
+		p, err := w.db.GetProvider(sess.EditingProviderID)
+		if err != nil || p == nil {
+			w.CancelWizard(userID)
+			return true, c.Reply("❌ Provider tidak ditemukan.")
+		}
+		p.ProxyEnabled = true
+		p.ProxyGroup = strings.ToLower(msgText)
+		_ = w.db.SaveProvider(p)
+		w.syncProviderToManager(p)
+		sess.Step = StepNone
+		_ = c.Reply(fmt.Sprintf("✅ Proxy pool group untuk <b>%s</b> diset ke <code>%s</code>!", html.EscapeString(p.Name), html.EscapeString(p.ProxyGroup)), tele.ModeHTML)
+		return true, w.RenderProviderEditDashboard(c, p)
 	}
 
 	return false, nil
@@ -270,10 +508,9 @@ func (w *ProviderWizard) autoDiscoverAndPromptModels(c tele.Context, sess *Wizar
 	sess.Step = StepSelectDefaultModel
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("🎉 <b>DETEKSI MODEL BERHASIL!</b>\n\n"))
+	sb.WriteString("🎉 <b>DETEKSI MODEL BERHASIL!</b>\n\n")
 	sb.WriteString(fmt.Sprintf("Ditemukan <b>%d model</b> aktif di endpoint <code>%s</code>:\n", len(sess.DetectedModels), html.EscapeString(sess.BaseURL)))
 
-	// Display sample models
 	displayCount := len(sess.DetectedModels)
 	if displayCount > 8 {
 		displayCount = 8
@@ -291,7 +528,6 @@ func (w *ProviderWizard) autoDiscoverAndPromptModels(c tele.Context, sess *Wizar
 	var rows []tele.Row
 	var curRow []tele.Btn
 
-	// Create buttons for top models
 	for i := 0; i < displayCount; i++ {
 		mName := sess.DetectedModels[i]
 		uniqueID := fmt.Sprintf("wiz_mod_%d", i)
@@ -313,8 +549,11 @@ func (w *ProviderWizard) autoDiscoverAndPromptModels(c tele.Context, sess *Wizar
 	return c.Send(sb.String(), menu, tele.ModeHTML)
 }
 
-// HandleModelSelect processes model chosen from button
+// HandleModelSelect processes model chosen from button during setup wizard
 func (w *ProviderWizard) HandleModelSelect(c tele.Context, modelIndex int) error {
+	if c.Sender() == nil {
+		return nil
+	}
 	userID := c.Sender().ID
 	w.mu.RLock()
 	sess, exists := w.sessions[userID]
@@ -360,19 +599,7 @@ func (w *ProviderWizard) finishWizard(c tele.Context, sess *WizardSession) error
 		return c.Send(fmt.Sprintf("❌ Gagal menyimpan ke database: %v", html.EscapeString(err.Error())))
 	}
 
-	// Register to in-memory manager
-	var inst provider.Provider
-	switch sess.Type {
-	case "gemini":
-		inst = provider.NewGeminiProviderWithKeys(record.Name, record.APIKeys, record.KeyStrategy, record.DefaultModel, record.Models)
-	case "anthropic":
-		inst = provider.NewAnthropicProviderWithKeys(record.Name, record.APIKeys, record.KeyStrategy, record.DefaultModel, record.Models)
-	default:
-		inst = provider.NewOpenAIProviderWithKeys(record.Name, record.Type, record.BaseURL, record.APIKeys, record.KeyStrategy, record.DefaultModel, record.Models)
-	}
-	w.providerManager.Register(inst, record.Priority)
-
-	// Clean wizard session
+	w.syncProviderToManager(record)
 	w.CancelWizard(c.Sender().ID)
 
 	text := fmt.Sprintf("✅ <b>PROVIDER BERHASIL DIAKTIFKAN!</b>\n\n"+
@@ -389,6 +616,331 @@ func (w *ProviderWizard) finishWizard(c tele.Context, sess *WizardSession) error
 	return c.EditOrSend(text, BackToMenuKeyboard(), tele.ModeHTML)
 }
 
+// --- Edit Provider Actions ---
+
+// HandleEditAutoDetect runs auto-detect for an existing provider
+func (w *ProviderWizard) HandleEditAutoDetect(c tele.Context, providerID string) error {
+	p, err := w.db.GetProvider(providerID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	_ = c.Notify(tele.Typing)
+	_ = c.Send(fmt.Sprintf("🔍 <i>Mendeteksi model dari %s di <code>%s/models</code>...</i>", html.EscapeString(p.Name), html.EscapeString(p.BaseURL)), tele.ModeHTML)
+
+	firstKey := p.APIKey
+	if len(p.APIKeys) > 0 {
+		firstKey = p.APIKeys[0]
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	detected, err := provider.FetchRemoteModels(ctx, p.Type, p.BaseURL, firstKey, nil)
+	if err != nil || len(detected) == 0 {
+		return c.Reply(fmt.Sprintf("❌ Gagal mendeteksi model: %v", err))
+	}
+
+	p.Models = detected
+	if p.DefaultModel == "" || !contains(detected, p.DefaultModel) {
+		p.DefaultModel = detected[0]
+	}
+
+	_ = w.db.SaveProvider(p)
+	w.syncProviderToManager(p)
+
+	_ = c.Reply(fmt.Sprintf("🎉 <b>BERHASIL!</b> Ditemukan <b>%d model</b> untuk <b>%s</b>. Default model saat ini: <code>%s</code>", len(detected), html.EscapeString(p.Name), html.EscapeString(p.DefaultModel)), tele.ModeHTML)
+	return w.RenderProviderEditDashboard(c, p)
+}
+
+// HandleEditPickDefaultModel shows buttons of registered models to choose a default model
+func (w *ProviderWizard) HandleEditPickDefaultModel(c tele.Context, providerID string) error {
+	p, err := w.db.GetProvider(providerID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	models := p.Models
+	if len(models) == 0 && p.DefaultModel != "" {
+		models = []string{p.DefaultModel}
+	}
+	if len(models) == 0 {
+		models = []string{"gpt-4o-mini", "gpt-4o", "deepseek-chat"}
+	}
+
+	text := fmt.Sprintf("⭐ <b>PILIH DEFAULT MODEL UNTUK %s</b>\n\n"+
+		"Default Model saat ini: <code>%s</code>\n\n"+
+		"Pilih model baru dari tombol di bawah, atau ketik nama model khusus di chat:",
+		html.EscapeString(p.Name), html.EscapeString(p.DefaultModel))
+
+	menu := &tele.ReplyMarkup{}
+	var rows []tele.Row
+	var curRow []tele.Btn
+
+	displayCount := len(models)
+	if displayCount > 12 {
+		displayCount = 12
+	}
+
+	for i := 0; i < displayCount; i++ {
+		mName := models[i]
+		uniqueID := fmt.Sprintf("wiz_edm_%d", i)
+		btn := menu.Data(mName, uniqueID)
+		curRow = append(curRow, btn)
+		if len(curRow) == 2 {
+			rows = append(rows, menu.Row(curRow...))
+			curRow = nil
+		}
+	}
+	if len(curRow) > 0 {
+		rows = append(rows, menu.Row(curRow...))
+	}
+
+	btnBack := menu.Data("⬅️ Batal / Kembali", fmt.Sprintf("wiz_ed_pick_%s", p.ID))
+	rows = append(rows, menu.Row(btnBack))
+	menu.Inline(rows...)
+
+	if c.Sender() != nil {
+		w.mu.Lock()
+		w.sessions[c.Sender().ID] = &WizardSession{
+			IsEditing:         true,
+			EditingProviderID: p.ID,
+			Step:              StepEditCustomModel,
+			DetectedModels:    models,
+			UpdatedAt:         time.Now(),
+		}
+		w.mu.Unlock()
+	}
+
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// HandleEditSetDefaultModel updates the default model from button index
+func (w *ProviderWizard) HandleEditSetDefaultModel(c tele.Context, modelIndex int) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	userID := c.Sender().ID
+	w.mu.RLock()
+	sess, exists := w.sessions[userID]
+	w.mu.RUnlock()
+
+	if !exists || sess.EditingProviderID == "" {
+		return c.Reply("⚠️ Sesi edit telah berakhir. Gunakan <code>/editprovider</code>.", tele.ModeHTML)
+	}
+
+	p, err := w.db.GetProvider(sess.EditingProviderID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	models := p.Models
+	if len(sess.DetectedModels) > 0 {
+		models = sess.DetectedModels
+	}
+
+	if modelIndex >= 0 && modelIndex < len(models) {
+		p.DefaultModel = models[modelIndex]
+	}
+
+	_ = w.db.SaveProvider(p)
+	w.syncProviderToManager(p)
+
+	w.mu.Lock()
+	sess.Step = StepNone
+	w.mu.Unlock()
+
+	_ = c.Reply(fmt.Sprintf("✅ Default model untuk <b>%s</b> berhasil diset ke <code>%s</code>!", html.EscapeString(p.Name), html.EscapeString(p.DefaultModel)), tele.ModeHTML)
+	return w.RenderProviderEditDashboard(c, p)
+}
+
+// HandleEditKeyStrategyMenu shows options for key rotation strategy
+func (w *ProviderWizard) HandleEditKeyStrategyMenu(c tele.Context, providerID string) error {
+	p, err := w.db.GetProvider(providerID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	text := fmt.Sprintf("🔀 <b>STRATEGI ROTASI KEY: %s</b>\n\n"+
+		"Strategi saat ini: <code>%s</code>\n\n"+
+		"• <b>Round-Robin:</b> Membagi beban request merata ke setiap key secara berurutan.\n"+
+		"• <b>Failover:</b> Selalu menggunakan key utama, baru beralih ke key berikutnya jika limit/error.\n"+
+		"• <b>Random:</b> Memilih key secara acak untuk setiap request.\n\n"+
+		"Pilih strategi baru:", html.EscapeString(p.Name), html.EscapeString(p.KeyStrategy))
+
+	menu := &tele.ReplyMarkup{}
+	btnRR := menu.Data("🔄 Round-Robin", "wiz_ed_strat_rr")
+	btnFO := menu.Data("🛡️ Failover", "wiz_ed_strat_fo")
+	btnRD := menu.Data("🎲 Random", "wiz_ed_strat_rd")
+	btnBack := menu.Data("⬅️ Batal / Kembali", fmt.Sprintf("wiz_ed_pick_%s", p.ID))
+
+	menu.Inline(
+		menu.Row(btnRR, btnFO),
+		menu.Row(btnRD),
+		menu.Row(btnBack),
+	)
+
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// HandleEditSetKeyStrategy sets strategy and updates provider
+func (w *ProviderWizard) HandleEditSetKeyStrategy(c tele.Context, providerID string, strat string) error {
+	p, err := w.db.GetProvider(providerID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	p.KeyStrategy = strat
+	_ = w.db.SaveProvider(p)
+	w.syncProviderToManager(p)
+
+	_ = c.Reply(fmt.Sprintf("✅ Strategi key untuk <b>%s</b> berhasil diubah ke: <code>%s</code>", html.EscapeString(p.Name), strat), tele.ModeHTML)
+	return w.RenderProviderEditDashboard(c, p)
+}
+
+// HandleEditProxyMenu shows proxy configuration menu
+func (w *ProviderWizard) HandleEditProxyMenu(c tele.Context, providerID string) error {
+	p, err := w.db.GetProvider(providerID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	text := fmt.Sprintf("🛡️ <b>PROXY POOL: %s</b>\n\n"+
+		"Status proxy saat ini: %s\n\n"+
+		"Pilih opsi proxy untuk provider ini:",
+		html.EscapeString(p.Name),
+		map[bool]string{true: fmt.Sprintf("🟢 Aktif (Group: <code>%s</code>)", p.ProxyGroup), false: "⚪ Direct (Nonaktif)"}[p.ProxyEnabled])
+
+	menu := &tele.ReplyMarkup{}
+	btnOff := menu.Data("⚪ Direct / Nonaktifkan Proxy", "wiz_ed_px_off")
+	btnDef := menu.Data("🌐 Gunakan Group 'default'", "wiz_ed_px_def")
+	btnCust := menu.Data("✏️ Ketik Nama Group Khusus", "wiz_ed_px_cust")
+	btnBack := menu.Data("⬅️ Batal / Kembali", fmt.Sprintf("wiz_ed_pick_%s", p.ID))
+
+	menu.Inline(
+		menu.Row(btnOff),
+		menu.Row(btnDef, btnCust),
+		menu.Row(btnBack),
+	)
+
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// HandleEditToggleActive toggles active status
+func (w *ProviderWizard) HandleEditToggleActive(c tele.Context, providerID string) error {
+	p, err := w.db.GetProvider(providerID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	p.IsActive = !p.IsActive
+	_ = w.db.SaveProvider(p)
+	w.syncProviderToManager(p)
+
+	statusStr := "Diaktifkan 🟢"
+	if !p.IsActive {
+		statusStr = "Dinonaktifkan 🔴"
+	}
+	_ = c.Reply(fmt.Sprintf("✅ Provider <b>%s</b> berhasil <b>%s</b>!", html.EscapeString(p.Name), statusStr), tele.ModeHTML)
+	return w.RenderProviderEditDashboard(c, p)
+}
+
+// HandleEditDeletePrompt asks for delete confirmation
+func (w *ProviderWizard) HandleEditDeletePrompt(c tele.Context, providerID string) error {
+	p, err := w.db.GetProvider(providerID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	text := fmt.Sprintf("⚠️ <b>KONFIRMASI HAPUS PROVIDER</b>\n\n"+
+		"Apakah Anda yakin ingin menghapus provider <b>%s</b> (<code>%s</code>)?\n\n"+
+		"<i>Tindakan ini permanen dan akan menghapus key pool serta pendaftaran model terkait.</i>",
+		html.EscapeString(p.Name), html.EscapeString(p.ID))
+
+	menu := &tele.ReplyMarkup{}
+	btnYes := menu.Data("🗑️ Ya, Hapus Sekarang", fmt.Sprintf("wiz_ed_del_yes_%s", p.ID))
+	btnNo := menu.Data("❌ Batal", fmt.Sprintf("wiz_ed_pick_%s", p.ID))
+
+	menu.Inline(
+		menu.Row(btnYes),
+		menu.Row(btnNo),
+	)
+
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// HandleEditDeleteConfirm executes deletion
+func (w *ProviderWizard) HandleEditDeleteConfirm(c tele.Context, providerID string) error {
+	p, _ := w.db.GetProvider(providerID)
+	if p != nil {
+		_ = w.db.DeleteProvider(providerID)
+		w.providerManager.Unregister(p.Name)
+	}
+
+	if c.Sender() != nil {
+		w.CancelWizard(c.Sender().ID)
+	}
+
+	_ = c.Reply(fmt.Sprintf("🗑️ Provider <b>%s</b> berhasil dihapus dari sistem.", html.EscapeString(providerID)), tele.ModeHTML)
+	return w.StartEditWizard(c, "")
+}
+
+// PromptEditStep sets session step and prompts text input
+func (w *ProviderWizard) PromptEditStep(c tele.Context, providerID string, step WizardStep, promptMsg string) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	userID := c.Sender().ID
+	w.mu.Lock()
+	w.sessions[userID] = &WizardSession{
+		IsEditing:         true,
+		EditingProviderID: providerID,
+		Step:              step,
+		UpdatedAt:         time.Now(),
+	}
+	w.mu.Unlock()
+
+	menu := &tele.ReplyMarkup{}
+	btnCancel := menu.Data("❌ Batal", fmt.Sprintf("wiz_ed_pick_%s", providerID))
+	menu.Inline(menu.Row(btnCancel))
+
+	return c.EditOrSend(promptMsg, menu, tele.ModeHTML)
+}
+
+func (w *ProviderWizard) syncProviderToManager(p *storage.ProviderRecord) {
+	if !p.IsActive {
+		w.providerManager.Unregister(p.Name)
+		return
+	}
+
+	keys := p.APIKeys
+	if len(keys) == 0 && p.APIKey != "" {
+		keys = []string{p.APIKey}
+	}
+
+	models := p.Models
+	if len(models) == 0 && p.DefaultModel != "" {
+		models = []string{p.DefaultModel}
+	}
+
+	var inst provider.Provider
+	switch p.Type {
+	case "gemini":
+		inst = provider.NewGeminiProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
+	case "anthropic":
+		inst = provider.NewAnthropicProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
+	default:
+		inst = provider.NewOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
+	}
+
+	if p.ProxyEnabled && w.proxyPool != nil {
+		proxyClient := w.proxyPool.NewHTTPClientForGroup(p.ProxyGroup, 90*time.Second)
+		inst.SetHTTPClient(proxyClient)
+	}
+
+	w.providerManager.Register(inst, p.Priority)
+}
+
 // CancelWizard clears state
 func (w *ProviderWizard) CancelWizard(userID int64) {
 	w.mu.Lock()
@@ -403,3 +955,4 @@ func (w *ProviderWizard) GetSession(userID int64) (*WizardSession, bool) {
 	s, ok := w.sessions[userID]
 	return s, ok
 }
+

@@ -89,7 +89,7 @@ func NewAdminBot(
 
 		limitsUI:     NewLimitsUI(db),
 		providerUI:   NewProviderUI(db, pm, pool),
-		wizard:       NewProviderWizard(db, pm, bot),
+		wizard:       NewProviderWizard(db, pm, pool, bot),
 		comboUI:      NewComboUI(db, pm),
 		comboWizard:  NewComboWizard(db, pm, bot),
 		channelUI:    NewChannelUI(db, tr),
@@ -149,7 +149,7 @@ func (a *AdminBot) registerRoutes() {
 		return c.EditOrSend(a.comboUI.RenderCombosList(), a.comboUI.CombosKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_channels"}, func(c tele.Context) error {
-		return c.EditOrSend(a.channelUI.RenderChannelsList(), BackToMenuKeyboard(), tele.ModeHTML)
+		return c.EditOrSend(a.channelUI.RenderChannelsList(), a.channelUI.ChannelsKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_proxy"}, func(c tele.Context) error {
 		return a.proxyUI.HandleListProxies(c)
@@ -188,10 +188,10 @@ func (a *AdminBot) registerRoutes() {
 		return c.EditOrSend(a.limitsUI.RenderLimitsSummary(), a.limitsUI.LimitsKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_md"}, func(c tele.Context) error {
-		return c.EditOrSend(a.mdUI.RenderMDList(), BackToMenuKeyboard(), tele.ModeHTML)
+		return c.EditOrSend(a.mdUI.RenderMDList(), a.mdUI.MDMenuKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_cron"}, func(c tele.Context) error {
-		return c.EditOrSend(a.cronUI.RenderCronList(), BackToMenuKeyboard(), tele.ModeHTML)
+		return c.EditOrSend(a.cronUI.RenderCronList(), a.cronUI.CronKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_memory"}, func(c tele.Context) error {
 		return c.EditOrSend(a.memoryUI.RenderMemorySummary(), BackToMenuKeyboard(), tele.ModeHTML)
@@ -200,7 +200,7 @@ func (a *AdminBot) registerRoutes() {
 		return c.EditOrSend(a.auditUI.RenderStatsSummary(), BackToMenuKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_tools"}, func(c tele.Context) error {
-		return c.EditOrSend(a.channelUI.RenderToolsList(), BackToMenuKeyboard(), tele.ModeHTML)
+		return c.EditOrSend(a.channelUI.RenderToolsList(), a.channelUI.ChannelsKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_backup"}, a.handleBackup)
 	a.bot.Handle(&tele.Btn{Unique: "menu_help"}, a.handleHelp)
@@ -209,6 +209,7 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle("/limits", func(c tele.Context) error {
 		return c.Reply(a.limitsUI.RenderLimitsSummary(), a.limitsUI.LimitsKeyboard(), tele.ModeHTML)
 	})
+	a.bot.Handle("/limitswizard", a.limitsUI.StartLimitsWizard)
 	a.bot.Handle("/setlimit", a.limitsUI.HandleSetLimit)
 	a.bot.Handle("/setfooter", a.limitsUI.HandleSetFooter)
 	a.bot.Handle("/footer", a.limitsUI.HandleSetFooter)
@@ -271,7 +272,17 @@ func (a *AdminBot) registerRoutes() {
 	// Provider Setup Wizard & Commands
 	a.bot.Handle("/wizard", a.wizard.StartWizard)
 	a.bot.Handle("/setup", a.wizard.StartWizard)
+	a.bot.Handle("/editprovider", func(c tele.Context) error {
+		target := ""
+		if len(c.Args()) > 0 {
+			target = c.Args()[0]
+		}
+		return a.wizard.StartEditWizard(c, target)
+	})
 	a.bot.Handle(&tele.Btn{Unique: "wiz_start"}, a.wizard.StartWizard)
+	a.bot.Handle(&tele.Btn{Unique: "wiz_edit_start"}, func(c tele.Context) error {
+		return a.wizard.StartEditWizard(c, "")
+	})
 	a.bot.Handle(&tele.Btn{Unique: "wiz_cancel"}, func(c tele.Context) error {
 		a.wizard.CancelWizard(c.Sender().ID)
 		return c.EditOrSend("❌ Setup wizard dibatalkan.", a.providerUI.ProviderMenuKeyboard(), tele.ModeHTML)
@@ -294,6 +305,137 @@ func (a *AdminBot) registerRoutes() {
 			return a.wizard.HandleModelSelect(c, idx)
 		})
 	}
+
+	// Edit Provider Callbacks
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_detect"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		return a.wizard.HandleEditAutoDetect(c, sess.EditingProviderID)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_defmod"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		return a.wizard.HandleEditPickDefaultModel(c, sess.EditingProviderID)
+	})
+	for i := 0; i <= 15; i++ {
+		idx := i
+		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("wiz_edm_%d", idx)}, func(c tele.Context) error {
+			return a.wizard.HandleEditSetDefaultModel(c, idx)
+		})
+	}
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_keys_rep"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		return a.wizard.PromptEditStep(c, sess.EditingProviderID, StepEditReplaceKeys,
+			"🔑 <b>GANTI SEMUA API KEY</b>\n\nSilakan kirimkan API Key baru untuk provider ini (bisa lebih dari 1 key, pisahkan dengan koma/baris baru):")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_keys_add"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		return a.wizard.PromptEditStep(c, sess.EditingProviderID, StepEditAddKeys,
+			"➕ <b>TAMBAH API KEY KE POOL</b>\n\nSilakan kirimkan API Key tambahan yang ingin dimasukkan ke rotasi pool:")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_keystrat"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		return a.wizard.HandleEditKeyStrategyMenu(c, sess.EditingProviderID)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_strat_rr"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		return a.wizard.HandleEditSetKeyStrategy(c, sess.EditingProviderID, "round-robin")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_strat_fo"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		return a.wizard.HandleEditSetKeyStrategy(c, sess.EditingProviderID, "failover")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_strat_rd"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		return a.wizard.HandleEditSetKeyStrategy(c, sess.EditingProviderID, "random")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_baseurl"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		return a.wizard.PromptEditStep(c, sess.EditingProviderID, StepEditBaseURL,
+			"🌐 <b>UBAH BASE URL</b>\n\nKirimkan endpoint Base URL baru (contoh: <code>https://api.openai.com/v1</code>):")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_proxy"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		return a.wizard.HandleEditProxyMenu(c, sess.EditingProviderID)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_px_off"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		p, err := a.db.GetProvider(sess.EditingProviderID)
+		if err != nil || p == nil {
+			return c.Reply("❌ Provider tidak ditemukan.")
+		}
+		p.ProxyEnabled = false
+		p.ProxyGroup = ""
+		_ = a.db.SaveProvider(p)
+		return a.wizard.RenderProviderEditDashboard(c, p)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_px_def"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		p, err := a.db.GetProvider(sess.EditingProviderID)
+		if err != nil || p == nil {
+			return c.Reply("❌ Provider tidak ditemukan.")
+		}
+		p.ProxyEnabled = true
+		p.ProxyGroup = "default"
+		_ = a.db.SaveProvider(p)
+		return a.wizard.RenderProviderEditDashboard(c, p)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_px_cust"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		return a.wizard.PromptEditStep(c, sess.EditingProviderID, StepEditProxyGroup,
+			"🛡️ <b>PROXY GROUP KHUSUS</b>\n\nKetik nama proxy group yang ingin dipasangkan ke provider ini:")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_toggle"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		return a.wizard.HandleEditToggleActive(c, sess.EditingProviderID)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_del"}, func(c tele.Context) error {
+		sess, ok := a.wizard.GetSession(c.Sender().ID)
+		if !ok || sess.EditingProviderID == "" {
+			return a.wizard.StartEditWizard(c, "")
+		}
+		return a.wizard.HandleEditDeletePrompt(c, sess.EditingProviderID)
+	})
 
 	a.bot.Handle("/providers", func(c tele.Context) error {
 		return c.Reply(a.providerUI.RenderProvidersList(), a.providerUI.ProviderMenuKeyboard(), tele.ModeHTML)
@@ -319,6 +461,16 @@ func (a *AdminBot) registerRoutes() {
 	// Combo Commands & Wizard
 	a.bot.Handle("/combos", a.comboUI.HandleCombos)
 	a.bot.Handle("/combowizard", a.comboWizard.StartWizard)
+	a.bot.Handle("/editcombo", func(c tele.Context) error {
+		target := ""
+		if len(c.Args()) > 0 {
+			target = c.Args()[0]
+		}
+		return a.comboWizard.StartEditWizard(c, target)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_edit_start"}, func(c tele.Context) error {
+		return a.comboWizard.StartEditWizard(c, "")
+	})
 	a.bot.Handle("/addcombo", func(c tele.Context) error {
 		if len(c.Args()) == 0 {
 			return a.comboWizard.StartWizard(c)
@@ -338,14 +490,109 @@ func (a *AdminBot) registerRoutes() {
 		return a.comboWizard.StartWizard(c)
 	})
 
-	// Dynamic Provider buttons for Combo Wizard
-	dbProviders, _ := a.db.ListProviders()
-	for _, p := range dbProviders {
-		pID := p.ID
-		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("cwiz_prov_%s", pID)}, func(c tele.Context) error {
-			return a.comboWizard.HandleProviderSelect(c, pID)
-		})
-	}
+	// Combo Edit Callbacks
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_add_target"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.HandleEditAddTargetStart(c, sess.EditingComboName)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_del_target"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.HandleEditDelTargetMenu(c, sess.EditingComboName)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_reorder"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		cName := sess.EditingComboName
+		a.comboWizard.CancelWizard(c.Sender().ID)
+		a.comboWizard.mu.Lock()
+		a.comboWizard.sessions[c.Sender().ID] = &ComboWizardSession{
+			IsEditing:        true,
+			EditingComboName: cName,
+			Name:             cName,
+			Step:             StepComboPickProvider,
+			CreatedAt:        time.Now(),
+		}
+		a.comboWizard.mu.Unlock()
+		return a.comboWizard.promptPickProvider(c, a.comboWizard.sessions[c.Sender().ID])
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_strat"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.HandleEditStrategyMenu(c, sess.EditingComboName)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_st_fs"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.HandleEditSetStrategy(c, sess.EditingComboName, "failsafe")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_st_rr"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.HandleEditSetStrategy(c, sess.EditingComboName, "round-robin")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_desc"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.PromptEditStep(c, sess.EditingComboName, StepComboEditDesc,
+			"📝 <b>UBAH DESKRIPSI COMBO</b>\n\nKirimkan deskripsi baru untuk combo ini:")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_toggle"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.HandleEditToggleActive(c, sess.EditingComboName)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_del"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.HandleEditDeletePrompt(c, sess.EditingComboName)
+	})
 
 	// Model index buttons for Combo Wizard (0..15)
 	for i := 0; i <= 15; i++ {
@@ -353,17 +600,564 @@ func (a *AdminBot) registerRoutes() {
 		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("cwiz_mod_%d", idx)}, func(c tele.Context) error {
 			return a.comboWizard.HandleModelSelect(c, idx)
 		})
+		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("cwiz_ed_mod_%d", idx)}, func(c tele.Context) error {
+			return a.comboWizard.HandleEditAddTargetModSelect(c, idx)
+		})
+		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("cwiz_ed_rem_%d", idx)}, func(c tele.Context) error {
+			return a.comboWizard.HandleEditDelTargetExecute(c, idx)
+		})
 	}
+
+	// Limits Wizard Callbacks
+	a.bot.Handle(&tele.Btn{Unique: "lim_wiz_start"}, a.limitsUI.StartLimitsWizard)
+	a.bot.Handle(&tele.Btn{Unique: "lim_sc_global"}, func(c tele.Context) error {
+		return a.limitsUI.RenderScopeLimitsDashboard(c, "global", "system")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_sc_chan_menu"}, a.limitsUI.RenderChannelPickMenu)
+	a.bot.Handle(&tele.Btn{Unique: "lim_sc_chat_prompt"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		a.limitsUI.SetSessionStep(c.Sender().ID, LimitsStepScopeChatID)
+		text := "💬 <b>MASUKKAN CHAT / GROUP ID</b>\n\nKirimkan Chat ID (contoh: <code>-100123456789</code> atau ID user Telegram):"
+		menu := &tele.ReplyMarkup{}
+		btnCancel := menu.Data("❌ Batal", "lim_wiz_start")
+		menu.Inline(menu.Row(btnCancel))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_set_footer_menu"}, func(c tele.Context) error {
+		sess, ok := a.limitsUI.GetSession(c.Sender().ID)
+		if !ok || sess.Scope == "" {
+			return a.limitsUI.StartLimitsWizard(c)
+		}
+		text := fmt.Sprintf("📊 <b>PILIH TAMPILAN FOOTER (<code>%s:%s</code>)</b>\n\n"+
+			"• <b>Off:</b> Tanpa footer di akhir jawaban bot.\n"+
+			"• <b>Tokens:</b> Menampilkan penggunaan token & model.\n"+
+			"• <b>Full:</b> Menampilkan latency (ms), token, context turns, & model.", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+		menu := &tele.ReplyMarkup{}
+		btnOff := menu.Data("❌ Off", "lim_ft_off")
+		btnTok := menu.Data("🪙 Tokens Only", "lim_ft_tok")
+		btnFull := menu.Data("📊 Full (Lengkap)", "lim_ft_full")
+		btnBack := menu.Data("⬅️ Kembali", fmt.Sprintf("lim_back_dash"))
+		menu.Inline(menu.Row(btnOff, btnTok, btnFull), menu.Row(btnBack))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_ft_off"}, func(c tele.Context) error {
+		if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+			pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+			if pol == nil {
+				pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+			}
+			pol.FooterMode = "off"
+			_ = a.db.SavePolicy(pol)
+			return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+		}
+		return a.limitsUI.StartLimitsWizard(c)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_ft_tok"}, func(c tele.Context) error {
+		if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+			pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+			if pol == nil {
+				pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+			}
+			pol.FooterMode = "tokens"
+			_ = a.db.SavePolicy(pol)
+			return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+		}
+		return a.limitsUI.StartLimitsWizard(c)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_ft_full"}, func(c tele.Context) error {
+		if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+			pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+			if pol == nil {
+				pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+			}
+			pol.FooterMode = "full"
+			_ = a.db.SavePolicy(pol)
+			return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+		}
+		return a.limitsUI.StartLimitsWizard(c)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_back_dash"}, func(c tele.Context) error {
+		if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok && sess.Scope != "" {
+			return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+		}
+		return a.limitsUI.StartLimitsWizard(c)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_set_upload_menu"}, func(c tele.Context) error {
+		sess, ok := a.limitsUI.GetSession(c.Sender().ID)
+		if !ok || sess.Scope == "" {
+			return a.limitsUI.StartLimitsWizard(c)
+		}
+		text := fmt.Sprintf("📁 <b>ATUR MAX UPLOAD FILE (<code>%s:%s</code>)</b>\n\nPilih batas ukuran upload dokumen / gambar:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+		menu := &tele.ReplyMarkup{}
+		b5 := menu.Data("5 MB", "lim_up_5")
+		b10 := menu.Data("10 MB", "lim_up_10")
+		b25 := menu.Data("25 MB", "lim_up_25")
+		b50 := menu.Data("50 MB", "lim_up_50")
+		b100 := menu.Data("100 MB", "lim_up_100")
+		bCust := menu.Data("✏️ Angka Custom", "lim_up_cust")
+		bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+		menu.Inline(menu.Row(b5, b10, b25), menu.Row(b50, b100, bCust), menu.Row(bBack))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+	for _, upMB := range []int{5, 10, 25, 50, 100} {
+		val := upMB
+		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("lim_up_%d", val)}, func(c tele.Context) error {
+			if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+				pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+				if pol == nil {
+					pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+				}
+				pol.MaxUploadFileMB = val
+				_ = a.db.SavePolicy(pol)
+				return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+			}
+			return a.limitsUI.StartLimitsWizard(c)
+		})
+	}
+	a.bot.Handle(&tele.Btn{Unique: "lim_up_cust"}, func(c tele.Context) error {
+		a.limitsUI.SetSessionStep(c.Sender().ID, LimitsStepCustomUpload)
+		return c.EditOrSend("📁 <b>MASUKKAN MAX UPLOAD (MB)</b>\n\nKirimkan angka ukuran maksimum dalam MB (contoh: <code>15</code> atau <code>30</code>):", tele.ModeHTML)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_set_tokens_menu"}, func(c tele.Context) error {
+		sess, ok := a.limitsUI.GetSession(c.Sender().ID)
+		if !ok || sess.Scope == "" {
+			return a.limitsUI.StartLimitsWizard(c)
+		}
+		text := fmt.Sprintf("🪙 <b>ATUR MAX OUTPUT TOKENS (<code>%s:%s</code>)</b>\n\nPilih batas maksimum token output AI per respons:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+		menu := &tele.ReplyMarkup{}
+		b1k := menu.Data("1024", "lim_tk_1024")
+		b2k := menu.Data("2048", "lim_tk_2048")
+		b4k := menu.Data("4096", "lim_tk_4096")
+		b8k := menu.Data("8192", "lim_tk_8192")
+		b16k := menu.Data("16384", "lim_tk_16384")
+		bCust := menu.Data("✏️ Custom", "lim_tk_cust")
+		bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+		menu.Inline(menu.Row(b1k, b2k, b4k), menu.Row(b8k, b16k, bCust), menu.Row(bBack))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+	for _, tk := range []int{1024, 2048, 4096, 8192, 16384} {
+		val := tk
+		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("lim_tk_%d", val)}, func(c tele.Context) error {
+			if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+				pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+				if pol == nil {
+					pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+				}
+				pol.MaxTokens = val
+				_ = a.db.SavePolicy(pol)
+				return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+			}
+			return a.limitsUI.StartLimitsWizard(c)
+		})
+	}
+	a.bot.Handle(&tele.Btn{Unique: "lim_tk_cust"}, func(c tele.Context) error {
+		a.limitsUI.SetSessionStep(c.Sender().ID, LimitsStepCustomTokens)
+		return c.EditOrSend("🪙 <b>MASUKKAN MAX OUTPUT TOKENS</b>\n\nKirimkan angka token maksimum (contoh: <code>6000</code>):", tele.ModeHTML)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_set_history_menu"}, func(c tele.Context) error {
+		sess, ok := a.limitsUI.GetSession(c.Sender().ID)
+		if !ok || sess.Scope == "" {
+			return a.limitsUI.StartLimitsWizard(c)
+		}
+		text := fmt.Sprintf("💬 <b>ATUR MAX HISTORY TURNS (<code>%s:%s</code>)</b>\n\nPilih batas turn konteks percakapan yang disimpan:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+		menu := &tele.ReplyMarkup{}
+		b10 := menu.Data("10 turns", "lim_hi_10")
+		b15 := menu.Data("15 turns", "lim_hi_15")
+		b20 := menu.Data("20 turns", "lim_hi_20")
+		b30 := menu.Data("30 turns", "lim_hi_30")
+		b50 := menu.Data("50 turns", "lim_hi_50")
+		bCust := menu.Data("✏️ Custom", "lim_hi_cust")
+		bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+		menu.Inline(menu.Row(b10, b15, b20), menu.Row(b30, b50, bCust), menu.Row(bBack))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+	for _, hi := range []int{10, 15, 20, 30, 50} {
+		val := hi
+		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("lim_hi_%d", val)}, func(c tele.Context) error {
+			if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+				pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+				if pol == nil {
+					pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+				}
+				pol.MaxHistoryTurns = val
+				_ = a.db.SavePolicy(pol)
+				return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+			}
+			return a.limitsUI.StartLimitsWizard(c)
+		})
+	}
+	a.bot.Handle(&tele.Btn{Unique: "lim_hi_cust"}, func(c tele.Context) error {
+		a.limitsUI.SetSessionStep(c.Sender().ID, LimitsStepCustomHistory)
+		return c.EditOrSend("💬 <b>MASUKKAN MAX HISTORY TURNS</b>\n\nKirimkan angka jumlah turn history percakapan (contoh: <code>40</code>):", tele.ModeHTML)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_set_compact_menu"}, func(c tele.Context) error {
+		sess, ok := a.limitsUI.GetSession(c.Sender().ID)
+		if !ok || sess.Scope == "" {
+			return a.limitsUI.StartLimitsWizard(c)
+		}
+		text := fmt.Sprintf("🗜️ <b>ATUR AUTO-COMPACTION (<code>%s:%s</code>)</b>\n\nKompresi otomatis ringkasan percakapan saat turn melebihi ambang batas:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+		menu := &tele.ReplyMarkup{}
+		bOn := menu.Data("🟢 Aktifkan", "lim_cp_on")
+		bOff := menu.Data("🔴 Nonaktifkan", "lim_cp_off")
+		t10 := menu.Data("Ambang 10", "lim_cp_th_10")
+		t15 := menu.Data("Ambang 15", "lim_cp_th_15")
+		t20 := menu.Data("Ambang 20", "lim_cp_th_20")
+		tCust := menu.Data("✏️ Ambang Custom", "lim_cp_th_cust")
+		bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+		menu.Inline(menu.Row(bOn, bOff), menu.Row(t10, t15, t20), menu.Row(tCust), menu.Row(bBack))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_cp_on"}, func(c tele.Context) error {
+		if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+			pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+			if pol == nil {
+				pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+			}
+			pol.AutoCompaction = true
+			_ = a.db.SavePolicy(pol)
+			return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+		}
+		return a.limitsUI.StartLimitsWizard(c)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_cp_off"}, func(c tele.Context) error {
+		if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+			pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+			if pol == nil {
+				pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+			}
+			pol.AutoCompaction = false
+			_ = a.db.SavePolicy(pol)
+			return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+		}
+		return a.limitsUI.StartLimitsWizard(c)
+	})
+	for _, th := range []int{10, 15, 20} {
+		val := th
+		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("lim_cp_th_%d", val)}, func(c tele.Context) error {
+			if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+				pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+				if pol == nil {
+					pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+				}
+				pol.CompactionThreshold = val
+				_ = a.db.SavePolicy(pol)
+				return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+			}
+			return a.limitsUI.StartLimitsWizard(c)
+		})
+	}
+	a.bot.Handle(&tele.Btn{Unique: "lim_cp_th_cust"}, func(c tele.Context) error {
+		a.limitsUI.SetSessionStep(c.Sender().ID, LimitsStepCustomThreshold)
+		return c.EditOrSend("🗜️ <b>MASUKKAN AMBANG COMPACTION (TURNS)</b>\n\nKirimkan jumlah turn minimal untuk memicu auto-compaction (contoh: <code>12</code>):", tele.ModeHTML)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_set_model_menu"}, func(c tele.Context) error {
+		sess, ok := a.limitsUI.GetSession(c.Sender().ID)
+		if !ok || sess.Scope == "" {
+			return a.limitsUI.StartLimitsWizard(c)
+		}
+		combos, _ := a.db.ListCombos()
+		text := fmt.Sprintf("🤖 <b>ATUR MODEL OVERRIDE (<code>%s:%s</code>)</b>\n\nPilih model default atau combo chain yang ingin dipaksakan:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+		menu := &tele.ReplyMarkup{}
+		var rows []tele.Row
+		btnReset := menu.Data("🔄 Reset ke Default Provider", "lim_mod_reset")
+		rows = append(rows, menu.Row(btnReset))
+		for _, cm := range combos {
+			cmCopy := cm
+			btn := menu.Data(fmt.Sprintf("🔀 Combo: %s", cmCopy.Name), fmt.Sprintf("lim_mod_set_combo:%s", cmCopy.Name))
+			rows = append(rows, menu.Row(btn))
+		}
+		btnCust := menu.Data("✏️ Ketik Nama Model Khusus", "lim_mod_cust")
+		btnBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+		rows = append(rows, menu.Row(btnCust), menu.Row(btnBack))
+		menu.Inline(rows...)
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_mod_reset"}, func(c tele.Context) error {
+		if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+			pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+			if pol == nil {
+				pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+			}
+			pol.ModelOverride = ""
+			_ = a.db.SavePolicy(pol)
+			return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+		}
+		return a.limitsUI.StartLimitsWizard(c)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "lim_mod_cust"}, func(c tele.Context) error {
+		a.limitsUI.SetSessionStep(c.Sender().ID, LimitsStepCustomModel)
+		return c.EditOrSend("🤖 <b>MASUKKAN MODEL OVERRIDE</b>\n\nKetik nama model (contoh: <code>gpt-4o-mini</code>, <code>claude-3-5-sonnet-20241022</code>, atau <code>combo:smart_chain</code>):", tele.ModeHTML)
+	})
+
+	// Channel Wizard Callbacks
+	a.bot.Handle(&tele.Btn{Unique: "chan_wiz_start"}, a.channelUI.StartChannelWizard)
+	a.bot.Handle(&tele.Btn{Unique: "chan_wiz_add_type"}, a.channelUI.RenderAddChannelTypeMenu)
+	a.bot.Handle(&tele.Btn{Unique: "chan_type_telegram"}, func(c tele.Context) error {
+		return a.channelUI.PromptChannelIDAndName(c, "telegram")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "chan_type_whatsapp"}, func(c tele.Context) error {
+		return a.channelUI.PromptChannelIDAndName(c, "whatsapp")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "tool_wiz_start"}, func(c tele.Context) error {
+		return a.channelUI.StartToolWizard(c, "")
+	})
+
+	// Cron Wizard Callbacks
+	a.bot.Handle(&tele.Btn{Unique: "cron_wiz_start"}, a.cronUI.StartCronWizard)
+	a.bot.Handle(&tele.Btn{Unique: "cron_wiz_cancel"}, func(c tele.Context) error {
+		a.cronUI.CancelWizard(c.Sender().ID)
+		return c.EditOrSend("❌ Cron wizard dibatalkan.", a.cronUI.CronKeyboard(), tele.ModeHTML)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cron_ch_telegram"}, func(c tele.Context) error {
+		sess, ok := a.cronUI.GetSession(c.Sender().ID)
+		if !ok {
+			return a.cronUI.StartCronWizard(c)
+		}
+		sess.TargetChannel = "telegram"
+		a.cronUI.SetSessionStep(c.Sender().ID, CronStepChatID)
+		text := "💬 <b>MASUKKAN CHAT / GROUP ID TARGET TELEGRAM</b>\n\nKirimkan ID chat/grup tujuan pengiriman pesan cron (contoh: <code>-100123456789</code>):"
+		menu := &tele.ReplyMarkup{}
+		btnCancel := menu.Data("❌ Batal", "cron_wiz_cancel")
+		menu.Inline(menu.Row(btnCancel))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cron_ch_whatsapp"}, func(c tele.Context) error {
+		sess, ok := a.cronUI.GetSession(c.Sender().ID)
+		if !ok {
+			return a.cronUI.StartCronWizard(c)
+		}
+		sess.TargetChannel = "whatsapp"
+		a.cronUI.SetSessionStep(c.Sender().ID, CronStepChatID)
+		text := "💬 <b>MASUKKAN NOMOR / GROUP JID TARGET WHATSAPP</b>\n\nKirimkan nomor WA atau JID tujuan (contoh: <code>628123456789@s.whatsapp.net</code>):"
+		menu := &tele.ReplyMarkup{}
+		btnCancel := menu.Data("❌ Batal", "cron_wiz_cancel")
+		menu.Inline(menu.Row(btnCancel))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cron_sc_hourly"}, func(c tele.Context) error {
+		sess, ok := a.cronUI.GetSession(c.Sender().ID)
+		if !ok {
+			return a.cronUI.StartCronWizard(c)
+		}
+		sess.CronExpr = "0 * * * *"
+		return a.cronUI.PromptCronPrompt(c, sess)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cron_sc_morning"}, func(c tele.Context) error {
+		sess, ok := a.cronUI.GetSession(c.Sender().ID)
+		if !ok {
+			return a.cronUI.StartCronWizard(c)
+		}
+		sess.CronExpr = "0 7 * * *"
+		return a.cronUI.PromptCronPrompt(c, sess)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cron_sc_evening"}, func(c tele.Context) error {
+		sess, ok := a.cronUI.GetSession(c.Sender().ID)
+		if !ok {
+			return a.cronUI.StartCronWizard(c)
+		}
+		sess.CronExpr = "0 17 * * *"
+		return a.cronUI.PromptCronPrompt(c, sess)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cron_sc_weekly"}, func(c tele.Context) error {
+		sess, ok := a.cronUI.GetSession(c.Sender().ID)
+		if !ok {
+			return a.cronUI.StartCronWizard(c)
+		}
+		sess.CronExpr = "0 8 * * 1"
+		return a.cronUI.PromptCronPrompt(c, sess)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cron_sc_custom"}, func(c tele.Context) error {
+		if _, ok := a.cronUI.GetSession(c.Sender().ID); !ok {
+			return a.cronUI.StartCronWizard(c)
+		}
+		a.cronUI.SetSessionStep(c.Sender().ID, CronStepCustomCron)
+		text := "✏️ <b>MASUKKAN CRON EXPRESSION KHUSUS</b>\n\nKirimkan ekspresi cron standar 5 kolom (contoh: <code>*/30 * * * *</code> atau <code>0 9 * * 1-5</code>):"
+		menu := &tele.ReplyMarkup{}
+		btnCancel := menu.Data("❌ Batal", "cron_wiz_cancel")
+		menu.Inline(menu.Row(btnCancel))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+
+	// MD Wizard Callbacks
+	a.bot.Handle(&tele.Btn{Unique: "md_wiz_start"}, a.mdUI.StartMDWizard)
+	a.bot.Handle(&tele.Btn{Unique: "md_reload_all"}, func(c tele.Context) error {
+		a.mdLoader.Reload()
+		return c.Reply("🔄 Seluruh cache file <code>.md</code> berhasil dimuat ulang!", tele.ModeHTML)
+	})
+
+	// Dynamic Callback Dispatcher for Custom Prefix Buttons
+	a.bot.Handle(tele.OnCallback, func(c tele.Context) error {
+		cb := c.Callback()
+		if cb == nil {
+			return nil
+		}
+		data := strings.TrimPrefix(cb.Data, "\f")
+
+		// Provider Edit Callbacks
+		if strings.HasPrefix(data, "wiz_ed_pick_") {
+			provID := strings.TrimPrefix(data, "wiz_ed_pick_")
+			return a.wizard.StartEditWizard(c, provID)
+		}
+		if strings.HasPrefix(data, "wiz_ed_del_yes_") {
+			provID := strings.TrimPrefix(data, "wiz_ed_del_yes_")
+			return a.wizard.HandleEditDeleteConfirm(c, provID)
+		}
+
+		// Combo Edit Callbacks
+		if strings.HasPrefix(data, "cwiz_ed_pick_") {
+			comboName := strings.TrimPrefix(data, "cwiz_ed_pick_")
+			return a.comboWizard.StartEditWizard(c, comboName)
+		}
+		if strings.HasPrefix(data, "cwiz_prov_") {
+			provID := strings.TrimPrefix(data, "cwiz_prov_")
+			return a.comboWizard.HandleProviderSelect(c, provID)
+		}
+		if strings.HasPrefix(data, "cwiz_ed_prov_") {
+			provID := strings.TrimPrefix(data, "cwiz_ed_prov_")
+			return a.comboWizard.HandleEditAddTargetProvSelect(c, provID)
+		}
+		if strings.HasPrefix(data, "cwiz_ed_del_yes_") {
+			comboName := strings.TrimPrefix(data, "cwiz_ed_del_yes_")
+			return a.comboWizard.HandleEditDeleteConfirm(c, comboName)
+		}
+
+		// Limits Callbacks
+		if strings.HasPrefix(data, "lim_sc_ch_") {
+			chID := strings.TrimPrefix(data, "lim_sc_ch_")
+			return a.limitsUI.RenderScopeLimitsDashboard(c, "channel", chID)
+		}
+		if strings.HasPrefix(data, "lim_mod_set_") {
+			modVal := strings.TrimPrefix(data, "lim_mod_set_")
+			if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+				pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+				if pol == nil {
+					pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+				}
+				pol.ModelOverride = modVal
+				_ = a.db.SavePolicy(pol)
+				return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+			}
+		}
+
+		// Channel Callbacks
+		if strings.HasPrefix(data, "chan_ed_pick_") {
+			chID := strings.TrimPrefix(data, "chan_ed_pick_")
+			ch, err := a.db.GetChannel(chID)
+			if err != nil || ch == nil {
+				return c.Reply("❌ Channel tidak ditemukan.")
+			}
+			return a.channelUI.RenderChannelDashboard(c, ch)
+		}
+		if strings.HasPrefix(data, "chan_tgl_") {
+			chID := strings.TrimPrefix(data, "chan_tgl_")
+			ch, err := a.db.GetChannel(chID)
+			if err != nil || ch == nil {
+				return c.Reply("❌ Channel tidak ditemukan.")
+			}
+			ch.IsActive = !ch.IsActive
+			_ = a.db.SaveChannel(ch)
+			return a.channelUI.RenderChannelDashboard(c, ch)
+		}
+		if strings.HasPrefix(data, "chan_ed_tok_") {
+			chID := strings.TrimPrefix(data, "chan_ed_tok_")
+			ch, err := a.db.GetChannel(chID)
+			if err != nil || ch == nil {
+				return c.Reply("❌ Channel tidak ditemukan.")
+			}
+			a.channelUI.SetSessionStep(c.Sender().ID, chID, ChannelStepEditIdentifier)
+			text := fmt.Sprintf("🔑 <b>GANTI TOKEN / ENDPOINT (%s)</b>\n\nKirimkan Token Telegram baru atau Webhook URL WhatsApp baru:", html.EscapeString(ch.Name))
+			menu := &tele.ReplyMarkup{}
+			btnCancel := menu.Data("❌ Batal", fmt.Sprintf("chan_ed_pick_%s", ch.ID))
+			menu.Inline(menu.Row(btnCancel))
+			return c.EditOrSend(text, menu, tele.ModeHTML)
+		}
+		if strings.HasPrefix(data, "chan_del_") {
+			chID := strings.TrimPrefix(data, "chan_del_")
+			_ = a.db.DeleteChannel(chID)
+			return a.channelUI.StartChannelWizard(c)
+		}
+
+		// Tool Perms Matrix Callbacks
+		if strings.HasPrefix(data, "tool_wiz_ch_") {
+			chID := strings.TrimPrefix(data, "tool_wiz_ch_")
+			return a.channelUI.StartToolWizard(c, chID)
+		}
+		if strings.HasPrefix(data, "tperm_") {
+			raw := strings.TrimPrefix(data, "tperm_")
+			parts := strings.SplitN(raw, "_", 2)
+			if len(parts) == 2 {
+				return a.channelUI.HandleToggleToolPerm(c, parts[0], parts[1])
+			}
+		}
+
+		// Cron Callbacks
+		if strings.HasPrefix(data, "cron_run_") {
+			cronID := strings.TrimPrefix(data, "cron_run_")
+			if err := a.scheduler.RunNow(cronID); err != nil {
+				return c.Reply(fmt.Sprintf("❌ Gagal: %v", err))
+			}
+			return c.Reply(fmt.Sprintf("🚀 Cron job <code>%s</code> sedang dieksekusi sekarang!", html.EscapeString(cronID)), tele.ModeHTML)
+		}
+		if strings.HasPrefix(data, "cron_tgl_") {
+			cronID := strings.TrimPrefix(data, "cron_tgl_")
+			jobs, _ := a.db.ListCronJobs()
+			for _, j := range jobs {
+				if j.ID == cronID {
+					jCopy := j
+					jCopy.IsActive = !jCopy.IsActive
+					_ = a.db.SaveCronJob(&jCopy)
+					_ = a.scheduler.Reload()
+					break
+				}
+			}
+			return c.EditOrSend(a.cronUI.RenderCronList(), a.cronUI.CronKeyboard(), tele.ModeHTML)
+		}
+		if strings.HasPrefix(data, "cron_del_") {
+			cronID := strings.TrimPrefix(data, "cron_del_")
+			_ = a.db.DeleteCronJob(cronID)
+			_ = a.scheduler.Reload()
+			return c.EditOrSend(a.cronUI.RenderCronList(), a.cronUI.CronKeyboard(), tele.ModeHTML)
+		}
+
+		// MD Callbacks
+		if strings.HasPrefix(data, "md_pick_") {
+			fname := strings.TrimPrefix(data, "md_pick_")
+			return a.mdUI.RenderMDFileDashboard(c, fname)
+		}
+		if strings.HasPrefix(data, "md_view_full_") {
+			fname := strings.TrimPrefix(data, "md_view_full_")
+			return a.mdUI.RenderFullFile(c, fname)
+		}
+		if strings.HasPrefix(data, "md_edit_prompt_") {
+			fname := strings.TrimPrefix(data, "md_edit_prompt_")
+			return a.mdUI.PromptEditContent(c, fname)
+		}
+		if strings.HasPrefix(data, "md_app_prompt_") {
+			fname := strings.TrimPrefix(data, "md_app_prompt_")
+			return a.mdUI.PromptAppendContent(c, fname)
+		}
+
+		return nil
+	})
+
+	// Channel & Tool Commands
+	a.bot.Handle("/channelwizard", a.channelUI.StartChannelWizard)
 	a.bot.Handle("/addchannel", a.channelUI.HandleAddChannel)
 	a.bot.Handle("/tools", func(c tele.Context) error {
 		return c.Reply(a.channelUI.RenderToolsList(), tele.ModeHTML)
+	})
+	a.bot.Handle("/toolwizard", func(c tele.Context) error {
+		return a.channelUI.StartToolWizard(c, "")
 	})
 	a.bot.Handle("/toolperms", a.channelUI.HandleToolPerms)
 
 	// MD Commands
 	a.bot.Handle("/md", func(c tele.Context) error {
-		return c.Reply(a.mdUI.RenderMDList(), tele.ModeHTML)
+		return c.Reply(a.mdUI.RenderMDList(), a.mdUI.MDMenuKeyboard(), tele.ModeHTML)
 	})
+	a.bot.Handle("/mdwizard", a.mdUI.StartMDWizard)
 	a.bot.Handle("/viewmd", a.mdUI.HandleViewMD)
 	a.bot.Handle("/editmd", a.mdUI.HandleEditMD)
 	a.bot.Handle("/reloadmd", func(c tele.Context) error {
@@ -373,8 +1167,9 @@ func (a *AdminBot) registerRoutes() {
 
 	// Cron Commands
 	a.bot.Handle("/cron", func(c tele.Context) error {
-		return c.Reply(a.cronUI.RenderCronList(), tele.ModeHTML)
+		return c.Reply(a.cronUI.RenderCronList(), a.cronUI.CronKeyboard(), tele.ModeHTML)
 	})
+	a.bot.Handle("/cronwizard", a.cronUI.StartCronWizard)
 	a.bot.Handle("/addcron", a.cronUI.HandleAddCron)
 	a.bot.Handle("/runcron", a.cronUI.HandleRunCron)
 	a.bot.Handle("/delcron", a.cronUI.HandleDelCron)
@@ -399,19 +1194,39 @@ func (a *AdminBot) registerRoutes() {
 	// File Upload Handler (Document .md / backup restore)
 	a.bot.Handle(tele.OnDocument, a.mdUI.HandleDocumentUpload)
 
-	// Unified Text Message Handler (Wizard State Interceptor + Direct Chat)
+	// Unified Text Message Handler (Wizard State Interceptors + Direct Chat)
 	a.bot.Handle(tele.OnText, func(c tele.Context) error {
-		// 1. Check and intercept if user is in Provider Wizard dialog
+		// 1. Check Provider Wizard dialog
 		if handled, err := a.wizard.HandleTextMessage(c); handled {
 			return err
 		}
 
-		// 2. Check and intercept if user is in Combo Wizard dialog
+		// 2. Check Combo Wizard dialog
 		if handled, err := a.comboWizard.HandleTextMessage(c); handled {
 			return err
 		}
 
-		// 3. Direct Chat with Assistant from Admin PM
+		// 3. Check Limits Wizard dialog
+		if handled, err := a.limitsUI.HandleTextMessage(c); handled {
+			return err
+		}
+
+		// 4. Check Channel Wizard dialog
+		if handled, err := a.channelUI.HandleTextMessage(c); handled {
+			return err
+		}
+
+		// 5. Check Cron Wizard dialog
+		if handled, err := a.cronUI.HandleTextMessage(c); handled {
+			return err
+		}
+
+		// 6. Check MD Wizard dialog
+		if handled, err := a.mdUI.HandleTextMessage(c); handled {
+			return err
+		}
+
+		// 7. Direct Chat with Assistant from Admin PM
 		msg := c.Message().Text
 		if msg == "" || msg[0] == '/' {
 			return nil
@@ -446,7 +1261,7 @@ func (a *AdminBot) registerRoutes() {
 			return c.Reply(fmt.Sprintf("❌ Error: %v", html.EscapeString(err.Error())), tele.ModeHTML)
 		}
 
-		return sendOrEditSplitMessage(c, thinkingMsg, resp.Text)
+		return sendOrEditSplitMessage(c, thinkingMsg, resp.Text, resp.MediaFiles...)
 	})
 }
 
@@ -460,34 +1275,53 @@ func sendSplitMessage(c tele.Context, text string) error {
 	return sendOrEditSplitMessage(c, nil, text)
 }
 
-func sendOrEditSplitMessage(c tele.Context, thinkingMsg *tele.Message, text string) error {
+func sendOrEditSplitMessage(c tele.Context, thinkingMsg *tele.Message, text string, mediaFiles ...agent.MediaAttachment) error {
 	if strings.TrimSpace(text) == "" {
 		text = "(Tidak ada respon dari model)"
 	}
 
 	chunks := splitText(text, 4000)
-	if len(chunks) == 0 {
-		return nil
-	}
-
-	if thinkingMsg != nil {
-		_, err := c.Bot().Edit(thinkingMsg, chunks[0])
-		if err != nil {
-			_ = c.Reply(chunks[0])
-		}
-		for _, chunk := range chunks[1:] {
-			if err := c.Reply(chunk); err != nil {
-				return err
+	if len(chunks) > 0 {
+		if thinkingMsg != nil {
+			_, err := c.Bot().Edit(thinkingMsg, chunks[0])
+			if err != nil {
+				_ = c.Reply(chunks[0])
+			}
+			for _, chunk := range chunks[1:] {
+				if err := c.Reply(chunk); err != nil {
+					_ = err
+				}
+			}
+		} else {
+			for _, chunk := range chunks {
+				if err := c.Reply(chunk); err != nil {
+					_ = err
+				}
 			}
 		}
-		return nil
 	}
 
-	for _, chunk := range chunks {
-		if err := c.Reply(chunk); err != nil {
-			return err
+	// Dispatch media attachments
+	for _, mf := range mediaFiles {
+		ext := strings.ToLower(filepath.Ext(mf.FilePath))
+		isPhoto := ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp" || ext == ".gif"
+
+		if isPhoto {
+			photo := &tele.Photo{
+				File:    tele.FromDisk(mf.FilePath),
+				Caption: mf.Caption,
+			}
+			_ = c.Send(photo)
+		} else {
+			doc := &tele.Document{
+				File:     tele.FromDisk(mf.FilePath),
+				Caption:  mf.Caption,
+				FileName: filepath.Base(mf.FilePath),
+			}
+			_ = c.Send(doc)
 		}
 	}
+
 	return nil
 }
 
@@ -515,6 +1349,7 @@ func (a *AdminBot) handleHelp(c tele.Context) error {
 		"• <code>/menu</code> - Tampilkan dashboard tombol interaktif\n\n" +
 		"🤖 <b>Provider AI (9Router Multi-Key & Router):</b>\n" +
 		"• <code>/wizard</code> atau <code>/setup</code> - Wizard interaktif tambah provider & deteksi model otomatis\n" +
+		"• <code>/editprovider [id]</code> - Wizard interaktif edit konfigurasi provider\n" +
 		"• <code>/fetchmodels &lt;provider_id&gt;</code> - Deteksi & segarkan model otomatis dari <code>/models</code>\n" +
 		"• <code>/providers</code> - Lihat daftar provider & model\n" +
 		"• <code>/addprovider &lt;id&gt; &lt;name&gt; &lt;type&gt; [base_url] [model]</code>\n" +
@@ -528,6 +1363,8 @@ func (a *AdminBot) handleHelp(c tele.Context) error {
 		"• <code>/delprovider &lt;provider_id&gt;</code>\n\n" +
 		"🔀 <b>Model Combos & Fallback Chains:</b>\n" +
 		"• <code>/combos</code> - Lihat seluruh combo chains\n" +
+		"• <code>/combowizard</code> - Wizard interaktif buat combo baru\n" +
+		"• <code>/editcombo [name]</code> - Wizard interaktif edit targets & strategi combo\n" +
 		"• <code>/addcombo &lt;name&gt; &lt;prov1:model1,prov2:model2,...&gt;</code>\n" +
 		"• <code>/delcombo &lt;name&gt;</code>\n\n" +
 		"🌐 <b>Proxy Pool (9Router Engine):</b>\n" +

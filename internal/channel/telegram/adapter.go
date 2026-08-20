@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -124,7 +125,7 @@ func (a *BotAdapter) registerHandlers() {
 			return c.Reply(friendlyErr, tele.ModeHTML)
 		}
 
-		return sendOrEditResponse(c, thinkingMsg, resp.Text)
+		return sendOrEditResponse(c, thinkingMsg, resp.Text, resp.MediaFiles)
 	})
 
 	// Document / File handler
@@ -171,39 +172,58 @@ func (a *BotAdapter) registerHandlers() {
 			return c.Reply(friendlyErr, tele.ModeHTML)
 		}
 
-		return sendOrEditResponse(c, thinkingMsg, resp.Text)
+		return sendOrEditResponse(c, thinkingMsg, resp.Text, resp.MediaFiles)
 	})
 }
 
-func sendOrEditResponse(c tele.Context, thinkingMsg *tele.Message, text string) error {
+func sendOrEditResponse(c tele.Context, thinkingMsg *tele.Message, text string, mediaFiles []agent.MediaAttachment) error {
 	if strings.TrimSpace(text) == "" {
 		text = "(Tidak ada respon dari model)"
 	}
 
 	chunks := splitMessage(text, 4000)
-	if len(chunks) == 0 {
-		return nil
-	}
-
-	if thinkingMsg != nil {
-		_, err := c.Bot().Edit(thinkingMsg, chunks[0])
-		if err != nil {
-			// Fallback to reply if edit fails
-			_ = c.Reply(chunks[0])
-		}
-		for _, chunk := range chunks[1:] {
-			if err := c.Reply(chunk); err != nil {
-				return err
+	if len(chunks) > 0 {
+		if thinkingMsg != nil {
+			_, err := c.Bot().Edit(thinkingMsg, chunks[0])
+			if err != nil {
+				// Fallback to reply if edit fails
+				_ = c.Reply(chunks[0])
+			}
+			for _, chunk := range chunks[1:] {
+				if err := c.Reply(chunk); err != nil {
+					_ = err
+				}
+			}
+		} else {
+			for _, chunk := range chunks {
+				if err := c.Reply(chunk); err != nil {
+					_ = err
+				}
 			}
 		}
-		return nil
 	}
 
-	for _, chunk := range chunks {
-		if err := c.Reply(chunk); err != nil {
-			return err
+	// Dispatch media attachments
+	for _, mf := range mediaFiles {
+		ext := strings.ToLower(filepath.Ext(mf.FilePath))
+		isPhoto := ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp" || ext == ".gif"
+
+		if isPhoto {
+			photo := &tele.Photo{
+				File:    tele.FromDisk(mf.FilePath),
+				Caption: mf.Caption,
+			}
+			_ = c.Send(photo)
+		} else {
+			doc := &tele.Document{
+				File:     tele.FromDisk(mf.FilePath),
+				Caption:  mf.Caption,
+				FileName: filepath.Base(mf.FilePath),
+			}
+			_ = c.Send(doc)
 		}
 	}
+
 	return nil
 }
 

@@ -52,6 +52,8 @@ func (ui *ComboUI) RenderCombosList() string {
 	}
 
 	sb.WriteString("📋 <b>Perintah Combo Chains:</b>\n")
+	sb.WriteString("• <code>/combowizard</code> - Wizard buat combo baru secara interaktif\n")
+	sb.WriteString("• <code>/editcombo [name]</code> - Wizard edit combo & targets secara interaktif\n")
 	sb.WriteString("• <code>/addcombo &lt;name&gt; &lt;prov1:model1,prov2:model2,...&gt; [deskripsi]</code>\n")
 	sb.WriteString("• <code>/delcombo &lt;name&gt;</code>\n\n")
 	sb.WriteString("💡 <b>Contoh Penggunaan:</b>\n")
@@ -69,10 +71,11 @@ func (ui *ComboUI) HandleCombos(c tele.Context) error {
 
 func (ui *ComboUI) CombosKeyboard() *tele.ReplyMarkup {
 	menu := &tele.ReplyMarkup{}
-	btnWizard := menu.Data("🧙‍♂️ Buat Combo Baru (Wizard)", "cwiz_start")
+	btnWizard := menu.Data("🧙‍♂️ Buat Combo", "cwiz_start")
+	btnEdit := menu.Data("✏️ Edit Combo", "cwiz_edit_start")
 	btnBack := menu.Data("⬅️ Kembali ke Menu Utama", "menu_main")
 	menu.Inline(
-		menu.Row(btnWizard),
+		menu.Row(btnWizard, btnEdit),
 		menu.Row(btnBack),
 	)
 	return menu

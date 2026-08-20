@@ -74,6 +74,8 @@ func (ui *ProviderUI) RenderProvidersList() string {
 	}
 
 	sb.WriteString("📋 <b>Perintah Manajemen Provider & Proxy:</b>\n")
+	sb.WriteString("• <code>/wizard</code> - Interactive Setup Wizard provider baru\n")
+	sb.WriteString("• <code>/editprovider [id]</code> - Interactive Edit Wizard provider\n")
 	sb.WriteString("• <code>/setproviderproxy &lt;id&gt; &lt;group|off&gt;</code> - Pasang proxy pool ke provider\n")
 	sb.WriteString("• <code>/addkey &lt;provider_id&gt; &lt;api_key&gt;</code> - Tambah key ke pool rotasi\n")
 	sb.WriteString("• <code>/setkeys &lt;provider_id&gt; &lt;key1,key2,...&gt;</code> - Set multiple keys\n")
@@ -433,10 +435,11 @@ func contains(slice []string, val string) bool {
 
 func (ui *ProviderUI) ProviderMenuKeyboard() *tele.ReplyMarkup {
 	menu := &tele.ReplyMarkup{}
-	btnWizard := menu.Data("🧙‍♂️ Setup Wizard (Auto-Detect Models)", "wiz_start")
+	btnWizard := menu.Data("🧙‍♂️ Setup Wizard", "wiz_start")
+	btnEdit := menu.Data("✏️ Edit Provider", "wiz_edit_start")
 	btnBack := menu.Data("⬅️ Kembali ke Menu Utama", "menu_main")
 	menu.Inline(
-		menu.Row(btnWizard),
+		menu.Row(btnWizard, btnEdit),
 		menu.Row(btnBack),
 	)
 	return menu

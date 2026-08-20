@@ -26,6 +26,7 @@ func GetRegistry() *Registry {
 		defaultRegistry.Register(&WebSearchTool{})
 		defaultRegistry.Register(&HTTPClientTool{})
 		defaultRegistry.Register(&BashTool{})
+		defaultRegistry.Register(&SendFileTool{})
 	})
 	return defaultRegistry
 }

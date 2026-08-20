@@ -55,10 +55,16 @@ type UserRequest struct {
 	OnProgress      func(status string)
 }
 
+type MediaAttachment struct {
+	FilePath string
+	Caption  string
+}
+
 type AgentResponse struct {
 	Text             string
 	RawText          string
 	Footer           string
+	MediaFiles       []MediaAttachment
 	ToolsUsed        []string
 	PromptTokens     int
 	CompletionTokens int
@@ -179,6 +185,32 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	var lastModel string
 	var lastProviderName string
 
+	var mediaFiles []MediaAttachment
+
+	extractAttachments := func(s string) {
+		for {
+			idx := strings.Index(s, "[ATTACH_FILE:")
+			if idx == -1 {
+				break
+			}
+			endIdx := strings.Index(s[idx:], "]")
+			if endIdx == -1 {
+				break
+			}
+			tag := s[idx+len("[ATTACH_FILE:") : idx+endIdx]
+			parts := strings.SplitN(tag, "|CAPTION:", 2)
+			fPath := strings.TrimSpace(parts[0])
+			capText := ""
+			if len(parts) == 2 {
+				capText = strings.TrimSpace(parts[1])
+			}
+			if fPath != "" {
+				mediaFiles = append(mediaFiles, MediaAttachment{FilePath: fPath, Caption: capText})
+			}
+			s = s[idx+endIdx+1:]
+		}
+	}
+
 	maxTurns := 5
 	for turn := 0; turn < maxTurns; turn++ {
 		// Run Token Saver RTK / Caveman compression pipeline
@@ -276,6 +308,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		if len(resp.ToolCalls) == 0 {
 			// No more tool calls; final response reached
 			finalContent = resp.Content
+			extractAttachments(finalContent)
 			break
 		}
 
@@ -296,6 +329,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 			if toolErr != nil {
 				toolOut = fmt.Sprintf("Error eksekusi tool %s: %v", tc.Name, toolErr)
 			}
+
+			extractAttachments(toolOut)
 
 			// Pre-compress tool output before appending to message history
 			compressedToolOut := tokensaver.CompressContent(toolOut, policy.TokenSaverMode)
@@ -360,6 +395,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		Text:             finalText,
 		RawText:          cleanText,
 		Footer:           footer,
+		MediaFiles:       mediaFiles,
 		ToolsUsed:        allToolsCalled,
 		PromptTokens:     totalPromptTokens,
 		CompletionTokens: totalCompletionTokens,
