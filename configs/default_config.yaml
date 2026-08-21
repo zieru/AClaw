@@ -27,3 +27,16 @@ proxy_pool:
 token_saver:
   default_mode: "auto" # auto (RTK), aggressive, caveman, off
 
+# Streaming & Thinking Configuration
+streaming:
+  enabled: true              # Enable/disable streaming response secara global
+  thinking_enabled: true     # Tampilkan proses berpikir/reasoning dari model AI
+  thinking_display: "full"   # full (tampilkan semua), summary (ringkasan), hidden (sembunyikan)
+  chunk_delay_ms: 500        # Delay (ms) antara update streaming ke Telegram (500ms = 2x/detik)
+
+# Sub-Agent Multi-Task Delegation
+subagent:
+  max_parallel: 3            # Max sub-agent berjalan bersamaan (3-5 direkomendasikan)
+  timeout_seconds: 90        # Batas waktu per sub-task (detik)
+  auto_delegate: true        # Otomatis pecah prompt kompleks ke sub-agent
+  token_budget_per_task: 2048 # Budget token per sub-agent task

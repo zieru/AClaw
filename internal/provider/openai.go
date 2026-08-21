@@ -125,12 +125,15 @@ type openAIToolDef struct {
 }
 
 type openAIReqBody struct {
-	Model       string          `json:"model"`
-	Messages    []openAIMessage `json:"messages"`
-	Tools       []openAIToolDef `json:"tools,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Stream      bool            `json:"stream"`
+	Model         string          `json:"model"`
+	Messages      []openAIMessage `json:"messages"`
+	Tools         []openAIToolDef `json:"tools,omitempty"`
+	Temperature   float64         `json:"temperature,omitempty"`
+	MaxTokens     int             `json:"max_tokens,omitempty"`
+	Stream        bool            `json:"stream"`
+	StreamOptions *struct {
+		IncludeUsage bool `json:"include_usage"`
+	} `json:"stream_options,omitempty"`
 }
 
 type openAIRespBody struct {
@@ -138,21 +141,27 @@ type openAIRespBody struct {
 	Model   string `json:"model"`
 	Choices []struct {
 		Message struct {
-			Role      string           `json:"role"`
-			Content   string           `json:"content"`
-			ToolCalls []openAIToolCall `json:"tool_calls"`
+			Role             string           `json:"role"`
+			Content          string           `json:"content"`
+			ReasoningContent string           `json:"reasoning_content,omitempty"`
+			ToolCalls        []openAIToolCall `json:"tool_calls"`
 		} `json:"message"`
 		Delta struct {
-			Role      string           `json:"role"`
-			Content   string           `json:"content"`
-			ToolCalls []openAIToolCall `json:"tool_calls"`
+			Role             string           `json:"role"`
+			Content          string           `json:"content"`
+			ReasoningContent string           `json:"reasoning_content,omitempty"`
+			ToolCalls        []openAIToolCall `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
+		PromptTokens          int `json:"prompt_tokens"`
+		CompletionTokens      int `json:"completion_tokens"`
+		TotalTokens           int `json:"total_tokens"`
+		ReasoningTokens       int `json:"reasoning_tokens,omitempty"`
+		CompletionTokensDetails *struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details,omitempty"`
 	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
@@ -213,7 +222,14 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		Tools:       toolDefs,
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
-		Stream:      false,
+		Stream:      req.Stream && req.StreamCallback != nil,
+	}
+
+	// Enable stream_options for usage in stream mode
+	if reqPayload.Stream {
+		reqPayload.StreamOptions = &struct {
+			IncludeUsage bool `json:"include_usage"`
+		}{IncludeUsage: true}
 	}
 
 	payloadBytes, err := json.Marshal(reqPayload)
@@ -311,12 +327,20 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 				actualModel = model
 			}
 
+			// Extract thinking/reasoning tokens
+			thinkingTokens := respBody.Usage.ReasoningTokens
+			if thinkingTokens == 0 && respBody.Usage.CompletionTokensDetails != nil {
+				thinkingTokens = respBody.Usage.CompletionTokensDetails.ReasoningTokens
+			}
+
 			cost := (float64(respBody.Usage.PromptTokens)*0.00015 + float64(respBody.Usage.CompletionTokens)*0.0006) / 1000.0
 			return &ChatResponse{
 				Content:          choice.Message.Content,
+				Thinking:         choice.Message.ReasoningContent,
 				ToolCalls:        parsedToolCalls,
 				PromptTokens:     respBody.Usage.PromptTokens,
 				CompletionTokens: respBody.Usage.CompletionTokens,
+				ThinkingTokens:   thinkingTokens,
 				TotalTokens:      respBody.Usage.TotalTokens,
 				CostUSD:          cost,
 				Latency:          time.Since(start),
@@ -382,3 +406,224 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 	}
 	return nil, fmt.Errorf("gagal parsing response API (Response: %s)", preview)
 }
+
+// GenerateChatStream implements StreamingProvider with real-time SSE streaming
+func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	start := time.Now()
+	model := req.Model
+	if model == "" {
+		model = p.defaultModel
+	}
+
+	var msgs []openAIMessage
+	for _, m := range req.Messages {
+		var toolCalls []openAIToolCall
+		for _, tc := range m.ToolCalls {
+			argBytes, _ := json.Marshal(tc.Arguments)
+			toolCalls = append(toolCalls, openAIToolCall{
+				ID:   tc.ID,
+				Type: "function",
+				Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{
+					Name:      tc.Name,
+					Arguments: string(argBytes),
+				},
+			})
+		}
+		msgs = append(msgs, openAIMessage{
+			Role:       string(m.Role),
+			Content:    m.Content,
+			Name:       m.Name,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  toolCalls,
+		})
+	}
+
+	var toolDefs []openAIToolDef
+	for _, t := range req.Tools {
+		toolDefs = append(toolDefs, openAIToolDef{
+			Type: "function",
+			Function: openAIFunctionDef{
+				Name:        t.Name(),
+				Description: t.Description(),
+				Parameters:  t.Parameters(),
+			},
+		})
+	}
+
+	reqPayload := openAIReqBody{
+		Model:       model,
+		Messages:    msgs,
+		Tools:       toolDefs,
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+		Stream:      true,
+		StreamOptions: &struct {
+			IncludeUsage bool `json:"include_usage"`
+		}{IncludeUsage: true},
+	}
+
+	payloadBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal stream request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/chat/completions", p.baseURL)
+	apiKey := p.keyPool.GetNextKey()
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	httpResp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("stream request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(httpResp.Body)
+		return nil, fmt.Errorf("stream api error (%d): %s", httpResp.StatusCode, string(bodyBytes))
+	}
+
+	// Parse SSE stream
+	var contentBuilder strings.Builder
+	var thinkingBuilder strings.Builder
+	var toolCalls []ToolCall
+	var promptTokens, completionTokens, totalTokens, thinkingTokens int
+	actualModel := model
+
+	// Read line by line from SSE stream
+	buf := make([]byte, 4096)
+	var lineBuffer strings.Builder
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		n, readErr := httpResp.Body.Read(buf)
+		if n > 0 {
+			lineBuffer.Write(buf[:n])
+			// Process complete lines
+			text := lineBuffer.String()
+			lines := strings.Split(text, "\n")
+
+			// Keep incomplete last line in buffer
+			if !strings.HasSuffix(text, "\n") && len(lines) > 0 {
+				lineBuffer.Reset()
+				lineBuffer.WriteString(lines[len(lines)-1])
+				lines = lines[:len(lines)-1]
+			} else {
+				lineBuffer.Reset()
+			}
+
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if !strings.HasPrefix(line, "data:") {
+					continue
+				}
+				data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+				if data == "[DONE]" || data == "" {
+					continue
+				}
+
+				var chunk openAIRespBody
+				if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+					continue
+				}
+
+				if chunk.Model != "" {
+					actualModel = chunk.Model
+				}
+
+				if len(chunk.Choices) > 0 {
+					delta := chunk.Choices[0].Delta
+
+					if delta.Content != "" {
+						contentBuilder.WriteString(delta.Content)
+						if req.StreamCallback != nil {
+							req.StreamCallback(StreamChunk{Content: delta.Content})
+						}
+					}
+
+					if delta.ReasoningContent != "" {
+						thinkingBuilder.WriteString(delta.ReasoningContent)
+						if req.StreamCallback != nil {
+							req.StreamCallback(StreamChunk{Thinking: delta.ReasoningContent})
+						}
+					}
+
+					// Accumulate tool calls from stream
+					for _, tc := range delta.ToolCalls {
+						if tc.ID != "" {
+							var args map[string]interface{}
+							_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
+							toolCalls = append(toolCalls, ToolCall{
+								ID:        tc.ID,
+								Name:      tc.Function.Name,
+								Arguments: args,
+							})
+						}
+					}
+				}
+
+				// Capture usage from final chunk
+				if chunk.Usage.TotalTokens > 0 {
+					promptTokens = chunk.Usage.PromptTokens
+					completionTokens = chunk.Usage.CompletionTokens
+					totalTokens = chunk.Usage.TotalTokens
+					thinkingTokens = chunk.Usage.ReasoningTokens
+					if thinkingTokens == 0 && chunk.Usage.CompletionTokensDetails != nil {
+						thinkingTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
+					}
+				}
+			}
+		}
+
+		if readErr != nil {
+			break
+		}
+	}
+
+	// Send done signal
+	if req.StreamCallback != nil {
+		req.StreamCallback(StreamChunk{Done: true})
+	}
+
+	if apiKey != "" {
+		p.keyPool.MarkSuccess(apiKey)
+	}
+
+	if totalTokens == 0 {
+		totalTokens = (contentBuilder.Len() + thinkingBuilder.Len()) / 4
+	}
+
+	cost := (float64(promptTokens)*0.00015 + float64(completionTokens)*0.0006) / 1000.0
+
+	return &ChatResponse{
+		Content:          contentBuilder.String(),
+		Thinking:         thinkingBuilder.String(),
+		ToolCalls:        toolCalls,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		ThinkingTokens:   thinkingTokens,
+		TotalTokens:      totalTokens,
+		CostUSD:          cost,
+		Latency:          time.Since(start),
+		Model:            actualModel,
+		ProviderName:     p.name,
+	}, nil
+}
+
+// Ensure OpenAIProvider implements StreamingProvider
+var _ StreamingProvider = (*OpenAIProvider)(nil)

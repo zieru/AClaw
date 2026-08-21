@@ -65,8 +65,9 @@ type anthropicToolDef struct {
 }
 
 type anthropicContentBlock struct {
-	Type      string                 `json:"type"` // text, tool_use, tool_result
+	Type      string                 `json:"type"` // text, tool_use, tool_result, thinking
 	Text      string                 `json:"text,omitempty"`
+	Thinking  string                 `json:"thinking,omitempty"`
 	ID        string                 `json:"id,omitempty"`
 	Name      string                 `json:"name,omitempty"`
 	Input     map[string]interface{} `json:"input,omitempty"`
@@ -97,6 +98,8 @@ type anthropicRespBody struct {
 	Usage   struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	} `json:"usage"`
 	Error *struct {
 		Type    string `json:"type"`
@@ -265,12 +268,20 @@ func (p *AnthropicProvider) GenerateChat(ctx context.Context, req ChatRequest) (
 	}
 
 	var textParts []string
+	var thinkingParts []string
 	var toolCalls []ToolCall
 
 	for _, block := range respBody.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
 			textParts = append(textParts, block.Text)
-		} else if block.Type == "tool_use" {
+		case "thinking":
+			if block.Thinking != "" {
+				thinkingParts = append(thinkingParts, block.Thinking)
+			} else if block.Text != "" {
+				thinkingParts = append(thinkingParts, block.Text)
+			}
+		case "tool_use":
 			toolCalls = append(toolCalls, ToolCall{
 				ID:        block.ID,
 				Name:      block.Name,
@@ -289,6 +300,7 @@ func (p *AnthropicProvider) GenerateChat(ctx context.Context, req ChatRequest) (
 
 	return &ChatResponse{
 		Content:          strings.Join(textParts, "\n"),
+		Thinking:         strings.Join(thinkingParts, "\n"),
 		ToolCalls:        toolCalls,
 		PromptTokens:     respBody.Usage.InputTokens,
 		CompletionTokens: respBody.Usage.OutputTokens,

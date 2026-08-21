@@ -60,6 +60,7 @@ func (p *GeminiProvider) SetHTTPClient(client interface{}) {
 
 type geminiPart struct {
 	Text             string                 `json:"text,omitempty"`
+	Thought          string                 `json:"thought,omitempty"`
 	FunctionCall     *geminiFunctionCall    `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResp    `json:"functionResponse,omitempty"`
 }
@@ -93,10 +94,18 @@ type geminiReqBody struct {
 	Contents          []geminiContent `json:"contents"`
 	Tools             []geminiTool    `json:"tools,omitempty"`
 	SystemInstruction *geminiContent  `json:"systemInstruction,omitempty"`
-	GenerationConfig  *struct {
-		Temperature float64 `json:"temperature,omitempty"`
-		MaxTokens   int     `json:"maxOutputTokens,omitempty"`
-	} `json:"generationConfig,omitempty"`
+	GenerationConfig  *geminiGenConfig `json:"generationConfig,omitempty"`
+}
+
+type geminiGenConfig struct {
+	Temperature    float64             `json:"temperature,omitempty"`
+	MaxTokens      int                 `json:"maxOutputTokens,omitempty"`
+	ThinkingConfig *geminiThinkConfig  `json:"thinkingConfig,omitempty"`
+}
+
+type geminiThinkConfig struct {
+	ThinkingBudget int  `json:"thinkingBudget,omitempty"`
+	IncludeThoughts bool `json:"includeThoughts,omitempty"`
 }
 
 type geminiRespBody struct {
@@ -111,6 +120,7 @@ type geminiRespBody struct {
 		PromptTokenCount     int `json:"promptTokenCount"`
 		CandidatesTokenCount int `json:"candidatesTokenCount"`
 		TotalTokenCount      int `json:"totalTokenCount"`
+		ThoughtsTokenCount   int `json:"thoughtsTokenCount,omitempty"`
 	} `json:"usageMetadata"`
 	Error *struct {
 		Code    int    `json:"code"`
@@ -195,13 +205,20 @@ func (p *GeminiProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		SystemInstruction: systemContent,
 	}
 
-	if req.Temperature > 0 || req.MaxTokens > 0 {
-		payload.GenerationConfig = &struct {
-			Temperature float64 `json:"temperature,omitempty"`
-			MaxTokens   int     `json:"maxOutputTokens,omitempty"`
-		}{
+	if req.Temperature > 0 || req.MaxTokens > 0 || req.ThinkingEnabled {
+		payload.GenerationConfig = &geminiGenConfig{
 			Temperature: req.Temperature,
 			MaxTokens:   req.MaxTokens,
+		}
+		if req.ThinkingEnabled {
+			budget := req.ThinkingBudget
+			if budget <= 0 {
+				budget = 8192
+			}
+			payload.GenerationConfig.ThinkingConfig = &geminiThinkConfig{
+				ThinkingBudget:  budget,
+				IncludeThoughts: true,
+			}
 		}
 	}
 
@@ -284,10 +301,13 @@ func (p *GeminiProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 
 	cand := respBody.Candidates[0]
 	var textParts []string
+	var thinkingParts []string
 	var toolCalls []ToolCall
 
 	for i, part := range cand.Content.Parts {
-		if part.Text != "" {
+		if part.Thought != "" {
+			thinkingParts = append(thinkingParts, part.Thought)
+		} else if part.Text != "" {
 			textParts = append(textParts, part.Text)
 		}
 		if part.FunctionCall != nil {
@@ -299,11 +319,12 @@ func (p *GeminiProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		}
 	}
 
-	var promptTokens, compTokens, totalTokens int
+	var promptTokens, compTokens, totalTokens, thinkingTokens int
 	if respBody.UsageMetadata != nil {
 		promptTokens = respBody.UsageMetadata.PromptTokenCount
 		compTokens = respBody.UsageMetadata.CandidatesTokenCount
 		totalTokens = respBody.UsageMetadata.TotalTokenCount
+		thinkingTokens = respBody.UsageMetadata.ThoughtsTokenCount
 	}
 
 	// Cost estimation for Gemini 2.0 Flash (~$0.10/1M input, $0.40/1M output)
@@ -311,9 +332,11 @@ func (p *GeminiProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 
 	return &ChatResponse{
 		Content:          strings.Join(textParts, "\n"),
+		Thinking:         strings.Join(thinkingParts, "\n"),
 		ToolCalls:        toolCalls,
 		PromptTokens:     promptTokens,
 		CompletionTokens: compTokens,
+		ThinkingTokens:   thinkingTokens,
 		TotalTokens:      totalTokens,
 		CostUSD:          cost,
 		Latency:          time.Since(start),

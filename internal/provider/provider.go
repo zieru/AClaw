@@ -37,21 +37,37 @@ type ChatMessage struct {
 	Name       string      `json:"name,omitempty"`
 }
 
+// StreamChunk represents a single chunk of streamed response
+type StreamChunk struct {
+	Content  string // Text content delta
+	Thinking string // Thinking/reasoning delta
+	Done     bool   // True when stream is complete
+}
+
+// StreamCallback is called for each chunk during streaming
+type StreamCallback func(chunk StreamChunk)
+
 // ChatRequest holds parameters for calling an LLM
 type ChatRequest struct {
-	Model       string
-	Messages    []ChatMessage
-	Tools       []tools.Tool
-	Temperature float64
-	MaxTokens   int
+	Model           string
+	Messages        []ChatMessage
+	Tools           []tools.Tool
+	Temperature     float64
+	MaxTokens       int
+	Stream          bool           // Enable streaming response
+	StreamCallback  StreamCallback // Callback for streaming chunks
+	ThinkingEnabled bool           // Enable thinking/reasoning output
+	ThinkingBudget  int            // Max tokens for thinking (0 = provider default)
 }
 
 // ChatResponse holds the output from an LLM call
 type ChatResponse struct {
 	Content          string
+	Thinking         string // Thinking/reasoning content from model
 	ToolCalls        []ToolCall
 	PromptTokens     int
 	CompletionTokens int
+	ThinkingTokens   int // Tokens used for thinking
 	TotalTokens      int
 	CostUSD          float64
 	Latency          time.Duration
@@ -67,6 +83,22 @@ type Provider interface {
 	Models() []string
 	GenerateChat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
 	SetHTTPClient(client interface{})
+}
+
+// StreamingProvider is an optional interface for providers that support streaming
+type StreamingProvider interface {
+	Provider
+	GenerateChatStream(ctx context.Context, req ChatRequest) (*ChatResponse, error)
+}
+
+// IsFreeProvider returns true if the provider type is a free/no-key provider
+func IsFreeProvider(providerType string) bool {
+	switch strings.ToLower(providerType) {
+	case "free_openai", "free_gemini", "free", "opencodefree":
+		return true
+	default:
+		return false
+	}
 }
 
 // Manager coordinates multiple providers, selection, model routing, combos, and fallbacks

@@ -45,6 +45,20 @@ type AppConfig struct {
 	TokenSaver struct {
 		DefaultMode string `yaml:"default_mode"` // off, auto, aggressive, caveman
 	} `yaml:"token_saver"`
+
+	Streaming struct {
+		Enabled         bool   `yaml:"enabled"`          // Enable/disable streaming globally
+		ThinkingEnabled bool   `yaml:"thinking_enabled"` // Show thinking/reasoning process
+		ThinkingDisplay string `yaml:"thinking_display"` // full, summary, hidden
+		ChunkDelayMs    int    `yaml:"chunk_delay_ms"`   // Delay between streaming chunks to Telegram
+	} `yaml:"streaming"`
+
+	SubAgent struct {
+		MaxParallel        int  `yaml:"max_parallel"`          // Max concurrent sub-agents
+		TimeoutSeconds     int  `yaml:"timeout_seconds"`       // Per-task timeout
+		AutoDelegate       bool `yaml:"auto_delegate"`         // Auto-split complex prompts
+		TokenBudgetPerTask int  `yaml:"token_budget_per_task"` // Max tokens per sub-agent task
+	} `yaml:"subagent"`
 }
 
 var (
@@ -78,6 +92,14 @@ func Load(configPath string) (*AppConfig, error) {
 		cfg.ProxyPool.Enabled = true
 		cfg.ProxyPool.Strategy = "round-robin"
 		cfg.TokenSaver.DefaultMode = "auto"
+		cfg.Streaming.Enabled = true
+		cfg.Streaming.ThinkingEnabled = true
+		cfg.Streaming.ThinkingDisplay = "full"
+		cfg.Streaming.ChunkDelayMs = 500
+		cfg.SubAgent.MaxParallel = 3
+		cfg.SubAgent.TimeoutSeconds = 90
+		cfg.SubAgent.AutoDelegate = true
+		cfg.SubAgent.TokenBudgetPerTask = 2048
 
 		if configPath != "" {
 			if _, statErr := os.Stat(configPath); statErr != nil {

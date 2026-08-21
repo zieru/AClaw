@@ -15,15 +15,17 @@ func NewPromptBuilder(mdLoader *MDLoader) *PromptBuilder {
 }
 
 type PromptContext struct {
-	AgentRole      string
-	ChannelType    string
-	ChannelName    string
-	UserName       string
-	UserID         string
-	MemoryContext  string
-	SessionSummary string
-	ActiveModel    string
-	ActiveProvider string
+	AgentRole       string
+	ChannelType     string
+	ChannelName     string
+	UserName        string
+	UserID          string
+	MemoryContext   string
+	SessionSummary  string
+	ActiveModel     string
+	ActiveProvider  string
+	ThinkingEnabled bool
+	StreamMode      bool
 }
 
 // BuildSystemPrompt builds the complete system prompt from Markdown files and context
@@ -98,6 +100,16 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 	rawPrompt = strings.ReplaceAll(rawPrompt, "{{channel}}", ctx.ChannelName)
 	rawPrompt = strings.ReplaceAll(rawPrompt, "{{model}}", ctx.ActiveModel)
 	rawPrompt = strings.ReplaceAll(rawPrompt, "{{provider}}", ctx.ActiveProvider)
+	if ctx.ThinkingEnabled {
+		rawPrompt = strings.ReplaceAll(rawPrompt, "{{thinking_enabled}}", "true")
+	} else {
+		rawPrompt = strings.ReplaceAll(rawPrompt, "{{thinking_enabled}}", "false")
+	}
+	if ctx.StreamMode {
+		rawPrompt = strings.ReplaceAll(rawPrompt, "{{stream_mode}}", "streaming")
+	} else {
+		rawPrompt = strings.ReplaceAll(rawPrompt, "{{stream_mode}}", "batch")
+	}
 
 	return rawPrompt, nil
 }
@@ -115,10 +127,40 @@ func (pb *PromptBuilder) BuildSubagentPrompt(role string) (string, error) {
 		sb.WriteString("\n\n")
 	}
 
+	// Role-specific enhancements
+	switch strings.ToLower(role) {
+	case "coder", "programmer", "developer":
+		sb.WriteString("## Pedoman Khusus Coder:\n")
+		sb.WriteString("- Tulis kode yang bersih, efisien, dan terdokumentasi.\n")
+		sb.WriteString("- Sertakan error handling dan edge cases.\n")
+		sb.WriteString("- Gunakan best practices dari bahasa pemrograman yang diminta.\n\n")
+	case "analyst", "analyzer":
+		sb.WriteString("## Pedoman Khusus Analyst:\n")
+		sb.WriteString("- Analisis data secara sistematis dan terstruktur.\n")
+		sb.WriteString("- Berikan insight yang actionable dan didukung bukti.\n")
+		sb.WriteString("- Gunakan tabel atau bullet points untuk kejelasan.\n\n")
+	case "researcher":
+		sb.WriteString("## Pedoman Khusus Researcher:\n")
+		sb.WriteString("- Lakukan riset mendalam dan komprehensif.\n")
+		sb.WriteString("- Sertakan sumber dan referensi jika memungkinkan.\n")
+		sb.WriteString("- Bandingkan multiple perspektif dan sudut pandang.\n\n")
+	case "writer", "copywriter":
+		sb.WriteString("## Pedoman Khusus Writer:\n")
+		sb.WriteString("- Tulis dengan gaya yang sesuai konteks dan audiens.\n")
+		sb.WriteString("- Perhatikan struktur, alur, dan kejelasan pesan.\n")
+		sb.WriteString("- Gunakan bahasa yang menarik dan persuasif.\n\n")
+	case "reviewer":
+		sb.WriteString("## Pedoman Khusus Reviewer:\n")
+		sb.WriteString("- Review secara kritis dan konstruktif.\n")
+		sb.WriteString("- Identifikasi kekuatan dan kelemahan.\n")
+		sb.WriteString("- Berikan saran perbaikan yang spesifik.\n\n")
+	}
+
 	sb.WriteString("## Prinsip Kerja Sub-Agen:\n")
 	sb.WriteString("1. Fokus hanya pada instruksi tugas yang didelegasikan kepadamu.\n")
 	sb.WriteString("2. Gunakan data/konteks terisolasi yang diberikan tanpa memerlukan seluruh riwayat percakapan.\n")
 	sb.WriteString("3. Kembalikan hasil yang padat, akurat, solutif, dan terstruktur tanpa basa-basi pembuka yang berlebihan.\n")
+	sb.WriteString("4. Jika tugas memerlukan tools, gunakan tools yang tersedia secara efisien.\n")
 
 	return sb.String(), nil
 }

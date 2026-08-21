@@ -63,6 +63,9 @@ func Open(dbPath string) (*DB, error) {
 	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN proxy_enabled INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN proxy_group TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE proxy_nodes ADD COLUMN group_name TEXT NOT NULL DEFAULT 'default'")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN streaming_enabled INTEGER NOT NULL DEFAULT 1")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN thinking_enabled INTEGER NOT NULL DEFAULT 1")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN thinking_display TEXT NOT NULL DEFAULT 'full'")
 
 	return &DB{db: db}, nil
 }
@@ -84,9 +87,12 @@ type PolicyRecord struct {
 	AutoCompaction      bool      `json:"auto_compaction"`
 	CompactionThreshold int       `json:"compaction_threshold"`
 	ModelOverride       string    `json:"model_override"`
-	FooterMode          string    `json:"footer_mode"`      // 'off', 'tokens', 'full'
-	TokenSaverMode      string    `json:"token_saver_mode"` // 'off', 'auto', 'aggressive', 'caveman'
+	FooterMode          string    `json:"footer_mode"`         // 'off', 'tokens', 'full'
+	TokenSaverMode      string    `json:"token_saver_mode"`    // 'off', 'auto', 'aggressive', 'caveman'
 	ProxyPoolEnabled    bool      `json:"proxy_pool_enabled"`
+	StreamingEnabled    bool      `json:"streaming_enabled"`   // Enable streaming for this scope
+	ThinkingEnabled     bool      `json:"thinking_enabled"`    // Enable thinking display
+	ThinkingDisplay     string    `json:"thinking_display"`    // 'full', 'summary', 'hidden'
 	UpdatedAt           time.Time `json:"updated_at"`
 }
 

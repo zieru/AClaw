@@ -63,11 +63,13 @@ type MediaAttachment struct {
 type AgentResponse struct {
 	Text             string
 	RawText          string
+	ThinkingContent  string // Thinking/reasoning output from model
 	Footer           string
 	MediaFiles       []MediaAttachment
 	ToolsUsed        []string
 	PromptTokens     int
 	CompletionTokens int
+	ThinkingTokens   int
 	TotalTokens      int
 	TokensSaved      int
 	Latency          time.Duration
@@ -176,9 +178,11 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 
 	// 9. Execute with Tool Loop (up to 5 turns)
 	var finalContent string
+	var finalThinking string
 	var allToolsCalled []string
 	var totalPromptTokens int
 	var totalCompletionTokens int
+	var totalThinkingTokens int
 	var totalTokensUsed int
 	var totalTokensSaved int
 	var totalCostUSD float64
@@ -218,11 +222,12 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		totalTokensSaved += saverReport.TokensSaved
 
 		chatReq := provider.ChatRequest{
-			Model:       policy.ModelOverride,
-			Messages:    compressedMsgs,
-			Tools:       allowedTools,
-			Temperature: 0.7,
-			MaxTokens:   policy.MaxTokens,
+			Model:           policy.ModelOverride,
+			Messages:        compressedMsgs,
+			Tools:           allowedTools,
+			Temperature:     0.7,
+			MaxTokens:       policy.MaxTokens,
+			ThinkingEnabled: policy.ThinkingEnabled,
 		}
 
 		resp, err := o.providerManager.GenerateWithFallback(ctx, req.PreferredProv, chatReq)
@@ -300,6 +305,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 
 		totalPromptTokens += resp.PromptTokens
 		totalCompletionTokens += resp.CompletionTokens
+		totalThinkingTokens += resp.ThinkingTokens
 		totalTokensUsed += resp.TotalTokens
 		totalCostUSD += resp.CostUSD
 		lastModel = resp.Model
@@ -308,6 +314,9 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		if len(resp.ToolCalls) == 0 {
 			// No more tool calls; final response reached
 			finalContent = resp.Content
+			if resp.Thinking != "" {
+				finalThinking = resp.Thinking
+			}
 			extractAttachments(finalContent)
 			break
 		}
@@ -385,8 +394,25 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 
 	// 12. Format footer according to policy
 	cleanText := strings.TrimSpace(finalContent)
-	footer := FormatFooter(policy.FooterMode, totalPromptTokens, totalCompletionTokens, totalTokensUsed, totalTokensSaved, latency, lastModel, lastProviderName, allToolsCalled)
+	footer := FormatFooter(policy.FooterMode, totalPromptTokens, totalCompletionTokens, totalThinkingTokens, totalTokensUsed, totalTokensSaved, latency, lastModel, lastProviderName, allToolsCalled)
 	finalText := cleanText
+
+	// Prepend thinking content if enabled and available
+	if finalThinking != "" && policy.ThinkingEnabled {
+		switch strings.ToLower(policy.ThinkingDisplay) {
+		case "full":
+			finalText = "💭 <b>Proses Berpikir:</b>\n<blockquote>" + strings.TrimSpace(finalThinking) + "</blockquote>\n\n" + finalText
+		case "summary":
+			// Truncate thinking to first 500 chars
+			thinkPreview := strings.TrimSpace(finalThinking)
+			if len(thinkPreview) > 500 {
+				thinkPreview = thinkPreview[:500] + "..."
+			}
+			finalText = "💭 <i>" + thinkPreview + "</i>\n\n" + finalText
+		// "hidden" — don't show thinking
+		}
+	}
+
 	if footer != "" {
 		finalText = finalText + "\n\n" + footer
 	}
@@ -394,11 +420,13 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	return &AgentResponse{
 		Text:             finalText,
 		RawText:          cleanText,
+		ThinkingContent:  finalThinking,
 		Footer:           footer,
 		MediaFiles:       mediaFiles,
 		ToolsUsed:        allToolsCalled,
 		PromptTokens:     totalPromptTokens,
 		CompletionTokens: totalCompletionTokens,
+		ThinkingTokens:   totalThinkingTokens,
 		TotalTokens:      totalTokensUsed,
 		TokensSaved:      totalTokensSaved,
 		Latency:          latency,
@@ -408,17 +436,21 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 }
 
 // FormatFooter formats the footer according to policy mode ('off', 'tokens', 'full')
-func FormatFooter(mode string, promptTokens, completionTokens, totalTokens, tokensSaved int, latency time.Duration, model, providerName string, toolsCalled []string) string {
+func FormatFooter(mode string, promptTokens, completionTokens, thinkingTokens, totalTokens, tokensSaved int, latency time.Duration, model, providerName string, toolsCalled []string) string {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch mode {
 	case "tokens":
 		if totalTokens <= 0 {
 			return ""
 		}
-		if tokensSaved > 0 {
-			return fmt.Sprintf("🪙 %s tokens (🌿 hemat: %s)", formatThousands(totalTokens), formatThousands(tokensSaved))
+		result := fmt.Sprintf("🪙 %s tokens", formatThousands(totalTokens))
+		if thinkingTokens > 0 {
+			result += fmt.Sprintf(" (💭 %s)", formatThousands(thinkingTokens))
 		}
-		return fmt.Sprintf("🪙 %s tokens", formatThousands(totalTokens))
+		if tokensSaved > 0 {
+			result += fmt.Sprintf(" • 🌿 hemat: %s", formatThousands(tokensSaved))
+		}
+		return result
 
 	case "full":
 		var parts []string
@@ -435,6 +467,9 @@ func FormatFooter(mode string, promptTokens, completionTokens, totalTokens, toke
 		if totalTokens > 0 {
 			if promptTokens > 0 && completionTokens > 0 {
 				tokStr := fmt.Sprintf("🪙 %s (in: %s / out: %s)", formatThousands(totalTokens), formatThousands(promptTokens), formatThousands(completionTokens))
+				if thinkingTokens > 0 {
+					tokStr += fmt.Sprintf(" 💭 %s", formatThousands(thinkingTokens))
+				}
 				if tokensSaved > 0 {
 					tokStr += fmt.Sprintf(" • 🌿 hemat %s", formatThousands(tokensSaved))
 				}

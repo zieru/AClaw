@@ -25,8 +25,8 @@ import (
 )
 
 var (
-	version   = "1.1.0"
-	buildDate = "2026-08-20"
+	version   = "1.2.0"
+	buildDate = "2026-08-21"
 )
 
 func main() {
@@ -135,6 +135,8 @@ func main() {
 				inst = provider.NewGeminiProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
 			case "anthropic":
 				inst = provider.NewAnthropicProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
+			case "free_router", "free_openai", "free_gemini", "opencodefree", "free":
+				inst = provider.NewFreeOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
 			default:
 				inst = provider.NewOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
 			}
@@ -156,7 +158,13 @@ func main() {
 	// 6. Initialize Multi-Agent Delegation Tool & Orchestrator
 	subagentTool := agent.NewSubagentTool(promptBld, toolReg, provMgr)
 	toolReg.Register(subagentTool)
-	log.Printf("🤖 Multi-Agent Delegation Tool ('%s') didaftarkan", subagentTool.Name())
+	log.Printf("🤖 Multi-Agent Delegation Tool ('%s') didaftarkan (Max Parallel: %d, Auto-Delegate: %v)",
+		subagentTool.Name(), cfg.SubAgent.MaxParallel, cfg.SubAgent.AutoDelegate)
+
+	if cfg.Streaming.Enabled {
+		log.Printf("📡 Streaming diaktifkan (Thinking: %v, Display: %s, ChunkDelay: %dms)",
+			cfg.Streaming.ThinkingEnabled, cfg.Streaming.ThinkingDisplay, cfg.Streaming.ChunkDelayMs)
+	}
 
 	orchestrator := agent.NewOrchestrator(db, sessMgr, memMgr, promptBld, toolReg, provMgr)
 
