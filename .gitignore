@@ -7,7 +7,9 @@
 /goassistant
 /goassistant.exe
 /data/gocache/
+.gocache/
 .gocache
+gocache/
 # Build and distribution directories
 /dist/
 /bin/
