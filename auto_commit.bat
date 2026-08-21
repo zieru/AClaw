@@ -64,7 +64,7 @@ git push origin !NEW_TAG!
 
 echo.
 echo ========================================
-echo Selesai! Kode dan tag (!NEW_TAG!) berhasil di-push.
+echo Selesai: Kode dan tag (!NEW_TAG!) berhasil di-push.
 echo ========================================
 pause
 endlocal
