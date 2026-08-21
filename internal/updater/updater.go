@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
 	"goassistant/internal/version"
@@ -248,12 +247,6 @@ func RestartSelf() error {
 	cmd.Env = os.Environ()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
-	if runtime.GOOS == "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
-		}
-	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("gagal memulai proses baru: %w", err)
