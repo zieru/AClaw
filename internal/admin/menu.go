@@ -21,6 +21,7 @@ func MainMenuKeyboard() *tele.ReplyMarkup {
 	btnStats := menu.Data("📊 Audit Log & Stats", "menu_stats")
 	btnTools := menu.Data("🧰 Tool Permissions", "menu_tools")
 	btnBackup := menu.Data("💾 Backup / Export", "menu_backup")
+	btnUpdate := menu.Data("🚀 System Update", "menu_update")
 	btnHelp := menu.Data("❓ Bantuan Command", "menu_help")
 
 	menu.Inline(
@@ -30,7 +31,8 @@ func MainMenuKeyboard() *tele.ReplyMarkup {
 		menu.Row(btnTokenSaver, btnLimits),
 		menu.Row(btnMDFiles, btnCron),
 		menu.Row(btnMemory, btnStats),
-		menu.Row(btnBackup, btnHelp),
+		menu.Row(btnBackup, btnUpdate),
+		menu.Row(btnHelp),
 	)
 
 	return menu

@@ -1,4 +1,4 @@
-name: Build Linux Binaries
+name: Build & Release Linux x64 Binary
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-linux:
-    name: Build Linux (amd64)
+    name: Build Linux (x86_64 / amd64)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -26,16 +26,17 @@ jobs:
           check-latest: true
           cache: true
 
-      - name: Build Static Linux Binaries
+      - name: Build Static Linux x64 Binary (Zero-CGO)
         run: |
           mkdir -p dist
-          # Linux AMD64 (x86_64)
+          # Linux AMD64 (x86_64 Pure Go Static Binary)
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/goassistant-linux-amd64 ./cmd/goassistant
-      - name: Upload Linux Binaries as Artifacts
+
+      - name: Upload Linux Binary as Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: goassistant-linux-binaries
-          path: dist/goassistant-linux-*
+          name: goassistant-linux-amd64
+          path: dist/goassistant-linux-amd64
           retention-days: 14
 
       - name: Publish GitHub Release
@@ -45,4 +46,5 @@ jobs:
           files: |
             dist/goassistant-linux-amd64
           generate_release_notes: true
+
 

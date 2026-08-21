@@ -40,6 +40,7 @@ func (a *AdminBot) RenderStatusSummary(c tele.Context) string {
 	}
 
 	sb.WriteString("🖥️ <b>Sistem & Runtime:</b>\n")
+	sb.WriteString(fmt.Sprintf("• Versi: <code>v%s</code> (%s)\n", version.Version, version.BuildDate))
 	sb.WriteString(fmt.Sprintf("• Uptime: <code>%s</code>\n", uptimeStr))
 	sb.WriteString(fmt.Sprintf("• Runtime: <code>%s (%s/%s)</code>\n", runtime.Version(), runtime.GOOS, runtime.GOARCH))
 	sb.WriteString(fmt.Sprintf("• RAM (Alloc / Sys): <code>%.2f MB / %.2f MB</code>\n", allocMB, sysMB))

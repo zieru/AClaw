@@ -65,6 +65,18 @@ type AppConfig struct {
 		AutoDelegate       bool `yaml:"auto_delegate"`         // Auto-split complex prompts
 		TokenBudgetPerTask int  `yaml:"token_budget_per_task"` // Max tokens per sub-agent task
 	} `yaml:"subagent"`
+
+	HTTPServer struct {
+		Enabled             bool   `yaml:"enabled"`
+		Port                int    `yaml:"port"`
+		EndpointsFile       string `yaml:"endpoints_file"`
+		ReadTimeoutSeconds  int    `yaml:"read_timeout_seconds"`
+		WriteTimeoutSeconds int    `yaml:"write_timeout_seconds"`
+	} `yaml:"http_server"`
+
+	Updater struct {
+		GitHubRepo string `yaml:"github_repo"`
+	} `yaml:"updater"`
 }
 
 var (
@@ -106,9 +118,18 @@ func Load(configPath string) (*AppConfig, error) {
 		cfg.SubAgent.TimeoutSeconds = 90
 		cfg.SubAgent.AutoDelegate = true
 		cfg.SubAgent.TokenBudgetPerTask = 2048
+		cfg.HTTPServer.Enabled = true
+		cfg.HTTPServer.Port = 8080
+		cfg.HTTPServer.EndpointsFile = "configs/endpoints.yaml"
+		cfg.HTTPServer.ReadTimeoutSeconds = 15
+		cfg.HTTPServer.WriteTimeoutSeconds = 45
+
 		cfg.Timeouts.APICallSeconds = 90
 		cfg.Timeouts.HandlerSeconds = 120
 		cfg.Timeouts.RetrySeconds = 120
+
+		cfg.Updater.GitHubRepo = "zieru/AClaw"
+
 
 		if configPath != "" {
 			if _, statErr := os.Stat(configPath); statErr != nil {

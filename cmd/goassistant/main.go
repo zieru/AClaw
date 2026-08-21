@@ -22,12 +22,9 @@ import (
 	"goassistant/internal/proxy"
 	"goassistant/internal/storage"
 	"goassistant/internal/tools"
+	"goassistant/internal/goassisthttp"
+	"goassistant/internal/version"
 	"time"
-)
-
-var (
-	version   = "1.2.0"
-	buildDate = "2026-08-21"
 )
 
 func main() {
@@ -36,12 +33,12 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("GoAssistant Daemon v%s (Built: %s) [Zero-CGO Static Binary]\n", version, buildDate)
+		fmt.Printf("GoAssistant Daemon v%s (Built: %s) [Zero-CGO Static Binary]\n", version.Version, version.BuildDate)
 		return
 	}
 
 	log.Println("==========================================================")
-	log.Printf("🚀 Memulai GoAssistant Core Daemon v%s...", version)
+	log.Printf("🚀 Memulai GoAssistant Core Daemon v%s...", version.Version)
 	log.Println("⚡ Kompatibilitas: Pure Go (Zero-CGO) - Ready for manylinux_2_28")
 	log.Println("==========================================================")
 
@@ -249,6 +246,15 @@ func main() {
 		log.Println("💡 Anda dapat menyetel token bot Telegram di configs/default_config.yaml lalu jalankan kembali daemon.")
 	}
 
+	// 11. Start GoAssist HTTP API Server
+	var httpServer *goassisthttp.Server
+	if cfg.HTTPServer.Enabled {
+		readTimeout := time.Duration(cfg.HTTPServer.ReadTimeoutSeconds) * time.Second
+		writeTimeout := time.Duration(cfg.HTTPServer.WriteTimeoutSeconds) * time.Second
+		httpServer = goassisthttp.NewServer(cfg.HTTPServer.Port, cfg.HTTPServer.EndpointsFile, readTimeout, writeTimeout)
+		httpServer.Start()
+	}
+
 	log.Println("✅ GoAssistant Core siap melayani. Tekan Ctrl+C untuk berhenti.")
 
 	// Wait for OS Interrupt signal
@@ -257,4 +263,13 @@ func main() {
 	<-sigChan
 
 	log.Println("\n🛑 Menghentikan GoAssistant secara aman (Graceful Shutdown)...")
+
+	if httpServer != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("⚠️ Error saat mematikan HTTP Server: %v", err)
+		}
+	}
 }
+

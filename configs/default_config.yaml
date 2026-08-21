@@ -45,3 +45,18 @@ subagent:
   timeout_seconds: 90        # Batas waktu per sub-task (detik)
   auto_delegate: true        # Otomatis pecah prompt kompleks ke sub-agent
   token_budget_per_task: 2048 # Budget token per sub-agent task
+
+# GoAssist HTTP Server Configuration
+http_server:
+  enabled: true              # Aktifkan HTTP server bersamaan dengan daemon
+  port: 8080                 # Port HTTP Server
+  endpoints_file: "configs/endpoints.yaml" # Path konfigurasi endpoint dinamis
+  read_timeout_seconds: 15
+  write_timeout_seconds: 45
+
+# Auto-Updater Configuration (GitHub Releases)
+updater:
+  github_repo: "zieru/AClaw"  # Repository target untuk auto-update binary
+
+
+

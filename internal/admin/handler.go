@@ -52,6 +52,7 @@ type AdminBot struct {
 	cronUI       *CronUI
 	memoryUI     *MemoryUI
 	auditUI      *AuditUI
+	updateUI     *UpdateUI
 }
 
 func NewAdminBot(
@@ -102,6 +103,7 @@ func NewAdminBot(
 		cronUI:       NewCronUI(db, sched),
 		memoryUI:     NewMemoryUI(db, mm, sm),
 		auditUI:      NewAuditUI(db),
+		updateUI:     NewUpdateUI(cfg, bot),
 	}
 
 	a.registerRoutes()
@@ -213,7 +215,14 @@ func (a *AdminBot) registerRoutes() {
 		return c.EditOrSend(a.channelUI.RenderToolsList(), a.channelUI.ChannelsKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_backup"}, a.handleBackup)
+	a.bot.Handle(&tele.Btn{Unique: "menu_update"}, a.updateUI.HandleCheckUpdate)
+	a.bot.Handle(&tele.Btn{Unique: "btn_check_update"}, a.updateUI.HandleCheckUpdate)
+	a.bot.Handle(&tele.Btn{Unique: "btn_do_update"}, a.updateUI.HandleDoUpdate)
 	a.bot.Handle(&tele.Btn{Unique: "menu_help"}, a.handleHelp)
+
+	// Update Commands
+	a.bot.Handle("/update", a.updateUI.HandleCheckUpdate)
+	a.bot.Handle("/checkupdate", a.updateUI.HandleCheckUpdate)
 
 	// Governance & Limits Commands
 	a.bot.Handle("/limits", func(c tele.Context) error {
@@ -1323,6 +1332,7 @@ func (a *AdminBot) registerCommands() {
 		{Text: "stats", Description: "Statistik token & estimasi biaya"},
 		{Text: "logs", Description: "Lihat 10 aktivitas request terakhir"},
 		{Text: "backup", Description: "Unduh file backup SQLite & Markdown"},
+		{Text: "update", Description: "Cek & pasang update binary dari GitHub"},
 	}
 
 	if err := a.bot.SetCommands(adminCommands); err != nil {

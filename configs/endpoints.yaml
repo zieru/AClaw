@@ -1,0 +1,42 @@
+# ==============================================================================
+# GoAssist HTTP - Dynamic API Endpoints Configuration
+# ==============================================================================
+# File ini mendefinisikan rute HTTP API yang dieksekusi ke binary CLI (g3a / lainnya).
+# Format tipe endpoint:
+#   - pagination : Mendukung pagination (page/offset & limit) + query filter/sort/select dll.
+#   - regular    : API biasa tanpa kalkulasi pagination.
+# ==============================================================================
+
+endpoints:
+  # ----------------------------------------------------------------------------
+  # Contoh 1: Funneling API (Tipe Pagination)
+  # Endpoint ini otomatis mengubah query param:
+  # ?page=2&limit=15&select=id,name&filter=status:active&sort=desc&output=json
+  # Menjadi argumen CLI:
+  # g3a /datafunneling/funneling --filter=status:active --limit=15 --output=json --page=2 --select=id,name --sort=desc
+  # ----------------------------------------------------------------------------
+  - path: "/api/datafunneling/funneling"
+    method: "GET"
+    binary: "g3a"
+    command: "/datafunneling/funneling"
+    type: "pagination"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+    pagination:
+      default_page: 1
+      default_limit: 10
+      max_limit: 100
+      pass_as: "page" # "page" menghasilkan --page=X --limit=Y, atau "offset" menghasilkan --offset=X --limit=Y
+
+  # ----------------------------------------------------------------------------
+  # Contoh 2: Summary API (Tipe Regular Non-Pagination)
+  # ----------------------------------------------------------------------------
+  - path: "/api/datafunneling/summary"
+    method: "GET"
+    binary: "g3a"
+    command: "/datafunneling/summary"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
