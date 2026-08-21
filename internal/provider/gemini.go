@@ -229,26 +229,48 @@ func (p *GeminiProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 	}
 
 	keyCount := p.keyPool.Count()
-	if keyCount == 0 {
-		keyCount = 1
+	maxAttempts := keyCount
+	if maxAttempts < 2 {
+		maxAttempts = 2
 	}
 
 	var lastErr error
 	var respBytes []byte
 
-	for attempt := 0; attempt < keyCount; attempt++ {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
 		apiKey := p.keyPool.GetNextKey()
 		url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, apiKey)
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payloadBytes))
+
+		// Per-attempt timeout to prevent single key from hanging the entire request
+		attemptTimeout := 35 * time.Second
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining > 0 && remaining < attemptTimeout {
+				attemptTimeout = remaining
+			}
+		}
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, attemptTimeout)
+
+		httpReq, err := http.NewRequestWithContext(attemptCtx, "POST", url, bytes.NewBuffer(payloadBytes))
 		if err != nil {
+			cancelAttempt()
 			return nil, err
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 
 		httpResp, err := p.client.Do(httpReq)
 		if err != nil {
+			cancelAttempt()
 			if apiKey != "" {
-				p.keyPool.MarkError(apiKey, false)
+				if attemptCtx.Err() == context.DeadlineExceeded || ctx.Err() != nil {
+					p.keyPool.MarkTimeout(apiKey)
+				} else {
+					p.keyPool.MarkError(apiKey, false)
+				}
 			}
 			lastErr = fmt.Errorf("gemini api call failed: %w", err)
 			continue
@@ -256,20 +278,35 @@ func (p *GeminiProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 
 		respBytes, err = io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
+		cancelAttempt()
+
 		if err != nil {
 			lastErr = fmt.Errorf("failed to read response: %w", err)
 			continue
 		}
 
-		if httpResp.StatusCode == 429 || httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
+		if httpResp.StatusCode == 429 {
 			if apiKey != "" {
-				p.keyPool.MarkError(apiKey, httpResp.StatusCode == 429)
+				p.keyPool.MarkRateLimit(apiKey)
 			}
-			lastErr = fmt.Errorf("gemini api error (%d): %s", httpResp.StatusCode, string(respBytes))
-			if attempt < keyCount-1 {
-				continue // retry with next key
+			lastErr = fmt.Errorf("gemini rate limit error (429): %s", string(respBytes))
+			continue // retry with next key
+		}
+
+		if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
+			if apiKey != "" {
+				p.keyPool.MarkAuthError(apiKey)
 			}
-			return nil, lastErr
+			lastErr = fmt.Errorf("gemini auth error (%d): %s", httpResp.StatusCode, string(respBytes))
+			continue // retry with next key
+		}
+
+		if httpResp.StatusCode >= 500 {
+			if apiKey != "" {
+				p.keyPool.MarkTimeout(apiKey)
+			}
+			lastErr = fmt.Errorf("gemini server error (%d): %s", httpResp.StatusCode, string(respBytes))
+			continue // retry with next key
 		}
 
 		if httpResp.StatusCode >= 400 {
@@ -413,15 +450,21 @@ func (p *GeminiProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 	}
 
 	keyCount := p.keyPool.Count()
-	if keyCount == 0 {
-		keyCount = 1
+	maxAttempts := keyCount
+	if maxAttempts < 2 {
+		maxAttempts = 2
 	}
 
 	var lastErr error
 	var resp *http.Response
+	var apiKey string
 
-	for attempt := 0; attempt < keyCount; attempt++ {
-		apiKey := p.keyPool.GetNextKey()
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		apiKey = p.keyPool.GetNextKey()
 		url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s", model, apiKey)
 		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payloadBytes))
 		if err != nil {
@@ -432,23 +475,40 @@ func (p *GeminiProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		resp, err = p.client.Do(httpReq)
 		if err != nil {
 			if apiKey != "" {
-				p.keyPool.MarkError(apiKey, false)
+				p.keyPool.MarkTimeout(apiKey)
 			}
-			lastErr = fmt.Errorf("gemini stream api call failed: %w", err)
+			lastErr = fmt.Errorf("gemini stream request failed: %w", err)
 			continue
 		}
 
-		if resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403 {
+		if resp.StatusCode == 429 {
 			bodyBytes, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if apiKey != "" {
-				p.keyPool.MarkError(apiKey, resp.StatusCode == 429)
+				p.keyPool.MarkRateLimit(apiKey)
 			}
-			lastErr = fmt.Errorf("gemini stream api error (%d): %s", resp.StatusCode, string(bodyBytes))
-			if attempt < keyCount-1 {
-				continue
+			lastErr = fmt.Errorf("gemini stream rate limit error (429): %s", string(bodyBytes))
+			continue
+		}
+
+		if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if apiKey != "" {
+				p.keyPool.MarkAuthError(apiKey)
 			}
-			return nil, lastErr
+			lastErr = fmt.Errorf("gemini stream auth error (%d): %s", resp.StatusCode, string(bodyBytes))
+			continue
+		}
+
+		if resp.StatusCode >= 500 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if apiKey != "" {
+				p.keyPool.MarkTimeout(apiKey)
+			}
+			lastErr = fmt.Errorf("gemini stream server error (%d): %s", resp.StatusCode, string(bodyBytes))
+			continue
 		}
 
 		if resp.StatusCode >= 400 {

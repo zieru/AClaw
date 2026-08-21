@@ -16,6 +16,7 @@ import (
 	tgchannel "goassistant/internal/channel/telegram"
 	wachannel "goassistant/internal/channel/whatsapp"
 	"goassistant/internal/cron"
+	"goassistant/internal/instance"
 	"goassistant/internal/memory"
 	"goassistant/internal/provider"
 	"goassistant/internal/proxy"
@@ -50,6 +51,14 @@ func main() {
 		log.Fatalf("❌ Gagal memuat konfigurasi: %v", err)
 	}
 	log.Printf("⚙️ Konfigurasi berhasil dimuat dari: %s", *configPath)
+
+	// Single-Instance Takeover Lock (Hentikan instance lama jika ada)
+	releaseLock, err := instance.EnsureSingleInstance(cfg.Server.DataDir)
+	if err != nil {
+		log.Printf("⚠️ Peringatan instance lock: %v", err)
+	} else {
+		defer releaseLock()
+	}
 
 	// Check environment variable override for admin bot token
 	if envToken := os.Getenv("GOASSISTANT_TELEGRAM_TOKEN"); envToken != "" {

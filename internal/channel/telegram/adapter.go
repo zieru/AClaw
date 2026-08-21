@@ -101,8 +101,10 @@ func (a *BotAdapter) registerHandlers() {
 		if c.Callback() == nil {
 			return nil
 		}
-		if strings.HasPrefix(c.Callback().Data, "cancel_task") {
-			_ = a.handleStop(c)
+		data := strings.TrimPrefix(c.Callback().Data, "\f")
+		if strings.HasPrefix(data, "cancel_task") {
+			_ = c.Respond(&tele.CallbackResponse{Text: "Membatalkan proses AI..."})
+			return a.handleStop(c)
 		}
 		return nil
 	})
@@ -129,10 +131,13 @@ func (a *BotAdapter) registerHandlers() {
 		}
 
 		_ = c.Notify(tele.Typing)
-	cancelMenu := &tele.ReplyMarkup{}
-	cancelBtn := cancelMenu.Data("🛑 Batalkan", "cancel_task")
-	cancelMenu.Inline(cancelMenu.Row(cancelBtn))
-	thinkingMsg, _ := a.bot.Reply(msg, "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
+		cancelMenu := &tele.ReplyMarkup{}
+		cancelBtn := cancelMenu.Data("🛑 Batalkan", "cancel_task")
+		cancelMenu.Inline(cancelMenu.Row(cancelBtn))
+
+		thinkingMsg, _ := a.bot.Reply(msg, "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
+		stopUpdater, onProgressStatus := createProgressiveThinkingManager(a.bot, thinkingMsg, "🤔 <i>Sedang berpikir...</i>")
+		defer stopUpdater()
 
 		ctx, cancel := context.WithTimeout(context.Background(),
 			time.Duration(config.Get().Timeouts.HandlerSeconds)*time.Second)
@@ -152,13 +157,22 @@ func (a *BotAdapter) registerHandlers() {
 			UserPrompt:     userPrompt,
 			AttachedFileMB: 0,
 			OnProgress: func(status string) {
-				if thinkingMsg != nil {
-					_, _ = a.bot.Edit(thinkingMsg, status, tele.ModeHTML)
-				}
+				onProgressStatus(status)
 			},
 		})
 
+		stopUpdater()
+
 		if err != nil {
+			if ctx.Err() == context.Canceled {
+				text := "🛑 <b>PROSES DIBATALKAN</b>\n\nRespon AI berhasil dihentikan atas permintaan pengguna."
+				if thinkingMsg != nil {
+					_, _ = a.bot.Edit(thinkingMsg, text, tele.ModeHTML)
+					return nil
+				}
+				return c.Reply(text, tele.ModeHTML)
+			}
+
 			friendlyErr := agent.FormatUserFriendlyError(err)
 			if thinkingMsg != nil {
 				_, _ = a.bot.Edit(thinkingMsg, friendlyErr, tele.ModeHTML)
@@ -184,7 +198,13 @@ func (a *BotAdapter) registerHandlers() {
 		}
 
 		_ = c.Notify(tele.Typing)
-		thinkingMsg, _ := a.bot.Reply(c.Message(), "📄 <i>Menganalisis dokumen & berpikir...</i>", tele.ModeHTML)
+		cancelMenu := &tele.ReplyMarkup{}
+		cancelBtn := cancelMenu.Data("🛑 Batalkan", "cancel_task")
+		cancelMenu.Inline(cancelMenu.Row(cancelBtn))
+
+		thinkingMsg, _ := a.bot.Reply(c.Message(), "📄 <i>Menganalisis dokumen & berpikir...</i>", tele.ModeHTML, cancelMenu)
+		stopUpdater, onProgressStatus := createProgressiveThinkingManager(a.bot, thinkingMsg, "📄 <i>Menganalisis dokumen & berpikir...</i>")
+		defer stopUpdater()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		a.activeTasks.Store(c.Chat().ID, cancel)
@@ -203,13 +223,22 @@ func (a *BotAdapter) registerHandlers() {
 			UserPrompt:     caption,
 			AttachedFileMB: fileMB,
 			OnProgress: func(status string) {
-				if thinkingMsg != nil {
-					_, _ = a.bot.Edit(thinkingMsg, status, tele.ModeHTML)
-				}
+				onProgressStatus(status)
 			},
 		})
 
+		stopUpdater()
+
 		if err != nil {
+			if ctx.Err() == context.Canceled {
+				text := "🛑 <b>PROSES DIBATALKAN</b>\n\nRespon AI berhasil dihentikan atas permintaan pengguna."
+				if thinkingMsg != nil {
+					_, _ = a.bot.Edit(thinkingMsg, text, tele.ModeHTML)
+					return nil
+				}
+				return c.Reply(text, tele.ModeHTML)
+			}
+
 			friendlyErr := agent.FormatUserFriendlyError(err)
 			if thinkingMsg != nil {
 				_, _ = a.bot.Edit(thinkingMsg, friendlyErr, tele.ModeHTML)
@@ -220,6 +249,86 @@ func (a *BotAdapter) registerHandlers() {
 
 		return sendOrEditResponse(c, thinkingMsg, resp.Text, resp.MediaFiles)
 	})
+}
+
+// createProgressiveThinkingManager runs a periodic ticker that updates thinking text dynamically
+func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, initialPrefix string) (stopFunc func(), updateStatus func(string)) {
+	if targetMsg == nil {
+		return func() {}, func(string) {}
+	}
+
+	cancelMenu := &tele.ReplyMarkup{}
+	cancelBtn := cancelMenu.Data("🛑 Batalkan", "cancel_task")
+	cancelMenu.Inline(cancelMenu.Row(cancelBtn))
+
+	var mu sync.Mutex
+	customStatus := ""
+	stopped := false
+	doneChan := make(chan struct{})
+	startTime := time.Now()
+
+	updateStatus = func(status string) {
+		mu.Lock()
+		customStatus = status
+		mu.Unlock()
+		if targetMsg != nil {
+			_, _ = bot.Edit(targetMsg, status, tele.ModeHTML, cancelMenu)
+		}
+	}
+
+	stopFunc = func() {
+		mu.Lock()
+		if stopped {
+			mu.Unlock()
+			return
+		}
+		stopped = true
+		mu.Unlock()
+		close(doneChan)
+	}
+
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-doneChan:
+				return
+			case <-ticker.C:
+				mu.Lock()
+				if stopped {
+					mu.Unlock()
+					return
+				}
+				elapsedSec := int(time.Since(startTime).Seconds())
+				var text string
+				if customStatus != "" {
+					text = fmt.Sprintf("%s <i>(%dd)</i>", customStatus, elapsedSec)
+				} else {
+					switch {
+					case elapsedSec < 6:
+						text = fmt.Sprintf("⚡ <i>Masih menganalisis pertanyaan & konteks... (%dd)</i>", elapsedSec)
+					case elapsedSec < 13:
+						text = fmt.Sprintf("🧠 <i>Masih berpikir & merumuskan jawaban... (%dd)</i>", elapsedSec)
+					case elapsedSec < 22:
+						text = fmt.Sprintf("🔍 <i>Sedang memproses instruksi secara mendalam... (%dd)</i>", elapsedSec)
+					case elapsedSec < 35:
+						text = fmt.Sprintf("⏳ <i>Hampir selesai, memvalidasi & merapikan jawaban... (%dd)</i>", elapsedSec)
+					default:
+						text = fmt.Sprintf("🔄 <i>Sedang menyelesaikan proses generasi respon... (%dd)</i>", elapsedSec)
+					}
+				}
+				mu.Unlock()
+
+				if targetMsg != nil {
+					_, _ = bot.Edit(targetMsg, text, tele.ModeHTML, cancelMenu)
+				}
+			}
+		}
+	}()
+
+	return stopFunc, updateStatus
 }
 
 func (a *BotAdapter) handleNew(c tele.Context) error {
@@ -248,6 +357,10 @@ func (a *BotAdapter) handleStop(c tele.Context) error {
 	}
 	text := "🛑 <b>PROSES DIHENTIKAN</b>\n\n" +
 		"Generasi respon AI untuk pesan terakhir Anda telah dihentikan."
+	if c.Callback() != nil && c.Message() != nil {
+		_, _ = a.bot.Edit(c.Message(), text, tele.ModeHTML)
+		return nil
+	}
 	return c.Send(text, tele.ModeHTML)
 }
 

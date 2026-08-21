@@ -118,3 +118,55 @@ func TestSmartFallbackAndCombos(t *testing.T) {
 		t.Errorf("unexpected combo response: %v", respCombo)
 	}
 }
+
+func TestKeyPoolFailoverStrategy(t *testing.T) {
+	keys := []string{"key-pri-1", "key-sec-2", "key-ter-3"}
+	pool := NewKeyPool(keys, "failover")
+
+	// Failover should always return key-pri-1 when healthy
+	for i := 0; i < 3; i++ {
+		k := pool.GetNextKey()
+		if k != "key-pri-1" {
+			t.Errorf("expected key-pri-1, got %s", k)
+		}
+	}
+
+	// Mark key-pri-1 with timeout
+	pool.MarkTimeout("key-pri-1")
+	k := pool.GetNextKey()
+	if k != "key-sec-2" {
+		t.Errorf("expected failover to key-sec-2, got %s", k)
+	}
+
+	// Mark key-sec-2 with rate limit
+	pool.MarkRateLimit("key-sec-2")
+	k = pool.GetNextKey()
+	if k != "key-ter-3" {
+		t.Errorf("expected failover to key-ter-3, got %s", k)
+	}
+
+	// Mark key-pri-1 success (re-enables it)
+	pool.MarkSuccess("key-pri-1")
+	k = pool.GetNextKey()
+	if k != "key-pri-1" {
+		t.Errorf("expected recovery back to key-pri-1, got %s", k)
+	}
+}
+
+func TestKeyPoolAllInCooldownRecovery(t *testing.T) {
+	keys := []string{"k1", "k2"}
+	pool := NewKeyPool(keys, "round-robin")
+
+	pool.MarkTimeout("k1")
+	pool.MarkRateLimit("k2")
+
+	// Even though all keys are in cooldown, pool should return the earliest available key rather than empty
+	k := pool.GetNextKey()
+	if k == "" {
+		t.Errorf("expected pool to return fallback key when all in cooldown, got empty string")
+	}
+	if k != "k1" { // k1 has 30s timeout cooldown, k2 has 60s rate limit cooldown
+		t.Errorf("expected earliest expiring key k1, got %s", k)
+	}
+}
+

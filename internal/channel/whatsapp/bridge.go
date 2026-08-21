@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"goassistant/internal/agent"
@@ -24,6 +26,7 @@ type BridgeAdapter struct {
 	orchestrator *agent.Orchestrator
 	db           *storage.DB
 	httpClient   *http.Client
+	activeTasks  sync.Map // chatID -> context.CancelFunc
 }
 
 func NewBridgeAdapter(channelID, name, endpointURL, apiKey string, orch *agent.Orchestrator, db *storage.DB) *BridgeAdapter {
@@ -90,12 +93,12 @@ func (a *BridgeAdapter) SendMessage(targetID, text string) error {
 
 // IncomingMessagePayload represents a webhook body from WhatsApp bridge
 type IncomingMessagePayload struct {
-	From        string  `json:"from"`
-	SenderName  string  `json:"sender_name"`
-	Text        string  `json:"text"`
-	IsGroup     bool    `json:"is_group"`
-	GroupID     string  `json:"group_id"`
-	FileSizeMB  float64 `json:"file_size_mb"`
+	From       string  `json:"from"`
+	SenderName string  `json:"sender_name"`
+	Text       string  `json:"text"`
+	IsGroup    bool    `json:"is_group"`
+	GroupID    string  `json:"group_id"`
+	FileSizeMB float64 `json:"file_size_mb"`
 }
 
 // HandleIncomingWebhook handles an HTTP webhook call from WhatsApp gateway
@@ -111,10 +114,116 @@ func (a *BridgeAdapter) HandleIncomingWebhook(w http.ResponseWriter, r *http.Req
 		chatID = payload.GroupID
 	}
 
+	cleanText := strings.TrimSpace(payload.Text)
+	lowerText := strings.ToLower(cleanText)
+
+	// 1. Handle Command: /stop or stop
+	if lowerText == "/stop" || lowerText == "!stop" || lowerText == "/cancel" || lowerText == "stop" || lowerText == "batal" {
+		if cancelVal, loaded := a.activeTasks.LoadAndDelete(chatID); loaded {
+			if cancel, ok := cancelVal.(context.CancelFunc); ok {
+				cancel()
+			}
+			go func() {
+				_ = a.SendMessage(chatID, "🛑 *PROSES DIHENTIKAN*\n\nRespon AI yang sedang diproses telah berhasil dibatalkan.")
+			}()
+		} else {
+			go func() {
+				_ = a.SendMessage(chatID, "ℹ️ Tidak ada respon AI yang sedang diproses saat ini.")
+			}()
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"stopped"}`))
+		return
+	}
+
+	// 2. Handle Command: /new or /reset
+	if lowerText == "/new" || lowerText == "/reset" || lowerText == "!reset" || lowerText == "/clear" {
+		if cancelVal, loaded := a.activeTasks.LoadAndDelete(chatID); loaded {
+			if cancel, ok := cancelVal.(context.CancelFunc); ok {
+				cancel()
+			}
+		}
+
+		session, err := a.db.GetOrCreateSession(a.channelID, chatID, payload.From)
+		if err == nil && session != nil {
+			_ = a.db.ClearSessionMessages(session.ID)
+		}
+
+		go func() {
+			_ = a.SendMessage(chatID, "✨ *SESI BARU DIMULAI*\n\nKonteks percakapan dan riwayat pesan Anda telah direset.\nSilakan ajukan pertanyaan atau perintah baru!")
+		}()
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"cleared"}`))
+		return
+	}
+
+	// 3. Handle Command: /help
+	if lowerText == "/help" || lowerText == "!help" {
+		go func() {
+			helpText := "👋 *PANDUAN BOT WHATSAPP AI*\n\n" +
+				"Silakan kirimkan pertanyaan atau perintah langsung di chat ini.\n\n" +
+				"📌 *Daftar Perintah:*\n" +
+				"• */new* - Mulai sesi baru & reset riwayat percakapan\n" +
+				"• */stop* - Hentikan atau batalkan proses jawaban AI\n" +
+				"• */status* - Cek status sesi & konfigurasi bot\n" +
+				"• */help* - Tampilkan menu bantuan ini"
+			_ = a.SendMessage(chatID, helpText)
+		}()
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"help"}`))
+		return
+	}
+
+	// 4. Handle Command: /status
+	if lowerText == "/status" || lowerText == "!status" {
+		go func() {
+			session, _ := a.db.GetOrCreateSession(a.channelID, chatID, payload.From)
+			msgCount := 0
+			if session != nil {
+				msgCount, _ = a.db.CountSessionMessages(session.ID)
+			}
+			policy := a.db.GetResolvedPolicy(a.channelID, chatID)
+
+			statusText := fmt.Sprintf("🤖 *STATUS ASISTEN AI*\n\n"+
+				"• Channel: *%s*\n"+
+				"• Chat ID: `%s`\n"+
+				"• Riwayat Aktif: `%d pesan` (Maks: `%d`)\n"+
+				"• Token Saver: `%s`\n\n"+
+				"💡 Gunakan */stop* untuk membatalkan proses atau */new* untuk reset konteks.",
+				a.name, chatID, msgCount, policy.MaxHistoryTurns, policy.TokenSaverMode)
+			_ = a.SendMessage(chatID, statusText)
+		}()
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"status"}`))
+		return
+	}
+
+	if cleanText == "" {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"empty"}`))
+		return
+	}
+
+	// Process Regular Message
 	go func() {
+		// Cancel any previous running task for this chat ID
+		if cancelVal, loaded := a.activeTasks.LoadAndDelete(chatID); loaded {
+			if cancel, ok := cancelVal.(context.CancelFunc); ok {
+				cancel()
+			}
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(),
 			time.Duration(config.Get().Timeouts.HandlerSeconds)*time.Second)
-		defer cancel()
+		a.activeTasks.Store(chatID, cancel)
+		defer func() {
+			a.activeTasks.Delete(chatID)
+			cancel()
+		}()
 
 		resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{
 			ChannelType:    "whatsapp",
@@ -128,6 +237,10 @@ func (a *BridgeAdapter) HandleIncomingWebhook(w http.ResponseWriter, r *http.Req
 		})
 
 		if err != nil {
+			if ctx.Err() == context.Canceled {
+				// Process was canceled by user (/stop)
+				return
+			}
 			friendlyErr := agent.FormatUserFriendlyError(err)
 			_ = a.SendMessage(chatID, friendlyErr)
 			return
@@ -141,3 +254,4 @@ func (a *BridgeAdapter) HandleIncomingWebhook(w http.ResponseWriter, r *http.Req
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"queued"}`))
 }
+

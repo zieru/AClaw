@@ -196,18 +196,34 @@ func (p *AnthropicProvider) GenerateChat(ctx context.Context, req ChatRequest) (
 	}
 
 	keyCount := p.keyPool.Count()
-	if keyCount == 0 {
-		keyCount = 1
+	maxAttempts := keyCount
+	if maxAttempts < 2 {
+		maxAttempts = 2
 	}
 
 	var lastErr error
 	var respBytes []byte
 
-	for attempt := 0; attempt < keyCount; attempt++ {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
 		apiKey := p.keyPool.GetNextKey()
 
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewBuffer(payloadBytes))
+		// Per-attempt timeout to prevent single key from hanging the entire request
+		attemptTimeout := 35 * time.Second
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining > 0 && remaining < attemptTimeout {
+				attemptTimeout = remaining
+			}
+		}
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, attemptTimeout)
+
+		httpReq, err := http.NewRequestWithContext(attemptCtx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewBuffer(payloadBytes))
 		if err != nil {
+			cancelAttempt()
 			return nil, err
 		}
 
@@ -219,8 +235,13 @@ func (p *AnthropicProvider) GenerateChat(ctx context.Context, req ChatRequest) (
 
 		httpResp, err := p.client.Do(httpReq)
 		if err != nil {
+			cancelAttempt()
 			if apiKey != "" {
-				p.keyPool.MarkError(apiKey, false)
+				if attemptCtx.Err() == context.DeadlineExceeded || ctx.Err() != nil {
+					p.keyPool.MarkTimeout(apiKey)
+				} else {
+					p.keyPool.MarkError(apiKey, false)
+				}
 			}
 			lastErr = fmt.Errorf("anthropic api call failed: %w", err)
 			continue
@@ -228,20 +249,35 @@ func (p *AnthropicProvider) GenerateChat(ctx context.Context, req ChatRequest) (
 
 		respBytes, err = io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
+		cancelAttempt()
+
 		if err != nil {
 			lastErr = fmt.Errorf("failed to read response: %w", err)
 			continue
 		}
 
-		if httpResp.StatusCode == 429 || httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
+		if httpResp.StatusCode == 429 {
 			if apiKey != "" {
-				p.keyPool.MarkError(apiKey, httpResp.StatusCode == 429)
+				p.keyPool.MarkRateLimit(apiKey)
 			}
-			lastErr = fmt.Errorf("anthropic api error (%d): %s", httpResp.StatusCode, string(respBytes))
-			if attempt < keyCount-1 {
-				continue // retry with next key
+			lastErr = fmt.Errorf("anthropic rate limit error (429): %s", string(respBytes))
+			continue // retry with next key
+		}
+
+		if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
+			if apiKey != "" {
+				p.keyPool.MarkAuthError(apiKey)
 			}
-			return nil, lastErr
+			lastErr = fmt.Errorf("anthropic auth error (%d): %s", httpResp.StatusCode, string(respBytes))
+			continue // retry with next key
+		}
+
+		if httpResp.StatusCode >= 500 {
+			if apiKey != "" {
+				p.keyPool.MarkTimeout(apiKey)
+			}
+			lastErr = fmt.Errorf("anthropic server error (%d): %s", httpResp.StatusCode, string(respBytes))
+			continue // retry with next key
 		}
 
 		if httpResp.StatusCode >= 400 {
@@ -379,15 +415,21 @@ func (p *AnthropicProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 	}
 
 	keyCount := p.keyPool.Count()
-	if keyCount == 0 {
-		keyCount = 1
+	maxAttempts := keyCount
+	if maxAttempts < 2 {
+		maxAttempts = 2
 	}
 
 	var lastErr error
 	var resp *http.Response
+	var apiKey string
 
-	for attempt := 0; attempt < keyCount; attempt++ {
-		apiKey := p.keyPool.GetNextKey()
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		apiKey = p.keyPool.GetNextKey()
 		url := "https://api.anthropic.com/v1/messages?stream=true"
 		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payloadBytes))
 		if err != nil {
@@ -402,23 +444,40 @@ func (p *AnthropicProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 		resp, err = p.client.Do(httpReq)
 		if err != nil {
 			if apiKey != "" {
-				p.keyPool.MarkError(apiKey, false)
+				p.keyPool.MarkTimeout(apiKey)
 			}
-			lastErr = fmt.Errorf("anthropic stream api call failed: %w", err)
+			lastErr = fmt.Errorf("anthropic stream request failed: %w", err)
 			continue
 		}
 
-		if resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403 {
+		if resp.StatusCode == 429 {
 			bodyBytes, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if apiKey != "" {
-				p.keyPool.MarkError(apiKey, resp.StatusCode == 429)
+				p.keyPool.MarkRateLimit(apiKey)
 			}
-			lastErr = fmt.Errorf("anthropic stream api error (%d): %s", resp.StatusCode, string(bodyBytes))
-			if attempt < keyCount-1 {
-				continue
+			lastErr = fmt.Errorf("anthropic stream rate limit error (429): %s", string(bodyBytes))
+			continue
+		}
+
+		if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if apiKey != "" {
+				p.keyPool.MarkAuthError(apiKey)
 			}
-			return nil, lastErr
+			lastErr = fmt.Errorf("anthropic stream auth error (%d): %s", resp.StatusCode, string(bodyBytes))
+			continue
+		}
+
+		if resp.StatusCode >= 500 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if apiKey != "" {
+				p.keyPool.MarkTimeout(apiKey)
+			}
+			lastErr = fmt.Errorf("anthropic stream server error (%d): %s", resp.StatusCode, string(bodyBytes))
+			continue
 		}
 
 		if resp.StatusCode >= 400 {

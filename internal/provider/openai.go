@@ -241,18 +241,35 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 	endpoint := fmt.Sprintf("%s/chat/completions", p.baseURL)
 
 	keyCount := p.keyPool.Count()
-	if keyCount == 0 {
-		keyCount = 1
+	maxAttempts := keyCount
+	if maxAttempts < 2 {
+		maxAttempts = 2
 	}
 
 	var lastErr error
 	var bodyBytes []byte
+	var successfulKey string
 
-	for attempt := 0; attempt < keyCount; attempt++ {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
 		apiKey := p.keyPool.GetNextKey()
 
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(payloadBytes))
+		// Per-attempt timeout to prevent single key from hanging the entire request
+		attemptTimeout := 35 * time.Second
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining > 0 && remaining < attemptTimeout {
+				attemptTimeout = remaining
+			}
+		}
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, attemptTimeout)
+
+		httpReq, err := http.NewRequestWithContext(attemptCtx, "POST", endpoint, bytes.NewBuffer(payloadBytes))
 		if err != nil {
+			cancelAttempt()
 			return nil, err
 		}
 
@@ -263,8 +280,13 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 
 		httpResp, err := p.client.Do(httpReq)
 		if err != nil {
+			cancelAttempt()
 			if apiKey != "" {
-				p.keyPool.MarkError(apiKey, false)
+				if attemptCtx.Err() == context.DeadlineExceeded || ctx.Err() != nil {
+					p.keyPool.MarkTimeout(apiKey)
+				} else {
+					p.keyPool.MarkError(apiKey, false)
+				}
 			}
 			lastErr = fmt.Errorf("http call failed: %w", err)
 			continue
@@ -272,20 +294,35 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 
 		bodyBytes, err = io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
+		cancelAttempt()
+
 		if err != nil {
 			lastErr = fmt.Errorf("failed to read response: %w", err)
 			continue
 		}
 
-		if httpResp.StatusCode == 429 || httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
+		if httpResp.StatusCode == 429 {
 			if apiKey != "" {
-				p.keyPool.MarkError(apiKey, httpResp.StatusCode == 429)
+				p.keyPool.MarkRateLimit(apiKey)
 			}
-			lastErr = fmt.Errorf("api error (%d): %s", httpResp.StatusCode, string(bodyBytes))
-			if attempt < keyCount-1 {
-				continue // retry with next key
+			lastErr = fmt.Errorf("rate limit error (429): %s", string(bodyBytes))
+			continue // retry with next key
+		}
+
+		if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
+			if apiKey != "" {
+				p.keyPool.MarkAuthError(apiKey)
 			}
-			return nil, lastErr
+			lastErr = fmt.Errorf("auth error (%d): %s", httpResp.StatusCode, string(bodyBytes))
+			continue // retry with next key
+		}
+
+		if httpResp.StatusCode >= 500 {
+			if apiKey != "" {
+				p.keyPool.MarkTimeout(apiKey)
+			}
+			lastErr = fmt.Errorf("upstream server error (%d): %s", httpResp.StatusCode, string(bodyBytes))
+			continue // retry with next key
 		}
 
 		if httpResp.StatusCode >= 400 {
@@ -295,6 +332,8 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		if apiKey != "" {
 			p.keyPool.MarkSuccess(apiKey)
 		}
+		successfulKey = apiKey
+		_ = successfulKey
 		lastErr = nil
 		break
 	}
@@ -472,27 +511,87 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 	}
 
 	endpoint := fmt.Sprintf("%s/chat/completions", p.baseURL)
-	apiKey := p.keyPool.GetNextKey()
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(payloadBytes))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	keyCount := p.keyPool.Count()
+	maxAttempts := keyCount
+	if maxAttempts < 2 {
+		maxAttempts = 2
 	}
 
-	httpResp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("stream request failed: %w", err)
+	var httpResp *http.Response
+	var apiKey string
+	var lastErr error
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		apiKey = p.keyPool.GetNextKey()
+
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(payloadBytes))
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+
+		resp, err := p.client.Do(httpReq)
+		if err != nil {
+			if apiKey != "" {
+				p.keyPool.MarkTimeout(apiKey)
+			}
+			lastErr = fmt.Errorf("stream request failed: %w", err)
+			continue
+		}
+
+		if resp.StatusCode == 429 {
+			if apiKey != "" {
+				p.keyPool.MarkRateLimit(apiKey)
+			}
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("stream rate limit error (429): %s", string(bodyBytes))
+			continue
+		}
+
+		if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			if apiKey != "" {
+				p.keyPool.MarkAuthError(apiKey)
+			}
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("stream auth error (%d): %s", resp.StatusCode, string(bodyBytes))
+			continue
+		}
+
+		if resp.StatusCode >= 500 {
+			if apiKey != "" {
+				p.keyPool.MarkTimeout(apiKey)
+			}
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("stream server error (%d): %s", resp.StatusCode, string(bodyBytes))
+			continue
+		}
+
+		if resp.StatusCode >= 400 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("stream api error (%d): %s", resp.StatusCode, string(bodyBytes))
+		}
+
+		httpResp = resp
+		lastErr = nil
+		break
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
 	}
 	defer httpResp.Body.Close()
-
-	if httpResp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(httpResp.Body)
-		return nil, fmt.Errorf("stream api error (%d): %s", httpResp.StatusCode, string(bodyBytes))
-	}
 
 	// Parse SSE stream
 	var contentBuilder strings.Builder

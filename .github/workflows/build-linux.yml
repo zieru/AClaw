@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-linux:
-    name: Build Linux (amd64 & arm64)
+    name: Build Linux (amd64)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -31,9 +31,6 @@ jobs:
           mkdir -p dist
           # Linux AMD64 (x86_64)
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/goassistant-linux-amd64 ./cmd/goassistant
-          # Linux ARM64
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/goassistant-linux-arm64 ./cmd/goassistant
-
       - name: Upload Linux Binaries as Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -47,6 +44,5 @@ jobs:
         with:
           files: |
             dist/goassistant-linux-amd64
-            dist/goassistant-linux-arm64
           generate_release_notes: true
 
