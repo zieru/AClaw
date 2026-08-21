@@ -7,9 +7,17 @@ import (
 	"sync"
 	"time"
 
+	"goassistant/internal/config"
 	"goassistant/internal/storage"
 	"goassistant/internal/tools"
 )
+
+func defaultAPITimeout() time.Duration {
+	if cfg := config.Get(); cfg != nil && cfg.Timeouts.APICallSeconds > 0 {
+		return time.Duration(cfg.Timeouts.APICallSeconds) * time.Second
+	}
+	return 90 * time.Second
+}
 
 // MessageRole represents the role of a message
 type MessageRole string

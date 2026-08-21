@@ -75,6 +75,7 @@ func (a *AdminBot) RenderStatusSummary(c tele.Context) string {
 	// 3. AI Engine & Router
 	allProviders := a.provManager.ListAll()
 	activeProvCount := len(allProviders)
+	var activeProvName, activeModel string
 	if len(allProviders) > 0 {
 		activeProvName = allProviders[0].Name()
 		activeModel = allProviders[0].DefaultModel()
@@ -166,6 +167,7 @@ func (a *AdminBot) RenderStatusSummary(c tele.Context) string {
 
 	// 8. Navigation Commands
 	sb.WriteString("💡 <b>Perintah Cepat:</b>\n")
+	sb.WriteString("• <code>/model</code> - Ganti model AI / pilih fallback combo\n")
 	sb.WriteString("• <code>/new</code> - Mulai sesi baru & reset riwayat\n")
 	sb.WriteString("• <code>/stop</code> - Batalkan proses respon AI\n")
 	sb.WriteString("• <code>/limits</code> - Konfigurasi batasan & timeout\n")

@@ -41,6 +41,7 @@ type AdminBot struct {
 	proxyPool    *proxy.Pool
 	activeTasks  sync.Map
 
+	modelUI      *ModelUI
 	limitsUI     *LimitsUI
 	providerUI   *ProviderUI
 	wizard       *ProviderWizard
@@ -92,6 +93,7 @@ func NewAdminBot(
 		sessManager:  sm,
 		proxyPool:    pool,
 
+		modelUI:      NewModelUI(db, pm),
 		limitsUI:     NewLimitsUI(db),
 		providerUI:   NewProviderUI(db, pm, pool),
 		wizard:       NewProviderWizard(db, pm, pool, bot),
@@ -159,6 +161,9 @@ func (a *AdminBot) registerRoutes() {
 	})
 
 	// Interactive Menu Callbacks
+	a.bot.Handle(&tele.Btn{Unique: "menu_model"}, func(c tele.Context) error {
+		return c.EditOrSend(a.modelUI.RenderModelDashboard(c), a.modelUI.ModelMenuKeyboard(c.Sender().ID), tele.ModeHTML)
+	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_providers"}, func(c tele.Context) error {
 		return c.EditOrSend(a.providerUI.RenderProvidersList(), a.providerUI.ProviderMenuKeyboard(), tele.ModeHTML)
 	})
@@ -462,6 +467,10 @@ func (a *AdminBot) registerRoutes() {
 		}
 		return a.wizard.HandleEditDeletePrompt(c, sess.EditingProviderID)
 	})
+
+	// Model & Combo Selection Commands
+	a.bot.Handle("/model", a.modelUI.HandleModelCommand)
+	a.bot.Handle("/models", a.modelUI.HandleModelCommand)
 
 	a.bot.Handle("/providers", func(c tele.Context) error {
 		return c.Reply(a.providerUI.RenderProvidersList(), a.providerUI.ProviderMenuKeyboard(), tele.ModeHTML)
@@ -1194,6 +1203,69 @@ func (a *AdminBot) registerRoutes() {
 			return a.handleStop(c)
 		}
 
+		// Model Switcher Callbacks
+		if data == "mod_main" || data == "mod_refresh" {
+			return c.EditOrSend(a.modelUI.RenderModelDashboard(c), a.modelUI.ModelMenuKeyboard(c.Sender().ID), tele.ModeHTML)
+		}
+		if data == "mod_toggle_scope" {
+			return a.modelUI.HandleToggleScopeCallback(c)
+		}
+		if data == "mod_set_default" {
+			return a.modelUI.HandleSetDefaultCallback(c)
+		}
+		if data == "mod_menu_combos" {
+			txt, kb := a.modelUI.RenderCombosList(c)
+			return c.EditOrSend(txt, kb, tele.ModeHTML)
+		}
+		if data == "mod_menu_providers" {
+			txt, kb := a.modelUI.RenderProvidersList(c)
+			return c.EditOrSend(txt, kb, tele.ModeHTML)
+		}
+		if strings.HasPrefix(data, "mod_set_c_") {
+			comboName := strings.TrimPrefix(data, "mod_set_c_")
+			return a.modelUI.HandleSetComboCallback(c, comboName)
+		}
+		if strings.HasPrefix(data, "mod_prov_") {
+			provName := strings.TrimPrefix(data, "mod_prov_")
+			txt, kb := a.modelUI.RenderProviderModels(c, provName, 0)
+			return c.EditOrSend(txt, kb, tele.ModeHTML)
+		}
+		if strings.HasPrefix(data, "mod_p_prev_") {
+			raw := strings.TrimPrefix(data, "mod_p_prev_")
+			lastUnderscore := strings.LastIndex(raw, "_")
+			if lastUnderscore != -1 {
+				provName := raw[:lastUnderscore]
+				var page int
+				fmt.Sscanf(raw[lastUnderscore+1:], "%d", &page)
+				txt, kb := a.modelUI.RenderProviderModels(c, provName, page)
+				return c.EditOrSend(txt, kb, tele.ModeHTML)
+			}
+		}
+		if strings.HasPrefix(data, "mod_p_next_") {
+			raw := strings.TrimPrefix(data, "mod_p_next_")
+			lastUnderscore := strings.LastIndex(raw, "_")
+			if lastUnderscore != -1 {
+				provName := raw[:lastUnderscore]
+				var page int
+				fmt.Sscanf(raw[lastUnderscore+1:], "%d", &page)
+				txt, kb := a.modelUI.RenderProviderModels(c, provName, page)
+				return c.EditOrSend(txt, kb, tele.ModeHTML)
+			}
+		}
+		if strings.HasPrefix(data, "mod_set_m_") {
+			raw := strings.TrimPrefix(data, "mod_set_m_")
+			parts := strings.Split(raw, "__")
+			if len(parts) == 2 {
+				provName := parts[0]
+				var modelIdx int
+				fmt.Sscanf(parts[1], "%d", &modelIdx)
+				return a.modelUI.HandleSetModelCallback(c, provName, modelIdx)
+			}
+		}
+		if data == "mod_noop" {
+			return c.Respond(&tele.CallbackResponse{})
+		}
+
 		// Provider Edit Callbacks
 		if strings.HasPrefix(data, "wiz_ed_pick_") {
 			provID := strings.TrimPrefix(data, "wiz_ed_pick_")
@@ -1495,6 +1567,7 @@ func (a *AdminBot) registerCommands() {
 		{Text: "new", Description: "Mulai sesi/konteks percakapan baru"},
 		{Text: "stop", Description: "Hentikan respon AI atau wizard yang aktif"},
 		{Text: "help", Description: "Panduan lengkap perintah bot"},
+		{Text: "model", Description: "Ganti model AI / fallback combo"},
 		{Text: "providers", Description: "Kelola AI providers & API keys"},
 		{Text: "combos", Description: "Kelola model fallback combos"},
 		{Text: "proxies", Description: "Kelola proxy upstream pool"},
@@ -1674,6 +1747,7 @@ func (a *AdminBot) handleHelp(c tele.Context) error {
 		"• <code>/status</code> - Cek status operasional, resource & runtime AI\n" +
 		"• <code>/new</code> (atau <code>/reset</code>) - Mulai sesi baru & reset riwayat konteks\n" +
 		"• <code>/stop</code> (atau <code>/cancel</code>) - Hentikan respon AI atau batalkan wizard\n" +
+		"• <code>/model</code> - Ganti model AI, pilih provider/model atau aktifkan combo\n" +
 		"• <code>/help</code> - Tampilkan panduan ini\n\n" +
 		"🤖 <b>Provider AI (9Router Multi-Key & Router):</b>\n" +
 		"• <code>/wizard</code> atau <code>/setup</code> - Wizard interaktif tambah provider & deteksi model otomatis\n" +

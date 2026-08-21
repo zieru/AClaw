@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"goassistant/internal/config"
 	"goassistant/internal/tools"
 )
 
@@ -81,7 +80,7 @@ func NewOpenAIProviderWithKeys(name, providerType, baseURL string, keys []string
 		keyPool:      NewKeyPool(keys, keyStrategy),
 		defaultModel: defaultModel,
 		models:       models,
-		client:       &http.Client{Timeout: time.Duration(config.Get().Timeouts.APICallSeconds) * time.Second},
+		client:       &http.Client{Timeout: defaultAPITimeout()},
 	}
 }
 

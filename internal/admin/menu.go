@@ -9,6 +9,7 @@ func MainMenuKeyboard() *tele.ReplyMarkup {
 	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
 
 	btnStatus := menu.Data("⚡ Status Server", "menu_status")
+	btnModel := menu.Data("🎛️ Switch Model", "menu_model")
 	btnProviders := menu.Data("🤖 Provider AI", "menu_providers")
 	btnCombos := menu.Data("🔀 Model Combos", "menu_combos")
 	btnChannels := menu.Data("📱 Channels (WA/TG)", "menu_channels")
@@ -25,14 +26,14 @@ func MainMenuKeyboard() *tele.ReplyMarkup {
 	btnHelp := menu.Data("❓ Bantuan Command", "menu_help")
 
 	menu.Inline(
-		menu.Row(btnStatus, btnProviders),
-		menu.Row(btnCombos, btnChannels),
-		menu.Row(btnTools, btnProxy),
-		menu.Row(btnTokenSaver, btnLimits),
-		menu.Row(btnMDFiles, btnCron),
-		menu.Row(btnMemory, btnStats),
-		menu.Row(btnBackup, btnUpdate),
-		menu.Row(btnHelp),
+		menu.Row(btnStatus, btnModel),
+		menu.Row(btnProviders, btnCombos),
+		menu.Row(btnChannels, btnTools),
+		menu.Row(btnProxy, btnTokenSaver),
+		menu.Row(btnLimits, btnMDFiles),
+		menu.Row(btnCron, btnMemory),
+		menu.Row(btnStats, btnBackup),
+		menu.Row(btnUpdate, btnHelp),
 	)
 
 	return menu

@@ -77,6 +77,19 @@ func (p *Pool) IsEnabled() bool {
 	return p.enabled && len(p.nodes) > 0
 }
 
+// ActiveCount returns the number of active proxy nodes in the pool
+func (p *Pool) ActiveCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	count := 0
+	for _, n := range p.nodes {
+		if n.IsActive {
+			count++
+		}
+	}
+	return count
+}
+
 // SetStrategy sets the node selection strategy
 func (p *Pool) SetStrategy(strategy string) {
 	p.mu.Lock()

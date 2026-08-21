@@ -14,8 +14,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"goassistant/internal/config"
 )
 
 // GeminiWebProvider scrapes/interacts with Gemini Web (gemini.google.com) using Google session cookies
@@ -52,7 +50,7 @@ func NewGeminiWebProvider(name string, authInput string, defaultModel string, mo
 		defaultModel: defaultModel,
 		models:       models,
 		cookieMap:    make(map[string]string),
-		client:       &http.Client{Timeout: time.Duration(config.Get().Timeouts.APICallSeconds) * time.Second},
+		client:       &http.Client{Timeout: defaultAPITimeout()},
 	}
 
 	if authInput != "" {

@@ -7,24 +7,25 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
-	"goassistant/internal/config"
 	"goassistant/internal/admin"
 	"goassistant/internal/agent"
 	"goassistant/internal/channel"
 	tgchannel "goassistant/internal/channel/telegram"
 	wachannel "goassistant/internal/channel/whatsapp"
+	"goassistant/internal/config"
 	"goassistant/internal/cron"
+	"goassistant/internal/goassisthttp"
 	"goassistant/internal/instance"
 	"goassistant/internal/memory"
 	"goassistant/internal/provider"
 	"goassistant/internal/proxy"
 	"goassistant/internal/storage"
 	"goassistant/internal/tools"
-	"goassistant/internal/goassisthttp"
 	"goassistant/internal/version"
-	"time"
 )
 
 func main() {
