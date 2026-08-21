@@ -25,29 +25,33 @@ echo [3/4] Mengambil versi tag terakhir dan membuat tag baru...
 set CURRENT_TAG=
 for /f "tokens=*" %%a in ('git describe --tags --abbrev^=0 2^>nul') do set CURRENT_TAG=%%a
 
-if "%CURRENT_TAG%"=="" (
-    set NEW_TAG=v0.0.1
-    echo Tag belum ada, memulai dari versi !NEW_TAG!
-) else (
-    echo Tag saat ini: %CURRENT_TAG%
-    
-    :: Membuat script PowerShell sementara untuk menghitung versi berikutnya
-    echo $t = '%CURRENT_TAG%' > get_next_tag.ps1
-    echo if ($t -match '^^v?(\d+)\.(\d+)\.(\d+)$') { >> get_next_tag.ps1
-    echo     $newPatch = [int]$matches[3] + 1 >> get_next_tag.ps1
-    echo     Write-Output ('v' + $matches[1] + '.' + $matches[2] + '.' + $newPatch) >> get_next_tag.ps1
-    echo } else { >> get_next_tag.ps1
-    echo     Write-Output ($t + '-1') >> get_next_tag.ps1
-    echo } >> get_next_tag.ps1
-    
-    :: Menjalankan script sementara dan menangkap outputnya
-    for /f "usebackq tokens=*" %%i in (`powershell -NoProfile -ExecutionPolicy Bypass -File get_next_tag.ps1`) do set NEW_TAG=%%i
-    
-    :: Menghapus script sementara
-    del get_next_tag.ps1
-    
-    echo Tag baru: !NEW_TAG!
-)
+if "%CURRENT_TAG%"=="" goto no_tag
+
+echo Tag saat ini: %CURRENT_TAG%
+
+:: Membuat script PowerShell sementara untuk menghitung versi berikutnya
+echo $t = '%CURRENT_TAG%' > get_next_tag.ps1
+echo if ($t -match '^^v?(\d+)\.(\d+)\.(\d+)$') { >> get_next_tag.ps1
+echo     $newPatch = [int]$matches[3] + 1 >> get_next_tag.ps1
+echo     Write-Output ('v' + $matches[1] + '.' + $matches[2] + '.' + $newPatch) >> get_next_tag.ps1
+echo } else { >> get_next_tag.ps1
+echo     Write-Output ($t + '-1') >> get_next_tag.ps1
+echo } >> get_next_tag.ps1
+
+:: Menjalankan script sementara dan menangkap outputnya
+for /f "usebackq tokens=*" %%i in (`powershell -NoProfile -ExecutionPolicy Bypass -File get_next_tag.ps1`) do set NEW_TAG=%%i
+
+:: Menghapus script sementara
+del get_next_tag.ps1
+
+echo Tag baru: !NEW_TAG!
+goto after_tag
+
+:no_tag
+set NEW_TAG=v0.0.1
+echo Tag belum ada, memulai dari versi !NEW_TAG!
+
+:after_tag
 
 :: Membuat tag baru
 git tag !NEW_TAG!
