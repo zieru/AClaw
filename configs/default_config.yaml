@@ -34,6 +34,11 @@ streaming:
   thinking_display: "full"   # full (tampilkan semua), summary (ringkasan), hidden (sembunyikan)
   chunk_delay_ms: 500        # Delay (ms) antara update streaming ke Telegram (500ms = 2x/detik)
 
+timeouts:
+  api_call_seconds: 90
+  handler_seconds: 120
+  retry_seconds: 120
+
 # Sub-Agent Multi-Task Delegation
 subagent:
   max_parallel: 3            # Max sub-agent berjalan bersamaan (3-5 direkomendasikan)

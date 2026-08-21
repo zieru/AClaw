@@ -53,6 +53,12 @@ type AppConfig struct {
 		ChunkDelayMs    int    `yaml:"chunk_delay_ms"`   // Delay between streaming chunks to Telegram
 	} `yaml:"streaming"`
 
+	Timeouts struct {
+		APICallSeconds int `yaml:"api_call_seconds"`
+		HandlerSeconds int `yaml:"handler_seconds"`
+		RetrySeconds   int `yaml:"retry_seconds"`
+	} `yaml:"timeouts"`
+
 	SubAgent struct {
 		MaxParallel        int  `yaml:"max_parallel"`          // Max concurrent sub-agents
 		TimeoutSeconds     int  `yaml:"timeout_seconds"`       // Per-task timeout
@@ -100,6 +106,9 @@ func Load(configPath string) (*AppConfig, error) {
 		cfg.SubAgent.TimeoutSeconds = 90
 		cfg.SubAgent.AutoDelegate = true
 		cfg.SubAgent.TokenBudgetPerTask = 2048
+		cfg.Timeouts.APICallSeconds = 90
+		cfg.Timeouts.HandlerSeconds = 120
+		cfg.Timeouts.RetrySeconds = 120
 
 		if configPath != "" {
 			if _, statErr := os.Stat(configPath); statErr != nil {

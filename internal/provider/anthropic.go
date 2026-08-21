@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"goassistant/internal/config"
 	"goassistant/internal/tools"
 )
 
@@ -42,7 +43,7 @@ func NewAnthropicProviderWithKeys(name string, keys []string, keyStrategy string
 		keyPool:      NewKeyPool(keys, keyStrategy),
 		defaultModel: defaultModel,
 		models:       models,
-		client:       &http.Client{Timeout: 90 * time.Second},
+		client:       &http.Client{Timeout: time.Duration(config.Get().Timeouts.APICallSeconds) * time.Second},
 	}
 }
 
@@ -311,3 +312,287 @@ func (p *AnthropicProvider) GenerateChat(ctx context.Context, req ChatRequest) (
 		ProviderName:     p.name,
 	}, nil
 }
+
+// GenerateChatStream implements StreamingProvider for Anthropic using messages?stream=true
+func (p *AnthropicProvider) GenerateChatStream(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	start := time.Now()
+	model := req.Model
+	if model == "" {
+		model = p.defaultModel
+	}
+
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 4096
+	}
+
+	var systemPrompt string
+	var messages []anthropicMessage
+
+	for _, m := range req.Messages {
+		if m.Role == RoleSystem {
+			systemPrompt = m.Content
+			continue
+		}
+		if m.Role == RoleTool {
+			messages = append(messages, anthropicMessage{
+				Role: "user",
+				Content: []anthropicContentBlock{{Type: "tool_result", ToolUseID: m.ToolCallID, Content: m.Content}},
+			})
+			continue
+		}
+		var blocks []anthropicContentBlock
+		if m.Content != "" {
+			blocks = append(blocks, anthropicContentBlock{Type: "text", Text: m.Content})
+		}
+		for _, tc := range m.ToolCalls {
+			blocks = append(blocks, anthropicContentBlock{Type: "tool_use", ID: tc.ID, Name: tc.Name, Input: tc.Arguments})
+		}
+		role := "user"
+		if m.Role == RoleAssistant {
+			role = "assistant"
+		}
+		if len(blocks) > 0 {
+			messages = append(messages, anthropicMessage{Role: role, Content: blocks})
+		}
+	}
+
+	var toolDefs []anthropicToolDef
+	for _, t := range req.Tools {
+		toolDefs = append(toolDefs, anthropicToolDef{
+			Name: t.Name(), Description: t.Description(), InputSchema: t.Parameters(),
+		})
+	}
+
+	payload := anthropicReqBody{
+		Model:       model,
+		System:      systemPrompt,
+		Messages:    messages,
+		Tools:       toolDefs,
+		MaxTokens:   maxTokens,
+		Temperature: req.Temperature,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal stream request: %w", err)
+	}
+
+	keyCount := p.keyPool.Count()
+	if keyCount == 0 {
+		keyCount = 1
+	}
+
+	var lastErr error
+	var resp *http.Response
+
+	for attempt := 0; attempt < keyCount; attempt++ {
+		apiKey := p.keyPool.GetNextKey()
+		url := "https://api.anthropic.com/v1/messages?stream=true"
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payloadBytes))
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("anthropic-version", "2023-06-01")
+		if apiKey != "" {
+			httpReq.Header.Set("x-api-key", apiKey)
+		}
+
+		resp, err = p.client.Do(httpReq)
+		if err != nil {
+			if apiKey != "" {
+				p.keyPool.MarkError(apiKey, false)
+			}
+			lastErr = fmt.Errorf("anthropic stream api call failed: %w", err)
+			continue
+		}
+
+		if resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if apiKey != "" {
+				p.keyPool.MarkError(apiKey, resp.StatusCode == 429)
+			}
+			lastErr = fmt.Errorf("anthropic stream api error (%d): %s", resp.StatusCode, string(bodyBytes))
+			if attempt < keyCount-1 {
+				continue
+			}
+			return nil, lastErr
+		}
+
+		if resp.StatusCode >= 400 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("anthropic stream api error (%d): %s", resp.StatusCode, string(bodyBytes))
+		}
+
+		if apiKey != "" {
+			p.keyPool.MarkSuccess(apiKey)
+		}
+		lastErr = nil
+		break
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	defer resp.Body.Close()
+
+	var contentBuilder strings.Builder
+	var thinkingBuilder strings.Builder
+	var toolCalls []ToolCall
+	var promptTokens, outputTokens, totalTokens int
+
+	buf := make([]byte, 4096)
+	var lineBuffer strings.Builder
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			lineBuffer.Write(buf[:n])
+			text := lineBuffer.String()
+			lines := strings.Split(text, "\n")
+			if !strings.HasSuffix(text, "\n") && len(lines) > 0 {
+				lineBuffer.Reset()
+				lineBuffer.WriteString(lines[len(lines)-1])
+				lines = lines[:len(lines)-1]
+			} else {
+				lineBuffer.Reset()
+			}
+
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if len(line) < 6 || line[:5] != "data:" {
+					continue
+				}
+				data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+				if data == "" || data == "[DONE]" {
+					continue
+				}
+
+				var streamEvent map[string]interface{}
+				if err := json.Unmarshal([]byte(data), &streamEvent); err != nil {
+					continue
+				}
+
+				eventType, _ := streamEvent["type"].(string)
+
+				switch eventType {
+				case "content_block_delta":
+					deltaType, _ := streamEvent["delta"].(map[string]interface{})
+					if deltaType == nil {
+						continue
+					}
+					dt, _ := deltaType["type"].(string)
+					switch dt {
+					case "text_delta":
+						if t, ok := deltaType["text"].(string); ok && t != "" {
+							contentBuilder.WriteString(t)
+							if req.StreamCallback != nil {
+								req.StreamCallback(StreamChunk{Content: t})
+							}
+						}
+					case "thinking_delta":
+						if t, ok := deltaType["thinking"].(string); ok && t != "" {
+							thinkingBuilder.WriteString(t)
+							if req.StreamCallback != nil {
+								req.StreamCallback(StreamChunk{Thinking: t})
+							}
+						}
+					}
+				case "content_block_start":
+					contentBlock, _ := streamEvent["content_block"].(map[string]interface{})
+					if contentBlock == nil {
+						continue
+					}
+					cbType, _ := contentBlock["type"].(string)
+					if cbType == "thinking" {
+						if t, ok := contentBlock["thinking"].(string); ok && t != "" {
+							thinkingBuilder.WriteString(t)
+							if req.StreamCallback != nil {
+								req.StreamCallback(StreamChunk{Thinking: t})
+							}
+						}
+					} else if cbType == "tool_use" {
+						var args map[string]interface{}
+						if rawArgs, ok := contentBlock["input"].(map[string]interface{}); ok {
+							for k, v := range rawArgs {
+								args[k] = v
+							}
+						}
+						toolCalls = append(toolCalls, ToolCall{
+							ID:        fmt.Sprintf("%v", contentBlock["id"]),
+							Name:      fmt.Sprintf("%v", contentBlock["name"]),
+							Arguments: args,
+						})
+					} else if cbType == "text" {
+						if t, ok := contentBlock["text"].(string); ok && t != "" {
+							contentBuilder.WriteString(t)
+							if req.StreamCallback != nil {
+								req.StreamCallback(StreamChunk{Content: t})
+							}
+						}
+					}
+
+				case "message_delta":
+					usage, _ := streamEvent["usage"].(map[string]interface{})
+					if usage != nil {
+						if ot, ok := usage["output_tokens"].(float64); ok {
+							outputTokens = int(ot)
+						}
+					}
+
+				case "message_stop":
+					if req.StreamCallback != nil {
+						req.StreamCallback(StreamChunk{Done: true})
+					}
+				}
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+
+	if req.StreamCallback != nil {
+		req.StreamCallback(StreamChunk{Done: true})
+	}
+
+	totalTokens = promptTokens + outputTokens
+	if totalTokens == 0 {
+		totalTokens = (contentBuilder.Len() + thinkingBuilder.Len()) / 4
+	}
+
+	parsedToolCalls := make([]ToolCall, 0, len(toolCalls))
+	for _, tc := range toolCalls {
+		if tc.Arguments == nil {
+			tc.Arguments = map[string]interface{}{}
+		}
+		parsedToolCalls = append(parsedToolCalls, tc)
+	}
+
+	cost := (float64(promptTokens)*0.003 + float64(outputTokens)*0.015) / 1000.0
+
+	return &ChatResponse{
+		Content:          contentBuilder.String(),
+		Thinking:         thinkingBuilder.String(),
+		ToolCalls:        parsedToolCalls,
+		PromptTokens:     promptTokens,
+		CompletionTokens: outputTokens,
+		TotalTokens:      totalTokens,
+		CostUSD:          cost,
+		Latency:          time.Since(start),
+		Model:            model,
+		ProviderName:     p.name,
+	}, nil
+}
+
+// Ensure AnthropicProvider implements StreamingProvider
+var _ StreamingProvider = (*AnthropicProvider)(nil)

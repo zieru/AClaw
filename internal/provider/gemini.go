@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"goassistant/internal/config"
 	"goassistant/internal/tools"
 )
 
@@ -42,7 +43,7 @@ func NewGeminiProviderWithKeys(name string, keys []string, keyStrategy string, d
 		keyPool:      NewKeyPool(keys, keyStrategy),
 		defaultModel: defaultModel,
 		models:       models,
-		client:       &http.Client{Timeout: 90 * time.Second},
+		client:       &http.Client{Timeout: time.Duration(config.Get().Timeouts.APICallSeconds) * time.Second},
 	}
 }
 
@@ -344,3 +345,249 @@ func (p *GeminiProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		ProviderName:     p.name,
 	}, nil
 }
+
+// GenerateChatStream implements StreamingProvider for Gemini using streamGenerateContent?alt=sse
+func (p *GeminiProvider) GenerateChatStream(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	start := time.Now()
+	model := req.Model
+	if model == "" {
+		model = p.defaultModel
+	}
+
+	var contents []geminiContent
+	var systemContent *geminiContent
+
+	for _, m := range req.Messages {
+		if m.Role == RoleSystem {
+			systemContent = &geminiContent{Parts: []geminiPart{{Text: m.Content}}}
+			continue
+		}
+		role := "user"
+		if m.Role == RoleAssistant {
+			role = "model"
+		}
+		var parts []geminiPart
+		if m.Content != "" {
+			parts = append(parts, geminiPart{Text: m.Content})
+		}
+		for _, tc := range m.ToolCalls {
+			parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{Name: tc.Name, Args: tc.Arguments}})
+		}
+		if m.Role == RoleTool {
+			role = "function"
+			parts = append(parts, geminiPart{FunctionResponse: &geminiFunctionResp{
+				Name: m.Name, Response: map[string]interface{}{"output": m.Content},
+			}})
+		}
+		if len(parts) > 0 {
+			contents = append(contents, geminiContent{Role: role, Parts: parts})
+		}
+	}
+
+	var toolsList []geminiTool
+	if len(req.Tools) > 0 {
+		var decls []geminiFunctionDeclaration
+		for _, t := range req.Tools {
+			decls = append(decls, geminiFunctionDeclaration{
+				Name: t.Name(), Description: t.Description(), Parameters: t.Parameters(),
+			})
+		}
+		toolsList = append(toolsList, geminiTool{FunctionDeclarations: decls})
+	}
+
+	payload := geminiReqBody{Contents: contents, Tools: toolsList, SystemInstruction: systemContent}
+	if req.Temperature > 0 || req.MaxTokens > 0 || req.ThinkingEnabled {
+		payload.GenerationConfig = &geminiGenConfig{Temperature: req.Temperature, MaxTokens: req.MaxTokens}
+		if req.ThinkingEnabled {
+			budget := req.ThinkingBudget
+			if budget <= 0 {
+				budget = 8192
+			}
+			payload.GenerationConfig.ThinkingConfig = &geminiThinkConfig{ThinkingBudget: budget, IncludeThoughts: true}
+		}
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal stream request: %w", err)
+	}
+
+	keyCount := p.keyPool.Count()
+	if keyCount == 0 {
+		keyCount = 1
+	}
+
+	var lastErr error
+	var resp *http.Response
+
+	for attempt := 0; attempt < keyCount; attempt++ {
+		apiKey := p.keyPool.GetNextKey()
+		url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s", model, apiKey)
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payloadBytes))
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		resp, err = p.client.Do(httpReq)
+		if err != nil {
+			if apiKey != "" {
+				p.keyPool.MarkError(apiKey, false)
+			}
+			lastErr = fmt.Errorf("gemini stream api call failed: %w", err)
+			continue
+		}
+
+		if resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if apiKey != "" {
+				p.keyPool.MarkError(apiKey, resp.StatusCode == 429)
+			}
+			lastErr = fmt.Errorf("gemini stream api error (%d): %s", resp.StatusCode, string(bodyBytes))
+			if attempt < keyCount-1 {
+				continue
+			}
+			return nil, lastErr
+		}
+
+		if resp.StatusCode >= 400 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("gemini stream api error (%d): %s", resp.StatusCode, string(bodyBytes))
+		}
+
+		if apiKey != "" {
+			p.keyPool.MarkSuccess(apiKey)
+		}
+		lastErr = nil
+		break
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	defer resp.Body.Close()
+
+	var contentBuilder strings.Builder
+	var thinkingBuilder strings.Builder
+	var toolCalls []ToolCall
+	var promptTokens, compTokens, totalTokens, thinkingTokens int
+	actualModel := model
+
+	buf := make([]byte, 4096)
+	var lineBuffer strings.Builder
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			lineBuffer.Write(buf[:n])
+			text := lineBuffer.String()
+			lines := strings.Split(text, "\n")
+			if !strings.HasSuffix(text, "\n") && len(lines) > 0 {
+				lineBuffer.Reset()
+				lineBuffer.WriteString(lines[len(lines)-1])
+				lines = lines[:len(lines)-1]
+			} else {
+				lineBuffer.Reset()
+			}
+
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if !strings.HasPrefix(line, "data:") {
+					continue
+				}
+				data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+				if data == "" {
+					continue
+				}
+
+				var streamResp struct {
+					Candidates []struct {
+						Content struct {
+							Parts    []geminiPart `json:"parts"`
+							Role     string       `json:"role"`
+						} `json:"content"`
+						FinishReason string `json:"finishReason"`
+					} `json:"candidates"`
+					UsageMetadata *struct {
+						PromptTokenCount     int `json:"promptTokenCount"`
+						CandidatesTokenCount int `json:"candidatesTokenCount"`
+						TotalTokenCount      int `json:"totalTokenCount"`
+						ThoughtsTokenCount   int `json:"thoughtsTokenCount,omitempty"`
+					} `json:"usageMetadata"`
+				}
+				if err := json.Unmarshal([]byte(data), &streamResp); err != nil {
+					continue
+				}
+
+				if len(streamResp.Candidates) > 0 {
+					cand := streamResp.Candidates[0]
+					for _, part := range cand.Content.Parts {
+						if part.Thought != "" {
+							thinkingBuilder.WriteString(part.Thought)
+							if req.StreamCallback != nil {
+								req.StreamCallback(StreamChunk{Thinking: part.Thought})
+							}
+						} else if part.Text != "" {
+							contentBuilder.WriteString(part.Text)
+							if req.StreamCallback != nil {
+								req.StreamCallback(StreamChunk{Content: part.Text})
+							}
+						}
+						if part.FunctionCall != nil {
+							toolCalls = append(toolCalls, ToolCall{
+								ID:   fmt.Sprintf("call_%d_%d", time.Now().Unix(), len(toolCalls)),
+								Name: part.FunctionCall.Name,
+								Arguments: part.FunctionCall.Args,
+							})
+						}
+					}
+					if cand.FinishReason != "" {
+						if req.StreamCallback != nil {
+							req.StreamCallback(StreamChunk{Done: true})
+						}
+					}
+				}
+
+				if streamResp.UsageMetadata != nil {
+					promptTokens = streamResp.UsageMetadata.PromptTokenCount
+					compTokens = streamResp.UsageMetadata.CandidatesTokenCount
+					totalTokens = streamResp.UsageMetadata.TotalTokenCount
+					thinkingTokens = streamResp.UsageMetadata.ThoughtsTokenCount
+				}
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+
+	cost := (float64(promptTokens)*0.00010 + float64(compTokens)*0.00040) / 1000.0
+	if totalTokens == 0 {
+		totalTokens = (contentBuilder.Len() + thinkingBuilder.Len()) / 4
+	}
+
+	return &ChatResponse{
+		Content:          contentBuilder.String(),
+		Thinking:         thinkingBuilder.String(),
+		ToolCalls:        toolCalls,
+		PromptTokens:     promptTokens,
+		CompletionTokens: compTokens,
+		ThinkingTokens:   thinkingTokens,
+		TotalTokens:      totalTokens,
+		CostUSD:          cost,
+		Latency:          time.Since(start),
+		Model:            actualModel,
+		ProviderName:     p.name,
+	}, nil
+}
+
+// Ensure GeminiProvider implements StreamingProvider
+var _ StreamingProvider = (*GeminiProvider)(nil)

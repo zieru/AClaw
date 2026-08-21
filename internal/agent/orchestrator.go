@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"goassistant/internal/config"
 	"goassistant/internal/memory"
 	"goassistant/internal/provider"
 	"goassistant/internal/storage"
@@ -282,7 +283,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 				}
 
 				// Fresh 2-minute context if original ctx was timed out
-				retryCtx, cancelRetry := context.WithTimeout(context.Background(), 2*time.Minute)
+				retryCtx, cancelRetry := context.WithTimeout(context.Background(),
+				time.Duration(config.Get().Timeouts.RetrySeconds)*time.Second)
 				resp, err = o.providerManager.GenerateWithFallback(retryCtx, req.PreferredProv, retryChatReq)
 				cancelRetry()
 			}

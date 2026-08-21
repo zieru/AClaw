@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"goassistant/internal/agent"
+	"goassistant/internal/config"
 	"goassistant/internal/storage"
 )
 
@@ -111,7 +112,8 @@ func (a *BridgeAdapter) HandleIncomingWebhook(w http.ResponseWriter, r *http.Req
 	}
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(),
+			time.Duration(config.Get().Timeouts.HandlerSeconds)*time.Second)
 		defer cancel()
 
 		resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{

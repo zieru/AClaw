@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"goassistant/internal/config"
 )
 
 // FreeEndpoint represents a single free AI endpoint with health tracking
@@ -184,7 +186,7 @@ func NewFreeRouterProvider(name, providerType string, customEndpoints []*FreeEnd
 		name:         name,
 		providerType: providerType,
 		defaultModel: "gpt-4o-mini",
-		client:       &http.Client{Timeout: 120 * time.Second},
+		client:       &http.Client{Timeout: time.Duration(config.Get().Timeouts.APICallSeconds) * time.Second},
 		strategy:     strategy,
 	}
 
@@ -287,7 +289,6 @@ func (p *FreeRouterProvider) Models() []string {
 func (p *FreeRouterProvider) SetHTTPClient(client interface{}) {
 	if c, ok := client.(*http.Client); ok && c != nil {
 		p.client = c
-		p.client.Timeout = 120 * time.Second
 	}
 }
 

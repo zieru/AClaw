@@ -9,12 +9,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	"goassistant/internal/config"
 	"goassistant/internal/admin"
 	"goassistant/internal/agent"
 	"goassistant/internal/channel"
 	tgchannel "goassistant/internal/channel/telegram"
 	wachannel "goassistant/internal/channel/whatsapp"
-	"goassistant/internal/config"
 	"goassistant/internal/cron"
 	"goassistant/internal/memory"
 	"goassistant/internal/provider"
@@ -77,7 +77,8 @@ func main() {
 	for _, rawProxy := range cfg.ProxyPool.InitialProxies {
 		_, _ = proxyPool.AddNode(rawProxy, "")
 	}
-	provMgr.SetDefaultHTTPClient(proxyPool.NewHTTPClient(90 * time.Second))
+	provMgr.SetDefaultHTTPClient(proxyPool.NewHTTPClient(
+		time.Duration(config.Get().Timeouts.APICallSeconds) * time.Second))
 	log.Printf("🌐 9Router Proxy Pool diinisialisasi (Strategi: %s, Status: %v)", cfg.ProxyPool.Strategy, cfg.ProxyPool.Enabled)
 
 	// 4. Seed Default Global Policy if not exists

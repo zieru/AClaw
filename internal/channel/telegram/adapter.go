@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"goassistant/internal/agent"
+	"goassistant/internal/config"
 	"goassistant/internal/storage"
 	tele "gopkg.in/telebot.v3"
 )
 
-// BotAdapter manages a Telegram bot channel instance
 type BotAdapter struct {
 	channelID    string
 	name         string
@@ -97,6 +97,15 @@ func (a *BotAdapter) registerHandlers() {
 	a.bot.Handle("/clear", a.handleNew)
 	a.bot.Handle("/stop", a.handleStop)
 	a.bot.Handle("/cancel", a.handleStop)
+	a.bot.Handle(tele.OnCallback, func(c tele.Context) error {
+		if c.Callback() == nil {
+			return nil
+		}
+		if strings.HasPrefix(c.Callback().Data, "cancel_task") {
+			_ = a.handleStop(c)
+		}
+		return nil
+	})
 	a.bot.Handle("/status", a.handleStatus)
 
 	// Text message handler
@@ -119,11 +128,14 @@ func (a *BotAdapter) registerHandlers() {
 			return nil
 		}
 
-		// Send typing action & initial thinking message
 		_ = c.Notify(tele.Typing)
-		thinkingMsg, _ := a.bot.Reply(msg, "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML)
+	cancelMenu := &tele.ReplyMarkup{}
+	cancelBtn := cancelMenu.Data("🛑 Batalkan", "cancel_task")
+	cancelMenu.Inline(cancelMenu.Row(cancelBtn))
+	thinkingMsg, _ := a.bot.Reply(msg, "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(),
+			time.Duration(config.Get().Timeouts.HandlerSeconds)*time.Second)
 		a.activeTasks.Store(c.Chat().ID, cancel)
 		defer func() {
 			a.activeTasks.Delete(c.Chat().ID)
