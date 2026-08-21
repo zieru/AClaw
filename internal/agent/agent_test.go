@@ -113,6 +113,12 @@ func TestFormatUserFriendlyError(t *testing.T) {
 	if !strings.Contains(friendlyTarget, "Layanan AI Sedang Gangguan") {
 		t.Errorf("expected friendly provider down message, got: %s", friendlyTarget)
 	}
+
+	errCanceled := &testCustomError{msg: "context canceled"}
+	friendlyCanceled := FormatUserFriendlyError(errCanceled)
+	if !strings.Contains(friendlyCanceled, "Proses Dibatalkan") {
+		t.Errorf("expected friendly canceled message, got: %s", friendlyCanceled)
+	}
 }
 
 type testCustomError struct {
@@ -122,4 +128,5 @@ type testCustomError struct {
 func (e *testCustomError) Error() string {
 	return e.msg
 }
+
 

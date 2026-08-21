@@ -3,10 +3,12 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"html"
 	"log"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"goassistant/internal/agent"
@@ -22,6 +24,7 @@ type BotAdapter struct {
 	bot          *tele.Bot
 	orchestrator *agent.Orchestrator
 	db           *storage.DB
+	activeTasks  sync.Map
 	stopChan     chan struct{}
 }
 
@@ -54,6 +57,19 @@ func (a *BotAdapter) Name() string { return a.name }
 func (a *BotAdapter) Start(ctx context.Context) error {
 	a.registerHandlers()
 	go a.bot.Start()
+
+	// Register Bot Commands for Telegram autocomplete
+	commands := []tele.Command{
+		{Text: "new", Description: "Mulai sesi percakapan baru (reset konteks)"},
+		{Text: "reset", Description: "Reset riwayat percakapan"},
+		{Text: "stop", Description: "Hentikan respon AI yang sedang diproses"},
+		{Text: "status", Description: "Cek status bot & sesi percakapan"},
+		{Text: "help", Description: "Bantuan & panduan penggunaan bot"},
+	}
+	if err := a.bot.SetCommands(commands); err != nil {
+		log.Printf("⚠️ [Channel-TG] Gagal mendaftarkan menu command untuk '%s': %v", a.name, err)
+	}
+
 	log.Printf("[Channel-TG] Bot '%s' (@%s) aktif dan siap menerima pesan.", a.name, a.bot.Me.Username)
 	return nil
 }
@@ -73,6 +89,16 @@ func (a *BotAdapter) SendMessage(targetID, text string) error {
 }
 
 func (a *BotAdapter) registerHandlers() {
+	// Command Handlers
+	a.bot.Handle("/start", a.handleHelp)
+	a.bot.Handle("/help", a.handleHelp)
+	a.bot.Handle("/new", a.handleNew)
+	a.bot.Handle("/reset", a.handleNew)
+	a.bot.Handle("/clear", a.handleNew)
+	a.bot.Handle("/stop", a.handleStop)
+	a.bot.Handle("/cancel", a.handleStop)
+	a.bot.Handle("/status", a.handleStatus)
+
 	// Text message handler
 	a.bot.Handle(tele.OnText, func(c tele.Context) error {
 		msg := c.Message()
@@ -98,7 +124,11 @@ func (a *BotAdapter) registerHandlers() {
 		thinkingMsg, _ := a.bot.Reply(msg, "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
+		a.activeTasks.Store(c.Chat().ID, cancel)
+		defer func() {
+			a.activeTasks.Delete(c.Chat().ID)
+			cancel()
+		}()
 
 		resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{
 			ChannelType:    "telegram",
@@ -145,7 +175,11 @@ func (a *BotAdapter) registerHandlers() {
 		thinkingMsg, _ := a.bot.Reply(c.Message(), "📄 <i>Menganalisis dokumen & berpikir...</i>", tele.ModeHTML)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
+		a.activeTasks.Store(c.Chat().ID, cancel)
+		defer func() {
+			a.activeTasks.Delete(c.Chat().ID)
+			cancel()
+		}()
 
 		resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{
 			ChannelType:    "telegram",
@@ -174,6 +208,71 @@ func (a *BotAdapter) registerHandlers() {
 
 		return sendOrEditResponse(c, thinkingMsg, resp.Text, resp.MediaFiles)
 	})
+}
+
+func (a *BotAdapter) handleNew(c tele.Context) error {
+	if cancelVal, loaded := a.activeTasks.LoadAndDelete(c.Chat().ID); loaded {
+		if cancel, ok := cancelVal.(context.CancelFunc); ok {
+			cancel()
+		}
+	}
+
+	session, err := a.db.GetOrCreateSession(a.channelID, strconv.FormatInt(c.Chat().ID, 10), strconv.FormatInt(c.Sender().ID, 10))
+	if err == nil && session != nil {
+		_ = a.db.ClearSessionMessages(session.ID)
+	}
+
+	text := "✨ <b>SESI BARU DIMULAI</b>\n\n" +
+		"Konteks percakapan dan riwayat pesan Anda telah direset.\n" +
+		"Silakan ajukan pertanyaan atau perintah baru!"
+	return c.Send(text, tele.ModeHTML)
+}
+
+func (a *BotAdapter) handleStop(c tele.Context) error {
+	if cancelVal, loaded := a.activeTasks.LoadAndDelete(c.Chat().ID); loaded {
+		if cancel, ok := cancelVal.(context.CancelFunc); ok {
+			cancel()
+		}
+	}
+	text := "🛑 <b>PROSES DIHENTIKAN</b>\n\n" +
+		"Generasi respon AI untuk pesan terakhir Anda telah dihentikan."
+	return c.Send(text, tele.ModeHTML)
+}
+
+func (a *BotAdapter) handleStatus(c tele.Context) error {
+	session, _ := a.db.GetOrCreateSession(a.channelID, strconv.FormatInt(c.Chat().ID, 10), strconv.FormatInt(c.Sender().ID, 10))
+	msgCount := 0
+	if session != nil {
+		msgCount, _ = a.db.CountSessionMessages(session.ID)
+	}
+	policy := a.db.GetResolvedPolicy(a.channelID, strconv.FormatInt(c.Chat().ID, 10))
+
+	var sb strings.Builder
+	sb.WriteString("🤖 <b>STATUS ASISTEN AI</b>\n\n")
+	sb.WriteString(fmt.Sprintf("• Channel: <b>%s</b>\n", html.EscapeString(a.name)))
+	sb.WriteString(fmt.Sprintf("• Chat ID: <code>%d</code>\n", c.Chat().ID))
+	sb.WriteString(fmt.Sprintf("• User ID: <code>%d</code>\n", c.Sender().ID))
+	if session != nil {
+		sb.WriteString(fmt.Sprintf("• Sesi ID: <code>%s</code>\n", html.EscapeString(session.ID)))
+		sb.WriteString(fmt.Sprintf("• Riwayat Aktif: <code>%d pesan</code> (Maks: <code>%d</code>)\n", msgCount, policy.MaxHistoryTurns))
+	}
+	sb.WriteString(fmt.Sprintf("• Mode Penghemat Token: <code>%s</code>\n\n", html.EscapeString(policy.TokenSaverMode)))
+	sb.WriteString("💡 <b>Perintah Konteks:</b>\n")
+	sb.WriteString("• <code>/new</code> - Mulai percakapan baru & bersihkan konteks\n")
+	sb.WriteString("• <code>/stop</code> - Hentikan generasi jawaban yang sedang berjalan")
+
+	return c.Send(sb.String(), tele.ModeHTML)
+}
+
+func (a *BotAdapter) handleHelp(c tele.Context) error {
+	text := "👋 <b>HALO! SAYA ASISTEN AI GOASSISTANT</b>\n\n" +
+		"Silakan kirimkan pertanyaan atau permintaan Anda langsung di chat ini.\n\n" +
+		"📌 <b>Daftar Perintah:</b>\n" +
+		"• <code>/new</code> - Mulai sesi baru & reset riwayat percakapan\n" +
+		"• <code>/stop</code> - Batalkan atau hentikan proses respon AI\n" +
+		"• <code>/status</code> - Cek status percakapan dan konfigurasi sesi\n" +
+		"• <code>/help</code> - Tampilkan panduan ini"
+	return c.Send(text, tele.ModeHTML)
 }
 
 func sendOrEditResponse(c tele.Context, thinkingMsg *tele.Message, text string, mediaFiles []agent.MediaAttachment) error {

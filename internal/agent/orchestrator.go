@@ -217,6 +217,10 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 
 	maxTurns := 5
 	for turn := 0; turn < maxTurns; turn++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
 		// Run Token Saver RTK / Caveman compression pipeline
 		compressedMsgs, saverReport := tokensaver.CompressMessages(messages, policy.TokenSaverMode, policy.MaxTokens*4)
 		totalTokensSaved += saverReport.TokensSaved
@@ -232,6 +236,9 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 
 		resp, err := o.providerManager.GenerateWithFallback(ctx, req.PreferredProv, chatReq)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			// Check if error is timeout, context length exceeded, or network issue with long context
 			errStr := strings.ToLower(err.Error())
 			isContextOrTimeout := strings.Contains(errStr, "context deadline exceeded") ||
@@ -527,6 +534,8 @@ func FormatUserFriendlyError(err error) string {
 	}
 	errStr := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "canceled"):
+		return "🛑 <b>Proses Dibatalkan</b>\nEksekusi permintaan atau proses telah dihentikan oleh pengguna."
 	case strings.Contains(errStr, "context deadline exceeded") || strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline"):
 		return "⏳ <b>Waktu Tunggu Habis (Timeout)</b>\nServer AI membutuhkan waktu terlalu lama untuk memproses (beban server tinggi atau konteks terlalu panjang). Riwayat percakapan telah disederhanakan secara otomatis. Silakan coba kirim ulang pertanyaan Anda, atau gunakan <code>/reset</code> jika kendala berlanjut."
 	case strings.Contains(errStr, "context_length_exceeded") || strings.Contains(errStr, "maximum context length") || strings.Contains(errStr, "token limit"):

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"goassistant/internal/agent"
@@ -36,6 +37,7 @@ type AdminBot struct {
 	memManager   *memory.Manager
 	sessManager  *memory.SessionManager
 	proxyPool    *proxy.Pool
+	activeTasks  sync.Map
 
 	limitsUI     *LimitsUI
 	providerUI   *ProviderUI
@@ -139,7 +141,14 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle("/start", a.handleMenu)
 	a.bot.Handle("/menu", a.handleMenu)
 	a.bot.Handle("/help", a.handleHelp)
+	a.bot.Handle("/status", a.handleStatus)
+	a.bot.Handle("/new", a.handleNew)
+	a.bot.Handle("/reset", a.handleNew)
+	a.bot.Handle("/clear", a.handleNew)
+	a.bot.Handle("/stop", a.handleStop)
+	a.bot.Handle("/cancel", a.handleStop)
 	a.bot.Handle(&tele.Btn{Unique: "menu_main"}, a.handleMenu)
+	a.bot.Handle(&tele.Btn{Unique: "menu_status"}, a.handleStatus)
 
 	// Interactive Menu Callbacks
 	a.bot.Handle(&tele.Btn{Unique: "menu_providers"}, func(c tele.Context) error {
@@ -1236,7 +1245,11 @@ func (a *AdminBot) registerRoutes() {
 		thinkingMsg, _ := a.bot.Reply(c.Message(), "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
+		a.activeTasks.Store(c.Chat().ID, cancel)
+		defer func() {
+			a.activeTasks.Delete(c.Chat().ID)
+			cancel()
+		}()
 
 		resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{
 			ChannelType: "telegram_admin",
@@ -1254,15 +1267,111 @@ func (a *AdminBot) registerRoutes() {
 		})
 
 		if err != nil {
+			friendlyErr := agent.FormatUserFriendlyError(err)
 			if thinkingMsg != nil {
-				_, _ = a.bot.Edit(thinkingMsg, fmt.Sprintf("❌ Error: %v", html.EscapeString(err.Error())), tele.ModeHTML)
+				_, _ = a.bot.Edit(thinkingMsg, friendlyErr, tele.ModeHTML)
 				return nil
 			}
-			return c.Reply(fmt.Sprintf("❌ Error: %v", html.EscapeString(err.Error())), tele.ModeHTML)
+			return c.Reply(friendlyErr, tele.ModeHTML)
 		}
 
 		return sendOrEditSplitMessage(c, thinkingMsg, resp.Text, resp.MediaFiles...)
 	})
+
+	// Register bot command autocomplete in Telegram UI
+	a.registerCommands()
+}
+
+func (a *AdminBot) registerCommands() {
+	adminCommands := []tele.Command{
+		{Text: "menu", Description: "Buka dashboard Control Plane interaktif"},
+		{Text: "status", Description: "Cek status server, resource & AI engine"},
+		{Text: "new", Description: "Mulai sesi/konteks percakapan baru"},
+		{Text: "stop", Description: "Hentikan respon AI atau wizard yang aktif"},
+		{Text: "help", Description: "Panduan lengkap perintah bot"},
+		{Text: "providers", Description: "Kelola AI providers & API keys"},
+		{Text: "combos", Description: "Kelola model fallback combos"},
+		{Text: "proxies", Description: "Kelola proxy upstream pool"},
+		{Text: "tokensaver", Description: "Konfigurasi token saver & compression"},
+		{Text: "limits", Description: "Kelola batas token, upload & footer"},
+		{Text: "channels", Description: "Kelola bot Telegram & WhatsApp"},
+		{Text: "tools", Description: "Daftar tool AI & perizinan channel"},
+		{Text: "cron", Description: "Jadwal otomatisasi & trigger cron"},
+		{Text: "memory", Description: "Lihat memori profil & SOP bot"},
+		{Text: "stats", Description: "Statistik token & estimasi biaya"},
+		{Text: "logs", Description: "Lihat 10 aktivitas request terakhir"},
+		{Text: "backup", Description: "Unduh file backup SQLite & Markdown"},
+	}
+
+	if err := a.bot.SetCommands(adminCommands); err != nil {
+		log.Printf("⚠️ [Admin-TG] Gagal mendaftarkan menu autocomplete bot: %v", err)
+	} else {
+		log.Printf("✅ [Admin-TG] %d perintah bot berhasil didaftarkan ke auto-complete Telegram.", len(adminCommands))
+	}
+}
+
+func (a *AdminBot) handleStatus(c tele.Context) error {
+	return c.Send(a.RenderStatusSummary(c), BackToMenuKeyboard(), tele.ModeHTML)
+}
+
+func (a *AdminBot) handleNew(c tele.Context) error {
+	// 1. Cancel running tasks if any
+	if cancelVal, loaded := a.activeTasks.LoadAndDelete(c.Chat().ID); loaded {
+		if cancel, ok := cancelVal.(context.CancelFunc); ok {
+			cancel()
+		}
+	}
+
+	// 2. Clear any active wizard state
+	userID := c.Sender().ID
+	a.wizard.CancelWizard(userID)
+	a.comboWizard.CancelWizard(userID)
+	a.limitsUI.CancelWizard(userID)
+	a.channelUI.CancelWizard(userID)
+	a.cronUI.CancelWizard(userID)
+	a.mdUI.CancelWizard(userID)
+
+	// 3. Reset database session history
+	session, err := a.sessManager.GetOrCreate("telegram_admin", fmt.Sprintf("%d", c.Chat().ID), fmt.Sprintf("%d", userID))
+	if err == nil && session != nil {
+		_ = a.sessManager.ResetSession(session.ID)
+	}
+
+	text := "✨ <b>SESI PERCAKAPAN BARU DIMULAI</b>\n\n" +
+		"Konteks percakapan dan riwayat pesan sebelumnya telah dibersihkan.\n" +
+		"Anda sekarang berada di sesi percakapan baru yang segar.\n\n" +
+		"💡 <i>Kirim pesan atau pertanyaan apa saja untuk mulai berinteraksi dengan AI Assistant.</i>"
+
+	return c.Send(text, tele.ModeHTML)
+}
+
+func (a *AdminBot) handleStop(c tele.Context) error {
+	stoppedTask := false
+	if cancelVal, loaded := a.activeTasks.LoadAndDelete(c.Chat().ID); loaded {
+		if cancel, ok := cancelVal.(context.CancelFunc); ok {
+			cancel()
+			stoppedTask = true
+		}
+	}
+
+	userID := c.Sender().ID
+	a.wizard.CancelWizard(userID)
+	a.comboWizard.CancelWizard(userID)
+	a.limitsUI.CancelWizard(userID)
+	a.channelUI.CancelWizard(userID)
+	a.cronUI.CancelWizard(userID)
+	a.mdUI.CancelWizard(userID)
+
+	var text string
+	if stoppedTask {
+		text = "🛑 <b>PROSES DIHENTIKAN</b>\n\n" +
+			"Generasi respon AI dan eksekusi tool yang sedang berjalan berhasil dibatalkan."
+	} else {
+		text = "🛑 <b>PROSES DIHENTIKAN</b>\n\n" +
+			"Seluruh wizard input interaktif dan antrean aktif telah dibatalkan. Sistem siap menerima perintah baru."
+	}
+
+	return c.Send(text, tele.ModeHTML)
 }
 
 func (a *AdminBot) handleMenu(c tele.Context) error {
@@ -1345,8 +1454,12 @@ func splitText(text string, maxLen int) []string {
 
 func (a *AdminBot) handleHelp(c tele.Context) error {
 	text := "📖 <b>PANDUAN LENGKAP COMMAND GOASSISTANT</b>\n\n" +
-		"🎛️ <b>Navigasi & Menu:</b>\n" +
-		"• <code>/menu</code> - Tampilkan dashboard tombol interaktif\n\n" +
+		"🎛️ <b>Navigasi, Konteks & Status:</b>\n" +
+		"• <code>/menu</code> - Buka dashboard tombol interaktif utama\n" +
+		"• <code>/status</code> - Cek status operasional, resource & runtime AI\n" +
+		"• <code>/new</code> (atau <code>/reset</code>) - Mulai sesi baru & reset riwayat konteks\n" +
+		"• <code>/stop</code> (atau <code>/cancel</code>) - Hentikan respon AI atau batalkan wizard\n" +
+		"• <code>/help</code> - Tampilkan panduan ini\n\n" +
 		"🤖 <b>Provider AI (9Router Multi-Key & Router):</b>\n" +
 		"• <code>/wizard</code> atau <code>/setup</code> - Wizard interaktif tambah provider & deteksi model otomatis\n" +
 		"• <code>/editprovider [id]</code> - Wizard interaktif edit konfigurasi provider\n" +

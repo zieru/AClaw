@@ -114,7 +114,11 @@ Ketik `/menu` di chat bot Telegram Admin untuk membuka dashboard tombol interakt
 
 | Kategori | Command | Deskripsi |
 |---|---|---|
-| **Dashboard** | `/menu` | Membuka dashboard kontrol utama |
+| **Dashboard & Konteks** | `/menu` | Membuka dashboard kontrol interaktif |
+| | `/status` | Ringkasan operasional runtime, RAM, DB & AI engine |
+| | `/new` (atau `/reset`) | Memulai sesi baru & mereset riwayat konteks percakapan |
+| | `/stop` (atau `/cancel`) | Menghentikan respon AI atau membatalkan proses wizard |
+| | `/help` | Menampilkan panduan lengkap seluruh perintah |
 | **Provider** | `/providers` | Menampilkan daftar provider AI aktif |
 | | `/addprovider` | Menambah provider baru (9Router, OpenAI, Gemini, dll) |
 | | `/setkey` | Mengatur API Key provider |
