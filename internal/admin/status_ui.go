@@ -73,7 +73,7 @@ func (a *AdminBot) RenderStatusSummary(c tele.Context) string {
 	sb.WriteString(fmt.Sprintf("• Status: %s\n\n", proxyStatus))
 
 	// 4. Token Saver (RTK & Compression)
-	policy := a.db.GetResolvedPolicy("telegram_admin", fmt.Sprintf("%d", c.Chat().ID))
+	policy := a.db.GetResolvedPolicy("admin", fmt.Sprintf("%d", c.Chat().ID))
 	tsStats := tokensaver.GetStats()
 	savedTokens := tsStats.TotalTokensSaved.Load()
 	origTokens := tsStats.TotalOriginalTokens.Load()
@@ -87,7 +87,7 @@ func (a *AdminBot) RenderStatusSummary(c tele.Context) string {
 	sb.WriteString(fmt.Sprintf("• Total Hemat: <code>%d tokens</code> (<code>%.1f%%</code>)\n\n", savedTokens, pctSaved))
 
 	// 5. Current Chat Context Session
-	session, _ := a.sessManager.GetOrCreate("telegram_admin", fmt.Sprintf("%d", c.Chat().ID), fmt.Sprintf("%d", c.Sender().ID))
+	session, _ := a.sessManager.GetOrCreate("admin", fmt.Sprintf("%d", c.Chat().ID), fmt.Sprintf("%d", c.Sender().ID))
 	msgCount := 0
 	if session != nil {
 		msgCount, _ = a.db.CountSessionMessages(session.ID)

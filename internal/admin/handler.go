@@ -1331,11 +1331,9 @@ func (a *AdminBot) handleNew(c tele.Context) error {
 	a.cronUI.CancelWizard(userID)
 	a.mdUI.CancelWizard(userID)
 
-	// 3. Reset database session history
-	session, err := a.sessManager.GetOrCreate("telegram_admin", fmt.Sprintf("%d", c.Chat().ID), fmt.Sprintf("%d", userID))
-	if err == nil && session != nil {
-		_ = a.sessManager.ResetSession(session.ID)
-	}
+	// 3. Reset database session history for this chat
+	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
+	_ = a.sessManager.ResetChatSessions(chatIDStr)
 
 	text := "✨ <b>SESI PERCAKAPAN BARU DIMULAI</b>\n\n" +
 		"Konteks percakapan dan riwayat pesan sebelumnya telah dibersihkan.\n" +

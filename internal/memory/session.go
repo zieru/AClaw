@@ -52,6 +52,11 @@ func (sm *SessionManager) ResetSession(sessionID string) error {
 	return sm.db.ClearSessionMessages(sessionID)
 }
 
+// ResetChatSessions clears all history across any session for the given chat ID
+func (sm *SessionManager) ResetChatSessions(chatID string) error {
+	return sm.db.ClearSessionsByChatID(chatID)
+}
+
 // SummarizeSession uses LLM to compress earlier conversation history
 func (sm *SessionManager) SummarizeSession(ctx context.Context, sessionID string, p provider.Provider) (string, error) {
 	msgs, err := sm.db.GetRecentMessages(sessionID, 30)

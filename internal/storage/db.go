@@ -935,6 +935,31 @@ func (d *DB) ClearSessionMessages(sessionID string) error {
 	return err
 }
 
+func (d *DB) ClearSessionsByChatID(chatID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	rows, err := d.db.Query("SELECT id FROM chat_sessions WHERE chat_id = ?", chatID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var sessionIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			sessionIDs = append(sessionIDs, id)
+		}
+	}
+
+	for _, sid := range sessionIDs {
+		_, _ = d.db.Exec("DELETE FROM chat_messages WHERE session_id = ?", sid)
+		_, _ = d.db.Exec("UPDATE chat_sessions SET summary = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?", sid)
+	}
+	return nil
+}
+
 func (d *DB) UpdateSessionSummary(sessionID, summary string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
