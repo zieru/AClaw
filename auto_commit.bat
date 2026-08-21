@@ -32,11 +32,11 @@ echo Tag saat ini: %CURRENT_TAG%
 
 :: Membuat script PowerShell sementara untuk menghitung versi berikutnya
 echo $t = '%CURRENT_TAG%' > get_next_tag.ps1
-echo if ($t -match '^^v?(\d+)\.(\d+)\.(\d+)$') { >> get_next_tag.ps1
+echo if ($t -match '^^v?\.?(\d+)\.(\d+)\.(\d+)') { >> get_next_tag.ps1
 echo     $newPatch = [int]$matches[3] + 1 >> get_next_tag.ps1
 echo     Write-Output ('v' + $matches[1] + '.' + $matches[2] + '.' + $newPatch) >> get_next_tag.ps1
 echo } else { >> get_next_tag.ps1
-echo     Write-Output ($t + '-1') >> get_next_tag.ps1
+echo     Write-Output 'v1.5.2' >> get_next_tag.ps1
 echo } >> get_next_tag.ps1
 
 :: Menjalankan script sementara dan menangkap outputnya

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"goassistant/internal/tokensaver"
+	"goassistant/internal/version"
 	tele "gopkg.in/telebot.v3"
 )
 
