@@ -20,6 +20,7 @@ import (
 	"goassistant/internal/provider"
 	"goassistant/internal/proxy"
 	"goassistant/internal/storage"
+	"goassistant/internal/tgformat"
 	"goassistant/internal/tokensaver"
 	"goassistant/internal/tools"
 
@@ -1421,20 +1422,30 @@ func sendOrEditSplitMessage(c tele.Context, thinkingMsg *tele.Message, text stri
 
 	chunks := splitText(text, 4000)
 	if len(chunks) > 0 {
+		formattedFirst := tgformat.MarkdownToTelegramHTML(chunks[0])
 		if thinkingMsg != nil {
-			_, err := c.Bot().Edit(thinkingMsg, chunks[0])
+			_, err := c.Bot().Edit(thinkingMsg, formattedFirst, tele.ModeHTML)
 			if err != nil {
-				_ = c.Reply(chunks[0])
+				// Fallback to plain text edit if HTML fails
+				_, err = c.Bot().Edit(thinkingMsg, chunks[0])
+				if err != nil {
+					// Fallback to reply HTML, then plain text
+					if err := c.Reply(formattedFirst, tele.ModeHTML); err != nil {
+						_ = c.Reply(chunks[0])
+					}
+				}
 			}
 			for _, chunk := range chunks[1:] {
-				if err := c.Reply(chunk); err != nil {
-					_ = err
+				formattedChunk := tgformat.MarkdownToTelegramHTML(chunk)
+				if err := c.Reply(formattedChunk, tele.ModeHTML); err != nil {
+					_ = c.Reply(chunk)
 				}
 			}
 		} else {
 			for _, chunk := range chunks {
-				if err := c.Reply(chunk); err != nil {
-					_ = err
+				formattedChunk := tgformat.MarkdownToTelegramHTML(chunk)
+				if err := c.Reply(formattedChunk, tele.ModeHTML); err != nil {
+					_ = c.Reply(chunk)
 				}
 			}
 		}
