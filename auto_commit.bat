@@ -22,6 +22,7 @@ git commit -m "!commit_msg!"
 :: 3. Mengambil tag terakhir dan menaikkan versinya (Increment patch version)
 echo.
 echo [3/4] Mengambil versi tag terakhir dan membuat tag baru...
+git fetch --tags origin 2>nul
 set CURRENT_TAG=
 for /f "tokens=*" %%a in ('git describe --tags --abbrev^=0 2^>nul') do set CURRENT_TAG=%%a
 
@@ -48,7 +49,7 @@ echo Tag baru: !NEW_TAG!
 goto after_tag
 
 :no_tag
-set NEW_TAG=v0.0.1
+set NEW_TAG=v1.2.0
 echo Tag belum ada, memulai dari versi !NEW_TAG!
 
 :after_tag
