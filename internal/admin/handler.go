@@ -153,6 +153,10 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle("/cancel", a.handleStop)
 	a.bot.Handle(&tele.Btn{Unique: "menu_main"}, a.handleMenu)
 	a.bot.Handle(&tele.Btn{Unique: "menu_status"}, a.handleStatus)
+	a.bot.Handle(&tele.Btn{Unique: "btn_refresh_status"}, func(c tele.Context) error {
+		_ = c.Respond(&tele.CallbackResponse{Text: "🔄 Memperbarui status..."})
+		return c.EditOrSend(a.RenderStatusSummary(c), a.StatusKeyboard(), tele.ModeHTML)
+	})
 
 	// Interactive Menu Callbacks
 	a.bot.Handle(&tele.Btn{Unique: "menu_providers"}, func(c tele.Context) error {
@@ -314,9 +318,11 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_deepseek"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "deepseek") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_groq"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "groq") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_gemini"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "gemini") })
+	a.bot.Handle(&tele.Btn{Unique: "wiz_type_gemini_web"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "gemini_web") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_anthropic"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "anthropic") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_ollama"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "ollama") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_custom"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "custom") })
+	a.bot.Handle("/gemini_login", func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "gemini_web") })
 
 	// Wizard Model Choice Callbacks (0..15)
 	for i := 0; i <= 15; i++ {
@@ -911,6 +917,174 @@ func (a *AdminBot) registerRoutes() {
 		return c.EditOrSend("🤖 <b>MASUKKAN MODEL OVERRIDE</b>\n\nKetik nama model (contoh: <code>gpt-4o-mini</code>, <code>claude-3-5-sonnet-20241022</code>, atau <code>combo:smart_chain</code>):", tele.ModeHTML)
 	})
 
+	// Timeout API Call
+	a.bot.Handle(&tele.Btn{Unique: "lim_set_timeout_api_menu"}, func(c tele.Context) error {
+		sess, ok := a.limitsUI.GetSession(c.Sender().ID)
+		if !ok || sess.Scope == "" {
+			return a.limitsUI.StartLimitsWizard(c)
+		}
+		text := fmt.Sprintf("⏱️ <b>ATUR TIMEOUT API CALL LLM (<code>%s:%s</code>)</b>\n\nPilih batas waktu maksimal request ke provider AI:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+		menu := &tele.ReplyMarkup{}
+		b30 := menu.Data("30s", "lim_tapi_30")
+		b60 := menu.Data("60s", "lim_tapi_60")
+		b90 := menu.Data("90s", "lim_tapi_90")
+		b120 := menu.Data("120s", "lim_tapi_120")
+		b180 := menu.Data("180s", "lim_tapi_180")
+		bCust := menu.Data("✏️ Custom", "lim_tapi_cust")
+		bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+		menu.Inline(menu.Row(b30, b60, b90), menu.Row(b120, b180, bCust), menu.Row(bBack))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+	for _, sec := range []int{30, 60, 90, 120, 180} {
+		val := sec
+		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("lim_tapi_%d", val)}, func(c tele.Context) error {
+			if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+				pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+				if pol == nil {
+					pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+				}
+				pol.TimeoutAPISeconds = val
+				_ = a.db.SavePolicy(pol)
+				return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+			}
+			return a.limitsUI.StartLimitsWizard(c)
+		})
+	}
+	a.bot.Handle(&tele.Btn{Unique: "lim_tapi_cust"}, func(c tele.Context) error {
+		a.limitsUI.SetSessionStep(c.Sender().ID, LimitsStepCustomTimeoutAPI)
+		return c.EditOrSend("⏱️ <b>MASUKKAN TIMEOUT API CALL (DETIK)</b>\n\nKirimkan angka timeout request LLM (contoh: <code>90</code>):", tele.ModeHTML)
+	})
+
+	// Timeout Handler Total
+	a.bot.Handle(&tele.Btn{Unique: "lim_set_timeout_handler_menu"}, func(c tele.Context) error {
+		sess, ok := a.limitsUI.GetSession(c.Sender().ID)
+		if !ok || sess.Scope == "" {
+			return a.limitsUI.StartLimitsWizard(c)
+		}
+		text := fmt.Sprintf("⏳ <b>ATUR TIMEOUT TOTAL HANDLER (<code>%s:%s</code>)</b>\n\nPilih batas waktu pemrosesan pesan keseluruhan:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+		menu := &tele.ReplyMarkup{}
+		b60 := menu.Data("60s", "lim_than_60")
+		b120 := menu.Data("120s", "lim_than_120")
+		b180 := menu.Data("180s", "lim_than_180")
+		b300 := menu.Data("300s", "lim_than_300")
+		bCust := menu.Data("✏️ Custom", "lim_than_cust")
+		bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+		menu.Inline(menu.Row(b60, b120, b180), menu.Row(b300, bCust), menu.Row(bBack))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+	for _, sec := range []int{60, 120, 180, 300} {
+		val := sec
+		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("lim_than_%d", val)}, func(c tele.Context) error {
+			if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+				pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+				if pol == nil {
+					pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+				}
+				pol.TimeoutHandlerSec = val
+				_ = a.db.SavePolicy(pol)
+				return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+			}
+			return a.limitsUI.StartLimitsWizard(c)
+		})
+	}
+	a.bot.Handle(&tele.Btn{Unique: "lim_than_cust"}, func(c tele.Context) error {
+		a.limitsUI.SetSessionStep(c.Sender().ID, LimitsStepCustomTimeoutHandler)
+		return c.EditOrSend("⏳ <b>MASUKKAN TIMEOUT HANDLER (DETIK)</b>\n\nKirimkan angka timeout total handler (contoh: <code>150</code>):", tele.ModeHTML)
+	})
+
+	// Audit Log Max Rotation
+	a.bot.Handle(&tele.Btn{Unique: "lim_set_audit_max_menu"}, func(c tele.Context) error {
+		sess, ok := a.limitsUI.GetSession(c.Sender().ID)
+		if !ok || sess.Scope == "" {
+			return a.limitsUI.StartLimitsWizard(c)
+		}
+		text := fmt.Sprintf("📜 <b>ATUR BATAS ROTASI AUDIT LOG (<code>%s:%s</code>)</b>\n\nPilih batas maksimum baris audit log sebelum dirotasi otomatis:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+		menu := &tele.ReplyMarkup{}
+		b500 := menu.Data("500", "lim_laud_500")
+		b1k := menu.Data("1,000", "lim_laud_1000")
+		b2k := menu.Data("2,000", "lim_laud_2000")
+		b5k := menu.Data("5,000", "lim_laud_5000")
+		b10k := menu.Data("10,000", "lim_laud_10000")
+		bCust := menu.Data("✏️ Custom", "lim_laud_cust")
+		bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+		menu.Inline(menu.Row(b500, b1k, b2k), menu.Row(b5k, b10k, bCust), menu.Row(bBack))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+	for _, aud := range []int{500, 1000, 2000, 5000, 10000} {
+		val := aud
+		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("lim_laud_%d", val)}, func(c tele.Context) error {
+			if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+				pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+				if pol == nil {
+					pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+				}
+				pol.MaxAuditLogs = val
+				_ = a.db.SavePolicy(pol)
+				return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+			}
+			return a.limitsUI.StartLimitsWizard(c)
+		})
+	}
+	a.bot.Handle(&tele.Btn{Unique: "lim_laud_cust"}, func(c tele.Context) error {
+		a.limitsUI.SetSessionStep(c.Sender().ID, LimitsStepCustomMaxAudit)
+		return c.EditOrSend("📜 <b>MASUKKAN MAKSIMAL AUDIT LOG (BARIS)</b>\n\nKirimkan batas retensi baris log (contoh: <code>8000</code>):", tele.ModeHTML)
+	})
+
+	// Token Budget
+	a.bot.Handle(&tele.Btn{Unique: "lim_set_budget_menu"}, func(c tele.Context) error {
+		sess, ok := a.limitsUI.GetSession(c.Sender().ID)
+		if !ok || sess.Scope == "" {
+			return a.limitsUI.StartLimitsWizard(c)
+		}
+		text := fmt.Sprintf("💰 <b>ATUR TOKEN BUDGET (<code>%s:%s</code>)</b>\n\nPilih batas akumulasi budget token konteks:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+		menu := &tele.ReplyMarkup{}
+		b4k := menu.Data("4,000", "lim_lbg_4000")
+		b8k := menu.Data("8,000", "lim_lbg_8000")
+		b16k := menu.Data("16,000", "lim_lbg_16000")
+		b32k := menu.Data("32,000", "lim_lbg_32000")
+		bCust := menu.Data("✏️ Custom", "lim_lbg_cust")
+		bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+		menu.Inline(menu.Row(b4k, b8k), menu.Row(b16k, b32k, bCust), menu.Row(bBack))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	})
+	for _, bg := range []int{4000, 8000, 16000, 32000} {
+		val := bg
+		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("lim_lbg_%d", val)}, func(c tele.Context) error {
+			if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
+				pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
+				if pol == nil {
+					pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+				}
+				pol.TokenBudget = val
+				_ = a.db.SavePolicy(pol)
+				return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+			}
+			return a.limitsUI.StartLimitsWizard(c)
+		})
+	}
+	a.bot.Handle(&tele.Btn{Unique: "lim_lbg_cust"}, func(c tele.Context) error {
+		a.limitsUI.SetSessionStep(c.Sender().ID, LimitsStepCustomBudget)
+		return c.EditOrSend("💰 <b>MASUKKAN TOKEN BUDGET</b>\n\nKirimkan angka token budget (contoh: <code>12000</code>):", tele.ModeHTML)
+	})
+
+	// Manual Prune / Rotate Audit Logs Action
+	a.bot.Handle(&tele.Btn{Unique: "lim_do_rotate_audit"}, func(c tele.Context) error {
+		globalPol, _ := a.db.GetPolicy("global", "system")
+		maxLogs := 5000
+		if globalPol != nil && globalPol.MaxAuditLogs > 0 {
+			maxLogs = globalPol.MaxAuditLogs
+		}
+		deleted, err := a.db.RotateAuditLogs(maxLogs)
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("❌ Gagal rotasi log: %v", err), ShowAlert: true})
+		}
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("✅ Rotasi berhasil! %d log lama dipangkas (Batas: %d)", deleted, maxLogs), ShowAlert: true})
+		if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok && sess.Scope != "" {
+			return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+		}
+		return c.EditOrSend(a.limitsUI.RenderLimitsSummary(), a.limitsUI.LimitsKeyboard(), tele.ModeHTML)
+	})
+
 	// Channel Wizard Callbacks
 	a.bot.Handle(&tele.Btn{Unique: "chan_wiz_start"}, a.channelUI.StartChannelWizard)
 	a.bot.Handle(&tele.Btn{Unique: "chan_wiz_add_type"}, a.channelUI.RenderAddChannelTypeMenu)
@@ -1344,7 +1518,7 @@ func (a *AdminBot) registerCommands() {
 }
 
 func (a *AdminBot) handleStatus(c tele.Context) error {
-	return c.Send(a.RenderStatusSummary(c), BackToMenuKeyboard(), tele.ModeHTML)
+	return c.Send(a.RenderStatusSummary(c), a.StatusKeyboard(), tele.ModeHTML)
 }
 
 func (a *AdminBot) handleNew(c tele.Context) error {

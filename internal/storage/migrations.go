@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS channel_policies (
     footer_mode TEXT NOT NULL DEFAULT 'off',
     token_saver_mode TEXT NOT NULL DEFAULT 'auto', -- 'off', 'auto', 'aggressive', 'caveman'
     proxy_pool_enabled INTEGER NOT NULL DEFAULT 1,
+    timeout_api_seconds INTEGER NOT NULL DEFAULT 0,
+    timeout_handler_seconds INTEGER NOT NULL DEFAULT 0,
+    max_audit_logs INTEGER NOT NULL DEFAULT 5000,
+    token_budget INTEGER NOT NULL DEFAULT 0,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(scope, scope_id)
 );

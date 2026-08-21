@@ -128,4 +128,37 @@ func TestStorageAndPolicyResolver(t *testing.T) {
 	if stats.TotalRequests != 1 || stats.TotalTokens != 150 {
 		t.Fatalf("unexpected stats summary: %+v", stats)
 	}
+
+	// 7. Test Audit Log Rotation
+	for i := 2; i <= 10; i++ {
+		_ = db.InsertAuditLog(&AuditLogRecord{
+			ChannelType: "telegram",
+			ChannelID:   "chan_tg",
+			ChatID:      "chat_group_1",
+			UserID:      "user_123",
+			UserName:    "testuser",
+			Provider:    "9router",
+			Model:       "gpt-4o-mini",
+			TotalTokens: 10,
+			Status:      "success",
+		})
+	}
+
+	totalAudit, _ := db.CountAuditLogs()
+	if totalAudit != 10 {
+		t.Fatalf("expected 10 audit logs, got %d", totalAudit)
+	}
+
+	deleted, err := db.RotateAuditLogs(5)
+	if err != nil {
+		t.Fatalf("failed to rotate audit logs: %v", err)
+	}
+	if deleted != 5 {
+		t.Fatalf("expected 5 deleted logs, got %d", deleted)
+	}
+
+	countAfterRot, _ := db.CountAuditLogs()
+	if countAfterRot != 5 {
+		t.Fatalf("expected 5 logs remaining after rotation, got %d", countAfterRot)
+	}
 }

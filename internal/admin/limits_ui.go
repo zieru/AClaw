@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"goassistant/internal/config"
 	"goassistant/internal/storage"
 	tele "gopkg.in/telebot.v3"
 )
@@ -22,6 +23,10 @@ const (
 	LimitsStepCustomHistory
 	LimitsStepCustomThreshold
 	LimitsStepCustomModel
+	LimitsStepCustomTimeoutAPI
+	LimitsStepCustomTimeoutHandler
+	LimitsStepCustomMaxAudit
+	LimitsStepCustomBudget
 )
 
 type LimitsSession struct {
@@ -55,8 +60,30 @@ func (ui *LimitsUI) RenderLimitsSummary() string {
 			AutoCompaction:      true,
 			CompactionThreshold: 15,
 			FooterMode:          "off",
+			MaxAuditLogs:        5000,
 		}
 	}
+
+	cfg := config.Get()
+	apiTimeout := 90
+	handlerTimeout := 120
+	if cfg != nil {
+		apiTimeout = cfg.Timeouts.APICallSeconds
+		handlerTimeout = cfg.Timeouts.HandlerSeconds
+	}
+	if globalPol.TimeoutAPISeconds > 0 {
+		apiTimeout = globalPol.TimeoutAPISeconds
+	}
+	if globalPol.TimeoutHandlerSec > 0 {
+		handlerTimeout = globalPol.TimeoutHandlerSec
+	}
+
+	maxAudit := 5000
+	if globalPol.MaxAuditLogs > 0 {
+		maxAudit = globalPol.MaxAuditLogs
+	}
+
+	auditCount, _ := ui.db.CountAuditLogs()
 
 	var sb strings.Builder
 	sb.WriteString("🛡️ <b>PENGATURAN PEMBATASAN & GOVERNANCE</b>\n\n")
@@ -69,6 +96,12 @@ func (ui *LimitsUI) RenderLimitsSummary() string {
 		autoCompStr = "Nonaktif ❌"
 	}
 	sb.WriteString(fmt.Sprintf("• Auto-Compaction: <code>%s</code> (Threshold: <code>%d turns</code>)\n", autoCompStr, globalPol.CompactionThreshold))
+	sb.WriteString(fmt.Sprintf("• ⏱️ Timeout API Call: <code>%d detik</code>\n", apiTimeout))
+	sb.WriteString(fmt.Sprintf("• ⏳ Timeout Handler: <code>%d detik</code>\n", handlerTimeout))
+	sb.WriteString(fmt.Sprintf("• 📜 Rotasi Audit Log: Maks <code>%d logs</code> (Saat ini: <code>%d logs</code>)\n", maxAudit, auditCount))
+	if globalPol.TokenBudget > 0 {
+		sb.WriteString(fmt.Sprintf("• 💰 Token Budget: <code>%d tokens</code>\n", globalPol.TokenBudget))
+	}
 	if globalPol.ModelOverride != "" {
 		sb.WriteString(fmt.Sprintf("• Model Override: <code>%s</code>\n", html.EscapeString(globalPol.ModelOverride)))
 	}
@@ -84,7 +117,11 @@ func (ui *LimitsUI) RenderLimitsSummary() string {
 
 	sb.WriteString("\n📋 <b>Cara Mengubah Pembatasan:</b>\n")
 	sb.WriteString("• Klik tombol <b>🧙‍♂️ Atur Limits (Wizard)</b> untuk mengubah via tombol interaktif.\n")
-	sb.WriteString("• Atau gunakan perintah manual: <code>/setlimit &lt;global|channel|chat&gt; &lt;id&gt; &lt;param&gt; &lt;value&gt;</code>\n")
+	sb.WriteString("• Atau gunakan perintah manual:\n")
+	sb.WriteString("  <code>/setlimit global system timeout_api 90</code>\n")
+	sb.WriteString("  <code>/setlimit global system timeout_handler 120</code>\n")
+	sb.WriteString("  <code>/setlimit global system max_audit 5000</code>\n")
+	sb.WriteString("  <code>/setlimit global system max_upload 25</code>\n")
 
 	return sb.String()
 }
@@ -115,11 +152,13 @@ func (ui *LimitsUI) LimitsKeyboard() *tele.ReplyMarkup {
 	btnTokens := menu.Data(btnTokensText, "set_footer_global_tokens")
 	btnFull := menu.Data(btnFullText, "set_footer_global_full")
 	btnWizard := menu.Data("🧙‍♂️ Atur Limits (Wizard)", "lim_wiz_start")
+	btnRotateNow := menu.Data("🧹 Pangkas / Rotasi Log Sekarang", "lim_do_rotate_audit")
 	btnBack := menu.Data("⬅️ Kembali ke Menu Utama", "menu_main")
 
 	menu.Inline(
 		menu.Row(btnOff, btnTokens, btnFull),
 		menu.Row(btnWizard),
+		menu.Row(btnRotateNow),
 		menu.Row(btnBack),
 	)
 	return menu
@@ -185,6 +224,7 @@ func (ui *LimitsUI) RenderScopeLimitsDashboard(c tele.Context, scope, scopeID st
 			AutoCompaction:      true,
 			CompactionThreshold: 15,
 			FooterMode:          "off",
+			MaxAuditLogs:        5000,
 		}
 	}
 
@@ -203,12 +243,37 @@ func (ui *LimitsUI) RenderScopeLimitsDashboard(c tele.Context, scope, scopeID st
 		autoCompStr = "🔴 Nonaktif"
 	}
 
+	cfg := config.Get()
+	apiTimeout := 90
+	handlerTimeout := 120
+	if cfg != nil {
+		apiTimeout = cfg.Timeouts.APICallSeconds
+		handlerTimeout = cfg.Timeouts.HandlerSeconds
+	}
+	if pol.TimeoutAPISeconds > 0 {
+		apiTimeout = pol.TimeoutAPISeconds
+	}
+	if pol.TimeoutHandlerSec > 0 {
+		handlerTimeout = pol.TimeoutHandlerSec
+	}
+
+	maxAudit := 5000
+	if pol.MaxAuditLogs > 0 {
+		maxAudit = pol.MaxAuditLogs
+	}
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🛡️ <b>LIMITS DASHBOARD: <code>%s:%s</code></b>\n\n", html.EscapeString(scope), html.EscapeString(scopeID)))
 	sb.WriteString(fmt.Sprintf("• 📁 <b>Max Upload:</b> <code>%d MB</code>\n", pol.MaxUploadFileMB))
 	sb.WriteString(fmt.Sprintf("• 🪙 <b>Max Output Tokens:</b> <code>%d tokens</code>\n", pol.MaxTokens))
 	sb.WriteString(fmt.Sprintf("• 💬 <b>Max History Turns:</b> <code>%d turns</code>\n", pol.MaxHistoryTurns))
 	sb.WriteString(fmt.Sprintf("• 🗜️ <b>Auto-Compaction:</b> %s (Ambang: <code>%d turns</code>)\n", autoCompStr, pol.CompactionThreshold))
+	sb.WriteString(fmt.Sprintf("• ⏱️ <b>Timeout API Call:</b> <code>%d detik</code>\n", apiTimeout))
+	sb.WriteString(fmt.Sprintf("• ⏳ <b>Timeout Handler:</b> <code>%d detik</code>\n", handlerTimeout))
+	sb.WriteString(fmt.Sprintf("• 📜 <b>Maksimal Audit Log:</b> <code>%d logs</code>\n", maxAudit))
+	if pol.TokenBudget > 0 {
+		sb.WriteString(fmt.Sprintf("• 💰 <b>Token Budget:</b> <code>%d tokens</code>\n", pol.TokenBudget))
+	}
 	if pol.ModelOverride != "" {
 		sb.WriteString(fmt.Sprintf("• 🤖 <b>Model Override:</b> <code>%s</code>\n", html.EscapeString(pol.ModelOverride)))
 	} else {
@@ -224,14 +289,22 @@ func (ui *LimitsUI) RenderScopeLimitsDashboard(c tele.Context, scope, scopeID st
 	btnHistory := menu.Data("💬 Max History", "lim_set_history_menu")
 	btnCompact := menu.Data("🗜️ Auto-Compaction", "lim_set_compact_menu")
 	btnModel := menu.Data("🤖 Model Override", "lim_set_model_menu")
+	btnTimeAPI := menu.Data("⏱️ Timeout API", "lim_set_timeout_api_menu")
+	btnTimeHandler := menu.Data("⏳ Timeout Handler", "lim_set_timeout_handler_menu")
+	btnAuditMax := menu.Data("📜 Rotasi Audit", "lim_set_audit_max_menu")
+	btnBudget := menu.Data("💰 Token Budget", "lim_set_budget_menu")
+	btnPruneAudit := menu.Data("🧹 Pangkas Log", "lim_do_rotate_audit")
 	btnChangeScope := menu.Data("🔄 Ganti Scope", "lim_wiz_start")
-	btnBack := menu.Data("⬅️ Kembali ke Menu", "menu_limits")
+	btnBack := menu.Data("⬅️ Kembali", "menu_limits")
 
 	menu.Inline(
 		menu.Row(btnFooter, btnUpload),
 		menu.Row(btnTokens, btnHistory),
 		menu.Row(btnCompact, btnModel),
-		menu.Row(btnChangeScope, btnBack),
+		menu.Row(btnTimeAPI, btnTimeHandler),
+		menu.Row(btnAuditMax, btnBudget),
+		menu.Row(btnPruneAudit, btnChangeScope),
+		menu.Row(btnBack),
 	)
 
 	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
@@ -340,6 +413,66 @@ func (ui *LimitsUI) HandleTextMessage(c tele.Context) (bool, error) {
 		sess.Step = LimitsStepNone
 		_ = c.Reply(fmt.Sprintf("✅ Model Override untuk <code>%s:%s</code> diset ke <code>%s</code>!", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID), html.EscapeString(msgText)), tele.ModeHTML)
 		return true, ui.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+
+	case LimitsStepCustomTimeoutAPI:
+		n, err := strconv.Atoi(msgText)
+		if err != nil || n <= 0 {
+			return true, c.Reply("⚠️ Harap masukkan angka timeout positif dalam detik (contoh: <code>90</code>):", tele.ModeHTML)
+		}
+		pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
+		if pol == nil {
+			pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+		}
+		pol.TimeoutAPISeconds = n
+		_ = ui.db.SavePolicy(pol)
+		sess.Step = LimitsStepNone
+		_ = c.Reply(fmt.Sprintf("✅ Timeout API Call untuk <code>%s:%s</code> diset ke <b>%d detik</b>!", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID), n), tele.ModeHTML)
+		return true, ui.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+
+	case LimitsStepCustomTimeoutHandler:
+		n, err := strconv.Atoi(msgText)
+		if err != nil || n <= 0 {
+			return true, c.Reply("⚠️ Harap masukkan angka timeout handler positif dalam detik (contoh: <code>120</code>):", tele.ModeHTML)
+		}
+		pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
+		if pol == nil {
+			pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+		}
+		pol.TimeoutHandlerSec = n
+		_ = ui.db.SavePolicy(pol)
+		sess.Step = LimitsStepNone
+		_ = c.Reply(fmt.Sprintf("✅ Timeout Handler untuk <code>%s:%s</code> diset ke <b>%d detik</b>!", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID), n), tele.ModeHTML)
+		return true, ui.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+
+	case LimitsStepCustomMaxAudit:
+		n, err := strconv.Atoi(msgText)
+		if err != nil || n <= 0 {
+			return true, c.Reply("⚠️ Harap masukkan batas baris log positif (contoh: <code>5000</code>):", tele.ModeHTML)
+		}
+		pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
+		if pol == nil {
+			pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+		}
+		pol.MaxAuditLogs = n
+		_ = ui.db.SavePolicy(pol)
+		sess.Step = LimitsStepNone
+		_ = c.Reply(fmt.Sprintf("✅ Batas Rotasi Audit Log untuk <code>%s:%s</code> diset ke <b>%d baris</b>!", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID), n), tele.ModeHTML)
+		return true, ui.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+
+	case LimitsStepCustomBudget:
+		n, err := strconv.Atoi(msgText)
+		if err != nil || n <= 0 {
+			return true, c.Reply("⚠️ Harap masukkan token budget positif (contoh: <code>8000</code>):", tele.ModeHTML)
+		}
+		pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
+		if pol == nil {
+			pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+		}
+		pol.TokenBudget = n
+		_ = ui.db.SavePolicy(pol)
+		sess.Step = LimitsStepNone
+		_ = c.Reply(fmt.Sprintf("✅ Token Budget untuk <code>%s:%s</code> diset ke <b>%d tokens</b>!", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID), n), tele.ModeHTML)
+		return true, ui.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
 	}
 
 	return false, nil
@@ -377,7 +510,7 @@ func (ui *LimitsUI) HandleSetLimit(c tele.Context) error {
 		return ui.StartLimitsWizard(c)
 	}
 	if len(args) < 4 {
-		return c.Reply("⚠️ Format salah!\nContoh: <code>/setlimit global system footer full</code>\nAtau: <code>/setlimit global system max_upload 15</code>", tele.ModeHTML)
+		return c.Reply("⚠️ Format salah!\nContoh:\n• <code>/setlimit global system timeout_api 90</code>\n• <code>/setlimit global system timeout_handler 120</code>\n• <code>/setlimit global system max_audit 5000</code>\n• <code>/setlimit global system footer full</code>\n• <code>/setlimit global system max_upload 15</code>", tele.ModeHTML)
 	}
 
 	scope := strings.ToLower(args[0])
@@ -400,6 +533,7 @@ func (ui *LimitsUI) HandleSetLimit(c tele.Context) error {
 			AutoCompaction:      true,
 			CompactionThreshold: 15,
 			FooterMode:          "off",
+			MaxAuditLogs:        5000,
 		}
 	}
 
@@ -441,6 +575,30 @@ func (ui *LimitsUI) HandleSetLimit(c tele.Context) error {
 		pol.CompactionThreshold = n
 	case "model":
 		pol.ModelOverride = val
+	case "timeout_api", "api_timeout", "timeout_call":
+		n, err := strconv.Atoi(val)
+		if err != nil || n <= 0 {
+			return c.Reply("❌ Nilai timeout_api harus angka positif dalam detik (contoh: 90)")
+		}
+		pol.TimeoutAPISeconds = n
+	case "timeout_handler", "handler_timeout":
+		n, err := strconv.Atoi(val)
+		if err != nil || n <= 0 {
+			return c.Reply("❌ Nilai timeout_handler harus angka positif dalam detik (contoh: 120)")
+		}
+		pol.TimeoutHandlerSec = n
+	case "max_audit", "max_audit_logs", "audit_max", "audit_limit":
+		n, err := strconv.Atoi(val)
+		if err != nil || n <= 0 {
+			return c.Reply("❌ Nilai max_audit harus angka positif baris log (contoh: 5000)")
+		}
+		pol.MaxAuditLogs = n
+	case "token_budget", "budget":
+		n, err := strconv.Atoi(val)
+		if err != nil || n <= 0 {
+			return c.Reply("❌ Nilai token_budget harus angka positif (contoh: 8000)")
+		}
+		pol.TokenBudget = n
 	default:
 		return c.Reply(fmt.Sprintf("❌ Parameter '%s' tidak dikenali", html.EscapeString(param)))
 	}
@@ -503,4 +661,3 @@ func (ui *LimitsUI) HandleSetFooter(c tele.Context) error {
 
 	return c.Reply(fmt.Sprintf("✅ Tampilan footer untuk <code>%s:%s</code> berhasil diatur ke: <b>%s</b>", html.EscapeString(scope), html.EscapeString(scopeID), html.EscapeString(mode)), tele.ModeHTML)
 }
-

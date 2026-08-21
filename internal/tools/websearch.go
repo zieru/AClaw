@@ -50,6 +50,12 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]interface{}
 		return "", fmt.Errorf("parameter 'query' wajib diisi")
 	}
 
+	// Try Tavily search first if configured
+	tavilyTool := &TavilySearchTool{}
+	if tavilyRes, err := tavilyTool.Execute(ctx, args); err == nil && tavilyRes != "" {
+		return tavilyRes, nil
+	}
+
 	client := &http.Client{Timeout: 10 * time.Second}
 	reqURL := fmt.Sprintf("https://api.duckduckgo.com/?q=%s&format=json&no_html=1&skip_disambig=1", url.QueryEscape(q))
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)

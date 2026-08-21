@@ -58,5 +58,8 @@ http_server:
 updater:
   github_repo: "zieru/AClaw"  # Repository target untuk auto-update binary
 
-
-
+# Tavily AI Web Search Plugin Configuration
+tavily:
+  api_key: ""                 # Masukkan API Key Tavily (tvly-...) atau set via env TAVILY_API_KEY
+  search_depth: "basic"       # basic atau advanced
+  max_results: 5              # Jumlah hasil pencarian maksimal

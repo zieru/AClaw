@@ -77,6 +77,12 @@ type AppConfig struct {
 	Updater struct {
 		GitHubRepo string `yaml:"github_repo"`
 	} `yaml:"updater"`
+
+	Tavily struct {
+		APIKey      string `yaml:"api_key"`
+		SearchDepth string `yaml:"search_depth"`
+		MaxResults  int    `yaml:"max_results"`
+	} `yaml:"tavily"`
 }
 
 var (
@@ -130,6 +136,8 @@ func Load(configPath string) (*AppConfig, error) {
 
 		cfg.Updater.GitHubRepo = "zieru/AClaw"
 
+		cfg.Tavily.SearchDepth = "basic"
+		cfg.Tavily.MaxResults = 5
 
 		if configPath != "" {
 			if _, statErr := os.Stat(configPath); statErr != nil {
@@ -145,6 +153,10 @@ func Load(configPath string) (*AppConfig, error) {
 				err = fmt.Errorf("gagal parsing yaml %s: %w", configPath, yamlErr)
 				return
 			}
+		}
+
+		if envTavily := os.Getenv("TAVILY_API_KEY"); envTavily != "" {
+			cfg.Tavily.APIKey = envTavily
 		}
 
 		// Ensure directories exist

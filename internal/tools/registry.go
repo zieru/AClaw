@@ -24,6 +24,7 @@ func GetRegistry() *Registry {
 		// Register built-in tools
 		defaultRegistry.Register(&DateTimeTool{})
 		defaultRegistry.Register(&WebSearchTool{})
+		defaultRegistry.Register(&TavilySearchTool{})
 		defaultRegistry.Register(&HTTPClientTool{})
 		defaultRegistry.Register(&BashTool{})
 		defaultRegistry.Register(&SendFileTool{})

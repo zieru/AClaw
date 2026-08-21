@@ -138,6 +138,12 @@ func main() {
 
 			var inst provider.Provider
 			switch p.Type {
+			case "gemini_web", "gemini_scrape":
+				authData := p.APIKey
+				if len(keys) > 0 {
+					authData = strings.Join(keys, "; ")
+				}
+				inst = provider.NewGeminiWebProvider(p.Name, authData, p.DefaultModel, models)
 			case "gemini":
 				inst = provider.NewGeminiProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
 			case "anthropic":

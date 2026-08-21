@@ -94,7 +94,7 @@ type StreamingProvider interface {
 // IsFreeProvider returns true if the provider type is a free/no-key provider
 func IsFreeProvider(providerType string) bool {
 	switch strings.ToLower(providerType) {
-	case "free_openai", "free_gemini", "free", "opencodefree":
+	case "free_openai", "free_gemini", "free", "opencodefree", "gemini_web", "gemini_scrape":
 		return true
 	default:
 		return false

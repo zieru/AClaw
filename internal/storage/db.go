@@ -66,6 +66,10 @@ func Open(dbPath string) (*DB, error) {
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN streaming_enabled INTEGER NOT NULL DEFAULT 1")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN thinking_enabled INTEGER NOT NULL DEFAULT 1")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN thinking_display TEXT NOT NULL DEFAULT 'full'")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN timeout_api_seconds INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN timeout_handler_seconds INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN max_audit_logs INTEGER NOT NULL DEFAULT 5000")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN token_budget INTEGER NOT NULL DEFAULT 0")
 
 	return &DB{db: db}, nil
 }
@@ -93,6 +97,10 @@ type PolicyRecord struct {
 	StreamingEnabled    bool      `json:"streaming_enabled"`   // Enable streaming for this scope
 	ThinkingEnabled     bool      `json:"thinking_enabled"`    // Enable thinking display
 	ThinkingDisplay     string    `json:"thinking_display"`    // 'full', 'summary', 'hidden'
+	TimeoutAPISeconds   int       `json:"timeout_api_seconds"` // 0 = default config
+	TimeoutHandlerSec   int       `json:"timeout_handler_seconds"` // 0 = default config
+	MaxAuditLogs        int       `json:"max_audit_logs"`      // Max rows for rotation, default 5000
+	TokenBudget         int       `json:"token_budget"`        // 0 = default
 	UpdatedAt           time.Time `json:"updated_at"`
 }
 
@@ -238,13 +246,19 @@ func (d *DB) GetPolicy(scope, scopeID string) (*PolicyRecord, error) {
 	defer d.mu.RUnlock()
 
 	var p PolicyRecord
-	var autoCompInt, proxyPoolInt int
+	var autoCompInt, proxyPoolInt, streamingInt, thinkingInt int
 	err := d.db.QueryRow(`
 		SELECT id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, 
-		       model_override, COALESCE(footer_mode, 'off'), COALESCE(token_saver_mode, 'auto'), COALESCE(proxy_pool_enabled, 1), updated_at 
+		       model_override, COALESCE(footer_mode, 'off'), COALESCE(token_saver_mode, 'auto'), COALESCE(proxy_pool_enabled, 1),
+		       COALESCE(streaming_enabled, 1), COALESCE(thinking_enabled, 1), COALESCE(thinking_display, 'full'),
+		       COALESCE(timeout_api_seconds, 0), COALESCE(timeout_handler_seconds, 0), COALESCE(max_audit_logs, 5000), COALESCE(token_budget, 0),
+		       updated_at 
 		FROM channel_policies WHERE scope = ? AND scope_id = ?`, scope, scopeID).
 		Scan(&p.ID, &p.Scope, &p.ScopeID, &p.MaxUploadFileMB, &p.MaxTokens, &p.MaxHistoryTurns, &autoCompInt, &p.CompactionThreshold, 
-			&p.ModelOverride, &p.FooterMode, &p.TokenSaverMode, &proxyPoolInt, &p.UpdatedAt)
+			&p.ModelOverride, &p.FooterMode, &p.TokenSaverMode, &proxyPoolInt,
+			&streamingInt, &thinkingInt, &p.ThinkingDisplay,
+			&p.TimeoutAPISeconds, &p.TimeoutHandlerSec, &p.MaxAuditLogs, &p.TokenBudget,
+			&p.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -254,6 +268,8 @@ func (d *DB) GetPolicy(scope, scopeID string) (*PolicyRecord, error) {
 	}
 	p.AutoCompaction = autoCompInt == 1
 	p.ProxyPoolEnabled = proxyPoolInt == 1
+	p.StreamingEnabled = streamingInt == 1
+	p.ThinkingEnabled = thinkingInt == 1
 	return &p, nil
 }
 
@@ -270,6 +286,12 @@ func (d *DB) SavePolicy(p *PolicyRecord) error {
 	if p.TokenSaverMode == "" {
 		p.TokenSaverMode = "auto"
 	}
+	if p.ThinkingDisplay == "" {
+		p.ThinkingDisplay = "full"
+	}
+	if p.MaxAuditLogs <= 0 {
+		p.MaxAuditLogs = 5000
+	}
 	autoCompInt := 0
 	if p.AutoCompaction {
 		autoCompInt = 1
@@ -278,10 +300,18 @@ func (d *DB) SavePolicy(p *PolicyRecord) error {
 	if p.ProxyPoolEnabled {
 		proxyPoolInt = 1
 	}
+	streamingInt := 0
+	if p.StreamingEnabled {
+		streamingInt = 1
+	}
+	thinkingInt := 0
+	if p.ThinkingEnabled {
+		thinkingInt = 1
+	}
 
 	query := `
-	INSERT INTO channel_policies (id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, model_override, footer_mode, token_saver_mode, proxy_pool_enabled, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	INSERT INTO channel_policies (id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, model_override, footer_mode, token_saver_mode, proxy_pool_enabled, streaming_enabled, thinking_enabled, thinking_display, timeout_api_seconds, timeout_handler_seconds, max_audit_logs, token_budget, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 	ON CONFLICT(scope, scope_id) DO UPDATE SET
 		max_upload_file_mb=excluded.max_upload_file_mb,
 		max_tokens=excluded.max_tokens,
@@ -292,9 +322,16 @@ func (d *DB) SavePolicy(p *PolicyRecord) error {
 		footer_mode=excluded.footer_mode,
 		token_saver_mode=excluded.token_saver_mode,
 		proxy_pool_enabled=excluded.proxy_pool_enabled,
+		streaming_enabled=excluded.streaming_enabled,
+		thinking_enabled=excluded.thinking_enabled,
+		thinking_display=excluded.thinking_display,
+		timeout_api_seconds=excluded.timeout_api_seconds,
+		timeout_handler_seconds=excluded.timeout_handler_seconds,
+		max_audit_logs=excluded.max_audit_logs,
+		token_budget=excluded.token_budget,
 		updated_at=CURRENT_TIMESTAMP
 	`
-	_, err := d.db.Exec(query, p.ID, p.Scope, p.ScopeID, p.MaxUploadFileMB, p.MaxTokens, p.MaxHistoryTurns, autoCompInt, p.CompactionThreshold, p.ModelOverride, p.FooterMode, p.TokenSaverMode, proxyPoolInt)
+	_, err := d.db.Exec(query, p.ID, p.Scope, p.ScopeID, p.MaxUploadFileMB, p.MaxTokens, p.MaxHistoryTurns, autoCompInt, p.CompactionThreshold, p.ModelOverride, p.FooterMode, p.TokenSaverMode, proxyPoolInt, streamingInt, thinkingInt, p.ThinkingDisplay, p.TimeoutAPISeconds, p.TimeoutHandlerSec, p.MaxAuditLogs, p.TokenBudget)
 	return err
 }
 
@@ -311,6 +348,13 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 		FooterMode:          "off",
 		TokenSaverMode:      "auto",
 		ProxyPoolEnabled:    true,
+		StreamingEnabled:    true,
+		ThinkingEnabled:     true,
+		ThinkingDisplay:     "full",
+		TimeoutAPISeconds:   0,
+		TimeoutHandlerSec:   0,
+		MaxAuditLogs:        5000,
+		TokenBudget:         0,
 	}
 
 	// 2. Global overlay
@@ -338,6 +382,23 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 			res.TokenSaverMode = glob.TokenSaverMode
 		}
 		res.ProxyPoolEnabled = glob.ProxyPoolEnabled
+		res.StreamingEnabled = glob.StreamingEnabled
+		res.ThinkingEnabled = glob.ThinkingEnabled
+		if glob.ThinkingDisplay != "" {
+			res.ThinkingDisplay = glob.ThinkingDisplay
+		}
+		if glob.TimeoutAPISeconds > 0 {
+			res.TimeoutAPISeconds = glob.TimeoutAPISeconds
+		}
+		if glob.TimeoutHandlerSec > 0 {
+			res.TimeoutHandlerSec = glob.TimeoutHandlerSec
+		}
+		if glob.MaxAuditLogs > 0 {
+			res.MaxAuditLogs = glob.MaxAuditLogs
+		}
+		if glob.TokenBudget > 0 {
+			res.TokenBudget = glob.TokenBudget
+		}
 	}
 
 	// 3. Channel overlay
@@ -366,6 +427,23 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 				res.TokenSaverMode = chPol.TokenSaverMode
 			}
 			res.ProxyPoolEnabled = chPol.ProxyPoolEnabled
+			res.StreamingEnabled = chPol.StreamingEnabled
+			res.ThinkingEnabled = chPol.ThinkingEnabled
+			if chPol.ThinkingDisplay != "" {
+				res.ThinkingDisplay = chPol.ThinkingDisplay
+			}
+			if chPol.TimeoutAPISeconds > 0 {
+				res.TimeoutAPISeconds = chPol.TimeoutAPISeconds
+			}
+			if chPol.TimeoutHandlerSec > 0 {
+				res.TimeoutHandlerSec = chPol.TimeoutHandlerSec
+			}
+			if chPol.MaxAuditLogs > 0 {
+				res.MaxAuditLogs = chPol.MaxAuditLogs
+			}
+			if chPol.TokenBudget > 0 {
+				res.TokenBudget = chPol.TokenBudget
+			}
 		}
 	}
 
@@ -395,6 +473,23 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 				res.TokenSaverMode = chatPol.TokenSaverMode
 			}
 			res.ProxyPoolEnabled = chatPol.ProxyPoolEnabled
+			res.StreamingEnabled = chatPol.StreamingEnabled
+			res.ThinkingEnabled = chatPol.ThinkingEnabled
+			if chatPol.ThinkingDisplay != "" {
+				res.ThinkingDisplay = chatPol.ThinkingDisplay
+			}
+			if chatPol.TimeoutAPISeconds > 0 {
+				res.TimeoutAPISeconds = chatPol.TimeoutAPISeconds
+			}
+			if chatPol.TimeoutHandlerSec > 0 {
+				res.TimeoutHandlerSec = chatPol.TimeoutHandlerSec
+			}
+			if chatPol.MaxAuditLogs > 0 {
+				res.MaxAuditLogs = chatPol.MaxAuditLogs
+			}
+			if chatPol.TokenBudget > 0 {
+				res.TokenBudget = chatPol.TokenBudget
+			}
 		}
 	}
 
@@ -1240,8 +1335,6 @@ func (d *DB) UpdateProxyStats(id string, success bool, latencyMs int) error {
 
 func (d *DB) InsertAuditLog(l *AuditLogRecord) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	if l.ID == "" {
 		l.ID = uuid.New().String()
 	}
@@ -1251,7 +1344,63 @@ func (d *DB) InsertAuditLog(l *AuditLogRecord) error {
 	VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	_, err := d.db.Exec(query, l.ID, l.ChannelType, l.ChannelID, l.ChatID, l.UserID, l.UserName, l.Provider, l.Model, l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.TokensSaved, l.ProxyUsed, l.LatencyMs, l.CostUSD, l.ToolsCalled, l.ClientRequest, l.SystemPrompt, l.FullRequestPayload, l.ProviderResponse, l.Status, l.ErrorMessage)
+	d.mu.Unlock()
+
+	if err == nil {
+		// Auto-rotate in background if needed
+		go func() {
+			maxLogs := 5000
+			if glob, err := d.GetPolicy("global", "system"); err == nil && glob != nil && glob.MaxAuditLogs > 0 {
+				maxLogs = glob.MaxAuditLogs
+			}
+			_, _ = d.RotateAuditLogs(maxLogs)
+		}()
+	}
+
 	return err
+}
+
+// RotateAuditLogs prunes oldest audit logs keeping only the most recent maxCount records
+func (d *DB) RotateAuditLogs(maxCount int) (int64, error) {
+	if maxCount <= 0 {
+		return 0, nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	query := `
+	DELETE FROM audit_logs 
+	WHERE id NOT IN (
+		SELECT id FROM audit_logs 
+		ORDER BY timestamp DESC, id DESC 
+		LIMIT ?
+	)
+	`
+	res, err := d.db.Exec(query, maxCount)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// CountAuditLogs returns total number of records in audit_logs table
+func (d *DB) CountAuditLogs() (int, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var count int
+	err := d.db.QueryRow("SELECT COUNT(*) FROM audit_logs").Scan(&count)
+	return count, err
+}
+
+// CountActiveSessions returns total number of chat sessions
+func (d *DB) CountActiveSessions() (int, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var count int
+	err := d.db.QueryRow("SELECT COUNT(*) FROM chat_sessions").Scan(&count)
+	return count, err
 }
 
 type StatsSummary struct {
