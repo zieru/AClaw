@@ -307,22 +307,65 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		return c.EditOrSend(a.cronUI.RenderCronList(), a.cronUI.CronKeyboard(), tele.ModeHTML)
 	}
 
-	// MD Callbacks
+	// MD Multi-Channel Callbacks
+	if data == "md_scope_custom" {
+		return a.mdUI.PromptCustomChannelID(c)
+	}
+	if strings.HasPrefix(data, "md_scope:") {
+		channelID := strings.TrimPrefix(data, "md_scope:")
+		return a.mdUI.RenderChannelDashboard(c, channelID)
+	}
+	if strings.HasPrefix(data, "md_newfile:") {
+		channelID := strings.TrimPrefix(data, "md_newfile:")
+		return a.mdUI.PromptNewFileName(c, channelID)
+	}
+	if strings.HasPrefix(data, "md_f:") {
+		parts := strings.SplitN(strings.TrimPrefix(data, "md_f:"), ":", 2)
+		if len(parts) == 2 {
+			return a.mdUI.RenderMDFileDashboard(c, parts[0], parts[1])
+		}
+	}
+	if strings.HasPrefix(data, "md_v:") {
+		parts := strings.SplitN(strings.TrimPrefix(data, "md_v:"), ":", 2)
+		if len(parts) == 2 {
+			return a.mdUI.RenderFullFile(c, parts[0], parts[1])
+		}
+	}
+	if strings.HasPrefix(data, "md_e:") {
+		parts := strings.SplitN(strings.TrimPrefix(data, "md_e:"), ":", 2)
+		if len(parts) == 2 {
+			return a.mdUI.PromptEditContent(c, parts[0], parts[1])
+		}
+	}
+	if strings.HasPrefix(data, "md_a:") {
+		parts := strings.SplitN(strings.TrimPrefix(data, "md_a:"), ":", 2)
+		if len(parts) == 2 {
+			return a.mdUI.PromptAppendContent(c, parts[0], parts[1])
+		}
+	}
+	if strings.HasPrefix(data, "md_r:") {
+		parts := strings.SplitN(strings.TrimPrefix(data, "md_r:"), ":", 2)
+		if len(parts) == 2 {
+			return a.mdUI.HandleResetChannelFile(c, parts[0], parts[1])
+		}
+	}
+
+	// Legacy MD Fallback Callbacks
 	if strings.HasPrefix(data, "md_pick_") {
 		fname := strings.TrimPrefix(data, "md_pick_")
-		return a.mdUI.RenderMDFileDashboard(c, fname)
+		return a.mdUI.RenderMDFileDashboard(c, "global", fname)
 	}
 	if strings.HasPrefix(data, "md_view_full_") {
 		fname := strings.TrimPrefix(data, "md_view_full_")
-		return a.mdUI.RenderFullFile(c, fname)
+		return a.mdUI.RenderFullFile(c, "global", fname)
 	}
 	if strings.HasPrefix(data, "md_edit_prompt_") {
 		fname := strings.TrimPrefix(data, "md_edit_prompt_")
-		return a.mdUI.PromptEditContent(c, fname)
+		return a.mdUI.PromptEditContent(c, "global", fname)
 	}
 	if strings.HasPrefix(data, "md_app_prompt_") {
 		fname := strings.TrimPrefix(data, "md_app_prompt_")
-		return a.mdUI.PromptAppendContent(c, fname)
+		return a.mdUI.PromptAppendContent(c, "global", fname)
 	}
 
 	return nil

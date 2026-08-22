@@ -94,7 +94,7 @@ func NewAdminBot(
 		channelUI:    NewChannelUI(db, tr),
 		proxyUI:      NewProxyUIHandler(db, pool),
 		tokenSaverUI: NewTokenSaverUIHandler(db),
-		mdUI:         NewMDUI(loader, bot),
+		mdUI:         NewMDUI(loader, db, bot),
 		cronUI:       NewCronUI(db, sched),
 		memoryUI:     NewMemoryUI(db, mm, sm),
 		auditUI:      NewAuditUI(db),

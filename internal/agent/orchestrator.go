@@ -141,6 +141,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	}
 
 	sysPrompt, err := o.promptBuilder.BuildSystemPrompt(PromptContext{
+		ChannelID:      req.ChannelID,
 		AgentRole:      req.PreferredRole,
 		ChannelType:    req.ChannelType,
 		ChannelName:    req.ChannelName,

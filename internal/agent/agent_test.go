@@ -129,4 +129,107 @@ func (e *testCustomError) Error() string {
 	return e.msg
 }
 
+func TestMultiChannelMDLoader(t *testing.T) {
+	tempDir := t.TempDir()
+	loader := NewMDLoader(tempDir)
+	promptBld := NewPromptBuilder(loader)
+
+	// 1. Setup Global Files
+	globalIdentity := "# Global Assistant\nKamu adalah asisten umum."
+	globalSoul := "## SOP Global: Jawab dengan ramah dan ringkas."
+	if err := loader.SaveFile("IDENTITY.md", globalIdentity); err != nil {
+		t.Fatalf("failed to save global identity: %v", err)
+	}
+	if err := loader.SaveFile("SOUL.md", globalSoul); err != nil {
+		t.Fatalf("failed to save global soul: %v", err)
+	}
+
+	// 2. Channel Without Custom MD (Fallback Test)
+	promptGeneral, err := promptBld.BuildSystemPrompt(PromptContext{
+		ChannelID:   "chan_general",
+		ChannelName: "General Channel",
+		ChannelType: "telegram",
+	})
+	if err != nil {
+		t.Fatalf("failed to build prompt for general channel: %v", err)
+	}
+	if !strings.Contains(promptGeneral, "Global Assistant") {
+		t.Errorf("expected general channel to inherit global identity, got:\n%s", promptGeneral)
+	}
+	if !strings.Contains(promptGeneral, "SOP Global") {
+		t.Errorf("expected general channel to inherit global soul, got:\n%s", promptGeneral)
+	}
+
+	// Check status
+	statuses, err := loader.GetChannelMDStatus("chan_general")
+	if err != nil {
+		t.Fatalf("failed to get channel status: %v", err)
+	}
+	for _, s := range statuses {
+		if s.Filename == "IDENTITY.md" {
+			if s.IsCustom || !s.Inherited {
+				t.Errorf("expected IDENTITY.md to be inherited for chan_general, got custom=%v, inherited=%v", s.IsCustom, s.Inherited)
+			}
+		}
+	}
+
+	// 3. Override Custom MD for Support Channel
+	customSupportIdentity := "# Support Specialist\nKamu adalah spesialis customer support tiket 24/7."
+	if err := loader.SaveFileForChannel("chan_support", "IDENTITY.md", customSupportIdentity); err != nil {
+		t.Fatalf("failed to save support channel identity: %v", err)
+	}
+
+	promptSupport, err := promptBld.BuildSystemPrompt(PromptContext{
+		ChannelID:   "chan_support",
+		ChannelName: "CS Support Telegram",
+		ChannelType: "telegram",
+	})
+	if err != nil {
+		t.Fatalf("failed to build prompt for support channel: %v", err)
+	}
+	if !strings.Contains(promptSupport, "Support Specialist") {
+		t.Errorf("expected support channel to use custom identity, got:\n%s", promptSupport)
+	}
+	// Verify that SOUL.md is still inherited from global
+	if !strings.Contains(promptSupport, "SOP Global") {
+		t.Errorf("expected support channel to inherit global soul for untouched files, got:\n%s", promptSupport)
+	}
+
+	// Verify general channel is still unaffected
+	promptGeneralAfter, _ := promptBld.BuildSystemPrompt(PromptContext{
+		ChannelID: "chan_general",
+	})
+	if !strings.Contains(promptGeneralAfter, "Global Assistant") {
+		t.Errorf("general channel should remain on global identity")
+	}
+
+	// Check status for chan_support
+	supportStatuses, err := loader.GetChannelMDStatus("chan_support")
+	if err != nil {
+		t.Fatalf("failed to get support status: %v", err)
+	}
+	for _, s := range supportStatuses {
+		if s.Filename == "IDENTITY.md" {
+			if !s.IsCustom || s.Inherited {
+				t.Errorf("expected IDENTITY.md to be custom for chan_support, got custom=%v, inherited=%v", s.IsCustom, s.Inherited)
+			}
+		}
+	}
+
+	// 4. Test Reset/Delete Channel Override
+	if err := loader.DeleteFileForChannel("chan_support", "IDENTITY.md"); err != nil {
+		t.Fatalf("failed to delete channel override: %v", err)
+	}
+
+	promptSupportAfterReset, err := promptBld.BuildSystemPrompt(PromptContext{
+		ChannelID: "chan_support",
+	})
+	if err != nil {
+		t.Fatalf("failed to build prompt after reset: %v", err)
+	}
+	if !strings.Contains(promptSupportAfterReset, "Global Assistant") {
+		t.Errorf("expected support channel to fallback to global after reset, got:\n%s", promptSupportAfterReset)
+	}
+}
+
 

@@ -15,6 +15,7 @@ func NewPromptBuilder(mdLoader *MDLoader) *PromptBuilder {
 }
 
 type PromptContext struct {
+	ChannelID       string
 	AgentRole       string
 	ChannelType     string
 	ChannelName     string
@@ -32,8 +33,8 @@ type PromptContext struct {
 func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 	var sb strings.Builder
 
-	// 1. Load IDENTITY.md
-	identity, err := pb.mdLoader.GetFile("IDENTITY.md")
+	// 1. Load IDENTITY.md (scoped to channel or global fallback)
+	identity, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "IDENTITY.md")
 	if err == nil && identity != "" {
 		sb.WriteString(identity)
 		sb.WriteString("\n\n")
@@ -42,7 +43,7 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 	}
 
 	// 2. Load SOUL.md / KNOWLEDGE.md
-	soul, err := pb.mdLoader.GetFile("SOUL.md")
+	soul, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "SOUL.md")
 	if err == nil && soul != "" {
 		sb.WriteString("## Core Knowledge & SOP:\n")
 		sb.WriteString(soul)
@@ -50,7 +51,7 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 	}
 
 	// 3. Load AGENTS.md for Multi-Agent & Specialized Roles
-	agentsMD, err := pb.mdLoader.GetFile("AGENTS.md")
+	agentsMD, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "AGENTS.md")
 	if err == nil && agentsMD != "" {
 		sb.WriteString("## Multi-Agent Delegation & Specialized Roles:\n")
 		sb.WriteString("Kamu dapat memecah masalah kompleks dan mendelegasikan sub-tugas ke sub-agen spesialis melalui tool `delegate_task` agar konteks tetap fokus dan tidak membengkak.\n")
@@ -84,8 +85,8 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 		sb.WriteString("\n")
 	}
 
-	// 5. Tool Instructions if TOOLS.md exists
-	toolsMD, err := pb.mdLoader.GetFile("TOOLS.md")
+	// 5. Tool Instructions if TOOLS.md exists (scoped to channel or global fallback)
+	toolsMD, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "TOOLS.md")
 	if err == nil && toolsMD != "" {
 		sb.WriteString("## Tool Usage Guidelines:\n")
 		sb.WriteString(toolsMD)
