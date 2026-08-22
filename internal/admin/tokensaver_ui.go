@@ -5,8 +5,10 @@ import (
 	"strconv"
 	"strings"
 
+	"goassistant/internal/agent"
 	"goassistant/internal/storage"
 	"goassistant/internal/tokensaver"
+	"goassistant/internal/tools"
 
 	tele "gopkg.in/telebot.v3"
 )
@@ -36,15 +38,28 @@ func (h *TokenSaverUIHandler) HandleTokenSaverStatus(c tele.Context) error {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("🧱 <b>12-Engine Token Saver Stack Dashboard</b>\n\n")
+	sb.WriteString("🧱 <b>12-Engine Token Saver & Cache Dashboard</b>\n\n")
 	sb.WriteString(fmt.Sprintf("Preset Aktif: <code>%s</code>\n", strings.ToUpper(cfg.Preset)))
 	sb.WriteString(fmt.Sprintf("Output Style: <code>%s</code> (%s)\n", cfg.OutputStyle, cfg.StyleIntensity))
 	sb.WriteString(fmt.Sprintf("Adaptive Dial: <code>%v</code> (Budget: %d tokens)\n\n", cfg.AdaptiveDial, cfg.ContextBudget))
 
-	sb.WriteString("<b>Statistik Penghematan:</b>\n")
+	sb.WriteString("<b>Statistik Penghematan TokenSaver:</b>\n")
 	sb.WriteString(fmt.Sprintf("• Total Original: <b>%s</b> tokens\n", formatNumber(int(origTotal))))
 	sb.WriteString(fmt.Sprintf("• Total Terkompresi: <b>%s</b> tokens\n", formatNumber(int(finalTotal))))
 	sb.WriteString(fmt.Sprintf("💰 <b>Hemat: %s (%.1f%%)</b>\n\n", formatNumber(int(savedTotal)), percent))
+
+	// Cache Statistics
+	cacheStats := agent.GetGlobalResponseCache().Stats()
+	toolStats := tools.GetGlobalToolCache().Stats()
+	cacheStatus := "✅ ON"
+	if !globPolicy.ResponseCacheEnabled {
+		cacheStatus = "❌ OFF"
+	}
+	sb.WriteString("<b>Performa Response & Tool Cache:</b>\n")
+	sb.WriteString(fmt.Sprintf("• Response Cache: <b>%s</b> (TTL: %ds)\n", cacheStatus, globPolicy.ResponseCacheTTLSec))
+	sb.WriteString(fmt.Sprintf("• Cache Entries: <b>%d</b> | Hits: <b>%d</b> | Misses: <b>%d</b> (Hit Rate: <b>%.1f%%</b>)\n", cacheStats.TotalEntries, cacheStats.HitCount, cacheStats.MissCount, cacheStats.HitRate))
+	sb.WriteString(fmt.Sprintf("• Token Dihemat Cache: <b>%s</b> tokens\n", formatNumber(int(cacheStats.TokensSaved))))
+	sb.WriteString(fmt.Sprintf("• Tool Cache Entries: <b>%d</b> | Hits: <b>%d</b>\n\n", toolStats.TotalEntries, toolStats.HitCount))
 
 	sb.WriteString("<b>Status 12-Engine Pipeline:</b>\n")
 	engineNames := map[string]string{
@@ -114,7 +129,12 @@ func (h *TokenSaverUIHandler) BuildInteractiveKeyboard(cfg *tokensaver.StackConf
 	btnE11 := menu.Data(engineBtnLabel("11.Ultra", cfg.IsEngineEnabled(tokensaver.EngineUltra)), "ts_tgl_"+tokensaver.EngineUltra)
 	btnE12 := menu.Data(engineBtnLabel("12.Glyph", cfg.IsEngineEnabled(tokensaver.EngineOmniGlyph)), "ts_tgl_"+tokensaver.EngineOmniGlyph)
 
-	// Row 7: Controls
+	// Row 7: Cache Controls
+	btnToggleCache := menu.Data("⚡ Toggle Cache", "ts_toggle_cache")
+	btnFlushResp := menu.Data("🧹 Flush Resp Cache", "ts_flush_resp_cache")
+	btnFlushTool := menu.Data("🧹 Flush Tool Cache", "ts_flush_tool_cache")
+
+	// Row 8: General Controls
 	btnDial := menu.Data("🎯 Toggle Dial", "ts_toggle_dial")
 	btnOff := menu.Data("⏹️ Disable All (Off)", "ts_preset_off")
 	btnRefresh := menu.Data("🔄 Refresh", "ts_refresh")
@@ -126,6 +146,7 @@ func (h *TokenSaverUIHandler) BuildInteractiveKeyboard(cfg *tokensaver.StackConf
 		menu.Row(btnE1, btnE2, btnE3, btnE4),
 		menu.Row(btnE5, btnE6, btnE7, btnE8),
 		menu.Row(btnE9, btnE10, btnE11, btnE12),
+		menu.Row(btnToggleCache, btnFlushResp, btnFlushTool),
 		menu.Row(btnDial, btnOff, btnRefresh),
 	)
 
@@ -137,6 +158,38 @@ func engineBtnLabel(name string, enabled bool) string {
 		return "✅ " + name
 	}
 	return "❌ " + name
+}
+
+// HandleToggleCacheCallback toggles local ResponseCache ON/OFF
+func (h *TokenSaverUIHandler) HandleToggleCacheCallback(c tele.Context) error {
+	globPol, _ := h.db.GetPolicy("global", "system")
+	if globPol == nil {
+		globPol = &storage.PolicyRecord{
+			Scope:   "global",
+			ScopeID: "system",
+		}
+	}
+	globPol.ResponseCacheEnabled = !globPol.ResponseCacheEnabled
+	_ = h.db.SavePolicy(globPol)
+	return h.HandleTokenSaverStatus(c)
+}
+
+// HandleFlushCacheCallback flushes response cache
+func (h *TokenSaverUIHandler) HandleFlushCacheCallback(c tele.Context) error {
+	count := agent.GetGlobalResponseCache().Flush()
+	_ = c.Respond(&tele.CallbackResponse{
+		Text: fmt.Sprintf("🧹 %d Response Cache entries berhasil dibersihkan!", count),
+	})
+	return h.HandleTokenSaverStatus(c)
+}
+
+// HandleFlushToolCacheCallback flushes tool cache
+func (h *TokenSaverUIHandler) HandleFlushToolCacheCallback(c tele.Context) error {
+	count := tools.GetGlobalToolCache().Flush()
+	_ = c.Respond(&tele.CallbackResponse{
+		Text: fmt.Sprintf("🧹 %d Tool Cache entries berhasil dibersihkan!", count),
+	})
+	return h.HandleTokenSaverStatus(c)
 }
 
 // HandlePresetCallback handles 1-click preset switching

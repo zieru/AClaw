@@ -69,6 +69,8 @@ func Open(dbPath string) (*DB, error) {
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN timeout_api_seconds INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN max_audit_logs INTEGER NOT NULL DEFAULT 5000")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN token_budget INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN response_cache_enabled INTEGER NOT NULL DEFAULT 1")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN response_cache_ttl_sec INTEGER NOT NULL DEFAULT 1800")
 
 	// Ensure default global policy exists and has footer_mode 'full' by default
 	_, _ = db.Exec("INSERT OR IGNORE INTO channel_policies (id, scope, scope_id, footer_mode, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold) VALUES ('global', 'global', 'system', 'full', 10, 2048, 20, 1, 15)")
@@ -105,6 +107,8 @@ type PolicyRecord struct {
 	TimeoutHandlerSec   int       `json:"timeout_handler_seconds"` // 0 = default config
 	MaxAuditLogs        int       `json:"max_audit_logs"`      // Max rows for rotation, default 5000
 	TokenBudget         int       `json:"token_budget"`        // 0 = default
+	ResponseCacheEnabled bool     `json:"response_cache_enabled"` // Toggle local response caching
+	ResponseCacheTTLSec int       `json:"response_cache_ttl_sec"` // TTL in seconds (default 1800)
 	UpdatedAt           time.Time `json:"updated_at"`
 }
 
@@ -250,18 +254,20 @@ func (d *DB) GetPolicy(scope, scopeID string) (*PolicyRecord, error) {
 	defer d.mu.RUnlock()
 
 	var p PolicyRecord
-	var autoCompInt, proxyPoolInt, streamingInt, thinkingInt int
+	var autoCompInt, proxyPoolInt, streamingInt, thinkingInt, respCacheInt int
 	err := d.db.QueryRow(`
 		SELECT id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, 
 		       model_override, COALESCE(footer_mode, ''), COALESCE(token_saver_mode, 'auto'), COALESCE(proxy_pool_enabled, 1),
 		       COALESCE(streaming_enabled, 1), COALESCE(thinking_enabled, 1), COALESCE(thinking_display, 'full'),
 		       COALESCE(timeout_api_seconds, 0), COALESCE(timeout_handler_seconds, 0), COALESCE(max_audit_logs, 5000), COALESCE(token_budget, 0),
+		       COALESCE(response_cache_enabled, 1), COALESCE(response_cache_ttl_sec, 1800),
 		       updated_at 
 		FROM channel_policies WHERE scope = ? AND scope_id = ?`, scope, scopeID).
 		Scan(&p.ID, &p.Scope, &p.ScopeID, &p.MaxUploadFileMB, &p.MaxTokens, &p.MaxHistoryTurns, &autoCompInt, &p.CompactionThreshold, 
 			&p.ModelOverride, &p.FooterMode, &p.TokenSaverMode, &proxyPoolInt,
 			&streamingInt, &thinkingInt, &p.ThinkingDisplay,
 			&p.TimeoutAPISeconds, &p.TimeoutHandlerSec, &p.MaxAuditLogs, &p.TokenBudget,
+			&respCacheInt, &p.ResponseCacheTTLSec,
 			&p.UpdatedAt)
 
 	if err == sql.ErrNoRows {
@@ -277,6 +283,7 @@ func (d *DB) GetPolicy(scope, scopeID string) (*PolicyRecord, error) {
 	p.ProxyPoolEnabled = proxyPoolInt == 1
 	p.StreamingEnabled = streamingInt == 1
 	p.ThinkingEnabled = thinkingInt == 1
+	p.ResponseCacheEnabled = respCacheInt == 1
 	return &p, nil
 }
 
@@ -299,6 +306,9 @@ func (d *DB) SavePolicy(p *PolicyRecord) error {
 	if p.MaxAuditLogs <= 0 {
 		p.MaxAuditLogs = 5000
 	}
+	if p.ResponseCacheTTLSec <= 0 {
+		p.ResponseCacheTTLSec = 1800
+	}
 	autoCompInt := 0
 	if p.AutoCompaction {
 		autoCompInt = 1
@@ -315,10 +325,14 @@ func (d *DB) SavePolicy(p *PolicyRecord) error {
 	if p.ThinkingEnabled {
 		thinkingInt = 1
 	}
+	respCacheInt := 0
+	if p.ResponseCacheEnabled {
+		respCacheInt = 1
+	}
 
 	query := `
-	INSERT INTO channel_policies (id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, model_override, footer_mode, token_saver_mode, proxy_pool_enabled, streaming_enabled, thinking_enabled, thinking_display, timeout_api_seconds, timeout_handler_seconds, max_audit_logs, token_budget, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	INSERT INTO channel_policies (id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, model_override, footer_mode, token_saver_mode, proxy_pool_enabled, streaming_enabled, thinking_enabled, thinking_display, timeout_api_seconds, timeout_handler_seconds, max_audit_logs, token_budget, response_cache_enabled, response_cache_ttl_sec, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 	ON CONFLICT(scope, scope_id) DO UPDATE SET
 		max_upload_file_mb=excluded.max_upload_file_mb,
 		max_tokens=excluded.max_tokens,
@@ -336,9 +350,11 @@ func (d *DB) SavePolicy(p *PolicyRecord) error {
 		timeout_handler_seconds=excluded.timeout_handler_seconds,
 		max_audit_logs=excluded.max_audit_logs,
 		token_budget=excluded.token_budget,
+		response_cache_enabled=excluded.response_cache_enabled,
+		response_cache_ttl_sec=excluded.response_cache_ttl_sec,
 		updated_at=CURRENT_TIMESTAMP
 	`
-	_, err := d.db.Exec(query, p.ID, p.Scope, p.ScopeID, p.MaxUploadFileMB, p.MaxTokens, p.MaxHistoryTurns, autoCompInt, p.CompactionThreshold, p.ModelOverride, p.FooterMode, p.TokenSaverMode, proxyPoolInt, streamingInt, thinkingInt, p.ThinkingDisplay, p.TimeoutAPISeconds, p.TimeoutHandlerSec, p.MaxAuditLogs, p.TokenBudget)
+	_, err := d.db.Exec(query, p.ID, p.Scope, p.ScopeID, p.MaxUploadFileMB, p.MaxTokens, p.MaxHistoryTurns, autoCompInt, p.CompactionThreshold, p.ModelOverride, p.FooterMode, p.TokenSaverMode, proxyPoolInt, streamingInt, thinkingInt, p.ThinkingDisplay, p.TimeoutAPISeconds, p.TimeoutHandlerSec, p.MaxAuditLogs, p.TokenBudget, respCacheInt, p.ResponseCacheTTLSec)
 	return err
 }
 
@@ -346,22 +362,24 @@ func (d *DB) SavePolicy(p *PolicyRecord) error {
 func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 	// 1. Defaults
 	res := PolicyRecord{
-		MaxUploadFileMB:     10,
-		MaxTokens:           2048,
-		MaxHistoryTurns:     20,
-		AutoCompaction:      true,
-		CompactionThreshold: 15,
-		ModelOverride:       "",
-		FooterMode:          "full",
-		TokenSaverMode:      "auto",
-		ProxyPoolEnabled:    true,
-		StreamingEnabled:    true,
-		ThinkingEnabled:     true,
-		ThinkingDisplay:     "full",
-		TimeoutAPISeconds:   0,
-		TimeoutHandlerSec:   0,
-		MaxAuditLogs:        5000,
-		TokenBudget:         0,
+		MaxUploadFileMB:      10,
+		MaxTokens:            2048,
+		MaxHistoryTurns:      20,
+		AutoCompaction:       true,
+		CompactionThreshold:  15,
+		ModelOverride:        "",
+		FooterMode:           "full",
+		TokenSaverMode:       "auto",
+		ProxyPoolEnabled:     true,
+		StreamingEnabled:     true,
+		ThinkingEnabled:      true,
+		ThinkingDisplay:      "full",
+		TimeoutAPISeconds:    0,
+		TimeoutHandlerSec:    0,
+		MaxAuditLogs:         5000,
+		TokenBudget:          0,
+		ResponseCacheEnabled: true,
+		ResponseCacheTTLSec:  1800,
 	}
 
 	// 2. Global overlay
@@ -405,6 +423,10 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 		}
 		if glob.TokenBudget > 0 {
 			res.TokenBudget = glob.TokenBudget
+		}
+		res.ResponseCacheEnabled = glob.ResponseCacheEnabled
+		if glob.ResponseCacheTTLSec > 0 {
+			res.ResponseCacheTTLSec = glob.ResponseCacheTTLSec
 		}
 	}
 
@@ -451,6 +473,10 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 			if chPol.TokenBudget > 0 {
 				res.TokenBudget = chPol.TokenBudget
 			}
+			res.ResponseCacheEnabled = chPol.ResponseCacheEnabled
+			if chPol.ResponseCacheTTLSec > 0 {
+				res.ResponseCacheTTLSec = chPol.ResponseCacheTTLSec
+			}
 		}
 	}
 
@@ -496,6 +522,10 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 			}
 			if chatPol.TokenBudget > 0 {
 				res.TokenBudget = chatPol.TokenBudget
+			}
+			res.ResponseCacheEnabled = chatPol.ResponseCacheEnabled
+			if chatPol.ResponseCacheTTLSec > 0 {
+				res.ResponseCacheTTLSec = chatPol.ResponseCacheTTLSec
 			}
 		}
 	}

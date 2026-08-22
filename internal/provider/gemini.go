@@ -117,10 +117,11 @@ type geminiRespBody struct {
 		FinishReason string `json:"finishReason"`
 	} `json:"candidates"`
 	UsageMetadata *struct {
-		PromptTokenCount     int `json:"promptTokenCount"`
-		CandidatesTokenCount int `json:"candidatesTokenCount"`
-		TotalTokenCount      int `json:"totalTokenCount"`
-		ThoughtsTokenCount   int `json:"thoughtsTokenCount,omitempty"`
+		PromptTokenCount        int `json:"promptTokenCount"`
+		CandidatesTokenCount    int `json:"candidatesTokenCount"`
+		TotalTokenCount         int `json:"totalTokenCount"`
+		ThoughtsTokenCount      int `json:"thoughtsTokenCount,omitempty"`
+		CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
 	} `json:"usageMetadata"`
 	Error *struct {
 		Code    int    `json:"code"`
@@ -356,16 +357,21 @@ func (p *GeminiProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		}
 	}
 
-	var promptTokens, compTokens, totalTokens, thinkingTokens int
+	var promptTokens, compTokens, totalTokens, thinkingTokens, cachedTokens int
 	if respBody.UsageMetadata != nil {
 		promptTokens = respBody.UsageMetadata.PromptTokenCount
 		compTokens = respBody.UsageMetadata.CandidatesTokenCount
 		totalTokens = respBody.UsageMetadata.TotalTokenCount
 		thinkingTokens = respBody.UsageMetadata.ThoughtsTokenCount
+		cachedTokens = respBody.UsageMetadata.CachedContentTokenCount
 	}
 
-	// Cost estimation for Gemini 2.0 Flash (~$0.10/1M input, $0.40/1M output)
-	cost := (float64(promptTokens)*0.00010 + float64(compTokens)*0.00040) / 1000.0
+	// Cost estimation for Gemini 2.0 Flash (~$0.10/1M input, $0.40/1M output, cached token discount)
+	uncachedPrompt := promptTokens - cachedTokens
+	if uncachedPrompt < 0 {
+		uncachedPrompt = 0
+	}
+	cost := (float64(uncachedPrompt)*0.00010 + float64(cachedTokens)*0.000025 + float64(compTokens)*0.00040) / 1000.0
 
 	return &ChatResponse{
 		Content:          strings.Join(textParts, "\n"),
@@ -375,6 +381,7 @@ func (p *GeminiProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		CompletionTokens: compTokens,
 		ThinkingTokens:   thinkingTokens,
 		TotalTokens:      totalTokens,
+		CacheReadTokens:  cachedTokens,
 		CostUSD:          cost,
 		Latency:          time.Since(start),
 		Model:            model,

@@ -58,10 +58,21 @@ func (p *AnthropicProvider) SetHTTPClient(client interface{}) {
 	}
 }
 
+type anthropicCacheControl struct {
+	Type string `json:"type"` // "ephemeral"
+}
+
+type anthropicSystemBlock struct {
+	Type         string                 `json:"type"`
+	Text         string                 `json:"text"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+}
+
 type anthropicToolDef struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	InputSchema tools.ParametersSchema `json:"input_schema"`
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description"`
+	InputSchema  tools.ParametersSchema `json:"input_schema"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
 type anthropicContentBlock struct {
@@ -82,7 +93,7 @@ type anthropicMessage struct {
 
 type anthropicReqBody struct {
 	Model       string             `json:"model"`
-	System      string             `json:"system,omitempty"`
+	System      interface{}        `json:"system,omitempty"` // string or []anthropicSystemBlock
 	Messages    []anthropicMessage `json:"messages"`
 	Tools       []anthropicToolDef `json:"tools,omitempty"`
 	MaxTokens   int                `json:"max_tokens"`
@@ -179,10 +190,25 @@ func (p *AnthropicProvider) GenerateChat(ctx context.Context, req ChatRequest) (
 			InputSchema: t.Parameters(),
 		})
 	}
+	// Add cache_control breakpoint on the last tool to cache all tool definitions
+	if len(toolDefs) > 0 {
+		toolDefs[len(toolDefs)-1].CacheControl = &anthropicCacheControl{Type: "ephemeral"}
+	}
+
+	var systemPayload interface{} = systemPrompt
+	if systemPrompt != "" {
+		systemPayload = []anthropicSystemBlock{
+			{
+				Type:         "text",
+				Text:         systemPrompt,
+				CacheControl: &anthropicCacheControl{Type: "ephemeral"},
+			},
+		}
+	}
 
 	payload := anthropicReqBody{
 		Model:       model,
-		System:      systemPrompt,
+		System:      systemPayload,
 		Messages:    messages,
 		Tools:       toolDefs,
 		MaxTokens:   maxTokens,
@@ -228,6 +254,7 @@ func (p *AnthropicProvider) GenerateChat(ctx context.Context, req ChatRequest) (
 
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
+		httpReq.Header.Set("anthropic-beta", "prompt-caching-2024-07-31")
 		if apiKey != "" {
 			httpReq.Header.Set("x-api-key", apiKey)
 		}
@@ -327,7 +354,12 @@ func (p *AnthropicProvider) GenerateChat(ctx context.Context, req ChatRequest) (
 	}
 
 	totalTokens := respBody.Usage.InputTokens + respBody.Usage.OutputTokens
-	cost := (float64(respBody.Usage.InputTokens)*0.003 + float64(respBody.Usage.OutputTokens)*0.015) / 1000.0
+	// Cached tokens receive a 90% discount ($0.0003 vs $0.003 / 1k tokens)
+	uncachedInput := respBody.Usage.InputTokens - respBody.Usage.CacheReadInputTokens
+	if uncachedInput < 0 {
+		uncachedInput = 0
+	}
+	cost := (float64(uncachedInput)*0.003 + float64(respBody.Usage.CacheReadInputTokens)*0.0003 + float64(respBody.Usage.OutputTokens)*0.015) / 1000.0
 
 	actualModel := respBody.Model
 	if actualModel == "" {
@@ -335,16 +367,18 @@ func (p *AnthropicProvider) GenerateChat(ctx context.Context, req ChatRequest) (
 	}
 
 	return &ChatResponse{
-		Content:          strings.Join(textParts, "\n"),
-		Thinking:         strings.Join(thinkingParts, "\n"),
-		ToolCalls:        toolCalls,
-		PromptTokens:     respBody.Usage.InputTokens,
-		CompletionTokens: respBody.Usage.OutputTokens,
-		TotalTokens:      totalTokens,
-		CostUSD:          cost,
-		Latency:          time.Since(start),
-		Model:            actualModel,
-		ProviderName:     p.name,
+		Content:             strings.Join(textParts, "\n"),
+		Thinking:            strings.Join(thinkingParts, "\n"),
+		ToolCalls:           toolCalls,
+		PromptTokens:        respBody.Usage.InputTokens,
+		CompletionTokens:    respBody.Usage.OutputTokens,
+		TotalTokens:         totalTokens,
+		CacheReadTokens:     respBody.Usage.CacheReadInputTokens,
+		CacheCreationTokens: respBody.Usage.CacheCreationInputTokens,
+		CostUSD:             cost,
+		Latency:             time.Since(start),
+		Model:               actualModel,
+		ProviderName:        p.name,
 	}, nil
 }
 
@@ -398,10 +432,24 @@ func (p *AnthropicProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 			Name: t.Name(), Description: t.Description(), InputSchema: t.Parameters(),
 		})
 	}
+	if len(toolDefs) > 0 {
+		toolDefs[len(toolDefs)-1].CacheControl = &anthropicCacheControl{Type: "ephemeral"}
+	}
+
+	var systemPayload interface{} = systemPrompt
+	if systemPrompt != "" {
+		systemPayload = []anthropicSystemBlock{
+			{
+				Type:         "text",
+				Text:         systemPrompt,
+				CacheControl: &anthropicCacheControl{Type: "ephemeral"},
+			},
+		}
+	}
 
 	payload := anthropicReqBody{
 		Model:       model,
-		System:      systemPrompt,
+		System:      systemPayload,
 		Messages:    messages,
 		Tools:       toolDefs,
 		MaxTokens:   maxTokens,
@@ -436,6 +484,7 @@ func (p *AnthropicProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
+		httpReq.Header.Set("anthropic-beta", "prompt-caching-2024-07-31")
 		if apiKey != "" {
 			httpReq.Header.Set("x-api-key", apiKey)
 		}

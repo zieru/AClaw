@@ -33,7 +33,7 @@ type PromptContext struct {
 func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 	var sb strings.Builder
 
-	// 1. Load IDENTITY.md (scoped to channel or global fallback)
+	// 1. Load IDENTITY.md (scoped to channel or global fallback) - STATIC
 	identity, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "IDENTITY.md")
 	if err == nil && identity != "" {
 		sb.WriteString(identity)
@@ -42,7 +42,7 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 		sb.WriteString("# Identity\nKamu adalah GoAssistant, sebuah AI assistant cerdas, tanggap, dan membantu yang berjalan di lingkungan server mandiri.\n\n")
 	}
 
-	// 2. Load SOUL.md / KNOWLEDGE.md
+	// 2. Load SOUL.md / KNOWLEDGE.md - STATIC
 	soul, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "SOUL.md")
 	if err == nil && soul != "" {
 		sb.WriteString("## Core Knowledge & SOP:\n")
@@ -50,7 +50,7 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 		sb.WriteString("\n\n")
 	}
 
-	// 3. Load AGENTS.md for Multi-Agent & Specialized Roles
+	// 3. Load AGENTS.md for Multi-Agent & Specialized Roles - STATIC
 	agentsMD, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "AGENTS.md")
 	if err == nil && agentsMD != "" {
 		sb.WriteString("## Multi-Agent Delegation & Specialized Roles:\n")
@@ -59,9 +59,16 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 		sb.WriteString("\n\n")
 	}
 
-	// 4. Injected Context & Memory
+	// 4. Tool Instructions if TOOLS.md exists (scoped to channel or global fallback) - STATIC
+	toolsMD, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "TOOLS.md")
+	if err == nil && toolsMD != "" {
+		sb.WriteString("## Tool Usage Guidelines:\n")
+		sb.WriteString(toolsMD)
+		sb.WriteString("\n\n")
+	}
+
+	// 5. Injected Dynamic Context & Memory (Placed at suffix to maximize static prefix prompt caching)
 	sb.WriteString("## Environment & Session Context:\n")
-	sb.WriteString(fmt.Sprintf("- Current Time: %s\n", time.Now().Format("Monday, 02 January 2006 15:04:05 MST")))
 	sb.WriteString(fmt.Sprintf("- Channel: %s (%s)\n", ctx.ChannelName, ctx.ChannelType))
 	if ctx.UserName != "" {
 		sb.WriteString(fmt.Sprintf("- User: %s (ID: %s)\n", ctx.UserName, ctx.UserID))
@@ -72,6 +79,7 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 	if ctx.ActiveProvider != "" {
 		sb.WriteString(fmt.Sprintf("- AI Provider Gateway: %s\n", ctx.ActiveProvider))
 	}
+	sb.WriteString(fmt.Sprintf("- Current Time: %s\n", time.Now().Format("Monday, 02 January 2006 15:04:05 MST")))
 	sb.WriteString("\n")
 
 	if ctx.SessionSummary != "" {
@@ -83,14 +91,6 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 	if ctx.MemoryContext != "" {
 		sb.WriteString(ctx.MemoryContext)
 		sb.WriteString("\n")
-	}
-
-	// 5. Tool Instructions if TOOLS.md exists (scoped to channel or global fallback)
-	toolsMD, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "TOOLS.md")
-	if err == nil && toolsMD != "" {
-		sb.WriteString("## Tool Usage Guidelines:\n")
-		sb.WriteString(toolsMD)
-		sb.WriteString("\n\n")
 	}
 
 	rawPrompt := sb.String()

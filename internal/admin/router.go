@@ -181,6 +181,11 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle(&tele.Btn{Unique: "ts_style_lesscode"}, func(c tele.Context) error { return a.tokenSaverUI.HandleStyleCallback(c, "less_code") })
 	a.bot.Handle(&tele.Btn{Unique: "ts_style_indo"}, func(c tele.Context) error { return a.tokenSaverUI.HandleStyleCallback(c, "id_ringkas") })
 	a.bot.Handle(&tele.Btn{Unique: "ts_style_none"}, func(c tele.Context) error { return a.tokenSaverUI.HandleStyleCallback(c, "none") })
+	a.bot.Handle(&tele.Btn{Unique: "ts_toggle_cache"}, a.tokenSaverUI.HandleToggleCacheCallback)
+	a.bot.Handle(&tele.Btn{Unique: "ts_flush_resp_cache"}, a.tokenSaverUI.HandleFlushCacheCallback)
+	a.bot.Handle(&tele.Btn{Unique: "ts_flush_tool_cache"}, a.tokenSaverUI.HandleFlushToolCacheCallback)
+	a.bot.Handle("/clearcache", a.tokenSaverUI.HandleFlushCacheCallback)
+	a.bot.Handle("/flushcache", a.tokenSaverUI.HandleFlushCacheCallback)
 	for _, engineID := range tokensaver.CanonicalEngines {
 		eid := engineID
 		a.bot.Handle(&tele.Btn{Unique: "ts_tgl_" + eid}, func(c tele.Context) error {

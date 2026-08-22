@@ -98,7 +98,9 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]interface{}
 		sb.WriteString("Tidak ada ringkasan instan langsung ditemukan. Silakan gunakan query yang lebih spesifik.")
 	}
 
-	return sb.String(), nil
+	res := sb.String()
+	GetGlobalToolCache().Set(t.Name(), args, res, 30*time.Minute)
+	return res, nil
 }
 
 func min(a, b int) int {

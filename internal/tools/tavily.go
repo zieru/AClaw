@@ -71,6 +71,11 @@ func (t *TavilySearchTool) Execute(ctx context.Context, args map[string]interfac
 		return "", fmt.Errorf("parameter 'query' wajib diisi")
 	}
 
+	// Check Tool Cache
+	if cached, hit := GetGlobalToolCache().Get(t.Name(), args); hit {
+		return cached, nil
+	}
+
 	apiKey := ""
 	searchDepth := "basic"
 	maxResults := 5
@@ -162,5 +167,7 @@ func (t *TavilySearchTool) Execute(ctx context.Context, args map[string]interfac
 		sb.WriteString("Tidak ada hasil yang ditemukan.")
 	}
 
-	return sb.String(), nil
+	resText := sb.String()
+	GetGlobalToolCache().Set(t.Name(), args, resText, 30*time.Minute)
+	return resText, nil
 }

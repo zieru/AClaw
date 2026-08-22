@@ -22,6 +22,7 @@ type Orchestrator struct {
 	promptBuilder   *PromptBuilder
 	toolRegistry    *tools.Registry
 	providerManager *provider.Manager
+	commandRouter   *CommandRouter
 }
 
 func NewOrchestrator(
@@ -39,6 +40,7 @@ func NewOrchestrator(
 		promptBuilder:   pb,
 		toolRegistry:    tr,
 		providerManager: pm,
+		commandRouter:   NewCommandRouter(GetGlobalResponseCache()),
 	}
 }
 
@@ -82,6 +84,11 @@ type AgentResponse struct {
 func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*AgentResponse, error) {
 	start := time.Now()
 
+	// 0. Handle Local Deterministic Commands (0 Token, Instant)
+	if localResp, handled := o.commandRouter.TryHandleLocal(ctx, req); handled {
+		return localResp, nil
+	}
+
 	// 1. Resolve Governance Policy (Hierarchical: Chat -> Channel -> Global -> Default)
 	policy := o.db.GetResolvedPolicy(req.ChannelID, req.ChatID)
 
@@ -92,13 +99,39 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		}, nil
 	}
 
-	// 3. Get or Create Session
+	// 3. Resolve Active Provider & Model Early
+	activeProvName := req.PreferredProv
+	var activeProv provider.Provider
+	if activeProvName != "" {
+		activeProv, _ = o.providerManager.Get(activeProvName)
+	}
+	if activeProv == nil {
+		allProvs := o.providerManager.ListAll()
+		if len(allProvs) > 0 {
+			activeProv = allProvs[0]
+			activeProvName = activeProv.Name()
+		}
+	}
+
+	activeModelName := policy.ModelOverride
+	if activeModelName == "" && activeProv != nil {
+		activeModelName = activeProv.DefaultModel()
+	}
+
+	// 4. Exact Response Cache Check (0 Token, Instant Delivery)
+	if policy.ResponseCacheEnabled && req.AttachedFileMB <= 0 {
+		if cachedResp, hit := GetGlobalResponseCache().Get(req.ChannelID, activeModelName, req.UserPrompt); hit {
+			return cachedResp, nil
+		}
+	}
+
+	// 5. Get or Create Session
 	session, err := o.sessionManager.GetOrCreate(req.ChannelID, req.ChatID, req.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("gagal inisialisasi sesi percakapan: %w", err)
 	}
 
-	// 4. Auto-Compaction Check
+	// 6. Auto-Compaction Check
 	msgCount, _ := o.db.CountSessionMessages(session.ID)
 	if policy.AutoCompaction && msgCount >= policy.CompactionThreshold {
 		// Pick active provider for compaction
@@ -118,27 +151,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		}
 	}
 
-	// 5. Build Memory & System Prompt
+	// 7. Build Memory & System Prompt
 	memContext, _ := o.memoryManager.GetContextMemory(req.ChannelID, req.UserID)
-
-	// Resolve active provider and model for prompt context
-	activeProvName := req.PreferredProv
-	var activeProv provider.Provider
-	if activeProvName != "" {
-		activeProv, _ = o.providerManager.Get(activeProvName)
-	}
-	if activeProv == nil {
-		allProvs := o.providerManager.ListAll()
-		if len(allProvs) > 0 {
-			activeProv = allProvs[0]
-			activeProvName = activeProv.Name()
-		}
-	}
-
-	activeModelName := policy.ModelOverride
-	if activeModelName == "" && activeProv != nil {
-		activeModelName = activeProv.DefaultModel()
-	}
 
 	sysPrompt, err := o.promptBuilder.BuildSystemPrompt(PromptContext{
 		ChannelID:      req.ChannelID,
@@ -317,6 +331,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		totalCompletionTokens += resp.CompletionTokens
 		totalThinkingTokens += resp.ThinkingTokens
 		totalTokensUsed += resp.TotalTokens
+		totalTokensSaved += resp.CacheReadTokens
 		totalCostUSD += resp.CostUSD
 		lastModel = resp.Model
 		lastProviderName = resp.ProviderName
@@ -427,7 +442,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		finalText = finalText + "\n\n" + footer
 	}
 
-	return &AgentResponse{
+	agentResp := &AgentResponse{
 		Text:             finalText,
 		RawText:          cleanText,
 		ThinkingContent:  finalThinking,
@@ -442,7 +457,15 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		Latency:          latency,
 		ProviderUsed:     lastProviderName,
 		ModelUsed:        lastModel,
-	}, nil
+	}
+
+	// 13. Save to Exact Response Cache if enabled, no tools called, and no files
+	if policy.ResponseCacheEnabled && len(allToolsCalled) == 0 && len(mediaFiles) == 0 {
+		ttl := time.Duration(policy.ResponseCacheTTLSec) * time.Second
+		GetGlobalResponseCache().Set(req.ChannelID, activeModelName, req.UserPrompt, agentResp, ttl)
+	}
+
+	return agentResp, nil
 }
 
 // FormatFooter formats the footer according to policy mode ('off', 'tokens', 'full')

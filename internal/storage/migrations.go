@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS channel_policies (
     timeout_handler_seconds INTEGER NOT NULL DEFAULT 0,
     max_audit_logs INTEGER NOT NULL DEFAULT 5000,
     token_budget INTEGER NOT NULL DEFAULT 0,
+    response_cache_enabled INTEGER NOT NULL DEFAULT 1,
+    response_cache_ttl_sec INTEGER NOT NULL DEFAULT 1800,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(scope, scope_id)
 );

@@ -70,17 +70,19 @@ type ChatRequest struct {
 
 // ChatResponse holds the output from an LLM call
 type ChatResponse struct {
-	Content          string
-	Thinking         string // Thinking/reasoning content from model
-	ToolCalls        []ToolCall
-	PromptTokens     int
-	CompletionTokens int
-	ThinkingTokens   int // Tokens used for thinking
-	TotalTokens      int
-	CostUSD          float64
-	Latency          time.Duration
-	Model            string
-	ProviderName     string
+	Content             string
+	Thinking            string // Thinking/reasoning content from model
+	ToolCalls           []ToolCall
+	PromptTokens        int
+	CompletionTokens    int
+	ThinkingTokens      int // Tokens used for thinking
+	TotalTokens         int
+	CacheReadTokens     int // Tokens read from provider prompt cache (50-90% discount)
+	CacheCreationTokens int // Tokens written to provider prompt cache
+	CostUSD             float64
+	Latency             time.Duration
+	Model               string
+	ProviderName        string
 }
 
 // Provider is the interface every AI provider must implement
