@@ -5,6 +5,7 @@ import (
 	"html"
 	"strings"
 
+	"goassistant/internal/channel/whatsapp"
 	"goassistant/internal/storage"
 	tele "gopkg.in/telebot.v3"
 )
@@ -253,7 +254,7 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 			return c.Reply("❌ Channel tidak ditemukan.")
 		}
 		a.channelUI.SetSessionStep(c.Sender().ID, chID, ChannelStepEditIdentifier)
-		text := fmt.Sprintf("🔑 <b>GANTI TOKEN / ENDPOINT (%s)</b>\n\nKirimkan Token Telegram baru atau Webhook URL WhatsApp baru:", html.EscapeString(ch.Name))
+		text := fmt.Sprintf("🔑 <b>GANTI TOKEN (%s)</b>\n\nKirimkan Bot Token Telegram baru:", html.EscapeString(ch.Name))
 		menu := &tele.ReplyMarkup{}
 		btnCancel := menu.Data("❌ Batal", fmt.Sprintf("chan_ed_pick_%s", ch.ID))
 		menu.Inline(menu.Row(btnCancel))
@@ -261,8 +262,100 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 	}
 	if strings.HasPrefix(data, "chan_del_") {
 		chID := strings.TrimPrefix(data, "chan_del_")
+		if mgr := whatsapp.GetManager(); mgr != nil {
+			_ = mgr.DeleteAdapter(chID)
+		}
 		_ = a.db.DeleteChannel(chID)
 		return a.channelUI.StartChannelWizard(c)
+	}
+
+	// WhatsApp Specific Callbacks
+	if strings.HasPrefix(data, "chan_wa_qr_") {
+		chID := strings.TrimPrefix(data, "chan_wa_qr_")
+		return a.channelUI.GetWhatsAppUI().SendQRCodePhoto(c, chID)
+	}
+	if strings.HasPrefix(data, "chan_wa_dm_menu_") {
+		chID := strings.TrimPrefix(data, "chan_wa_dm_menu_")
+		return a.channelUI.GetWhatsAppUI().RenderDMPolicyMenu(c, chID)
+	}
+	if strings.HasPrefix(data, "chan_wa_set_dm_") {
+		raw := strings.TrimPrefix(data, "chan_wa_set_dm_")
+		lastUnderscore := strings.LastIndex(raw, "_")
+		if lastUnderscore != -1 {
+			chID := raw[:lastUnderscore]
+			policy := raw[lastUnderscore+1:]
+			return a.channelUI.GetWhatsAppUI().HandleSetDMPolicy(c, chID, policy)
+		}
+	}
+	if strings.HasPrefix(data, "chan_wa_grp_menu_") {
+		chID := strings.TrimPrefix(data, "chan_wa_grp_menu_")
+		return a.channelUI.GetWhatsAppUI().RenderGroupPolicyMenu(c, chID)
+	}
+	if strings.HasPrefix(data, "chan_wa_set_grp_") {
+		raw := strings.TrimPrefix(data, "chan_wa_set_grp_")
+		lastUnderscore := strings.LastIndex(raw, "_")
+		if lastUnderscore != -1 {
+			chID := raw[:lastUnderscore]
+			policy := raw[lastUnderscore+1:]
+			return a.channelUI.GetWhatsAppUI().HandleSetGroupPolicy(c, chID, policy)
+		}
+	}
+	if strings.HasPrefix(data, "chan_wa_men_menu_") {
+		chID := strings.TrimPrefix(data, "chan_wa_men_menu_")
+		return a.channelUI.GetWhatsAppUI().RenderMentionPolicyMenu(c, chID)
+	}
+	if strings.HasPrefix(data, "chan_wa_set_men_") {
+		raw := strings.TrimPrefix(data, "chan_wa_set_men_")
+		lastUnderscore := strings.LastIndex(raw, "_")
+		if lastUnderscore != -1 {
+			chID := raw[:lastUnderscore]
+			policy := raw[lastUnderscore+1:]
+			return a.channelUI.GetWhatsAppUI().HandleSetMentionPolicy(c, chID, policy)
+		}
+	}
+	if strings.HasPrefix(data, "chan_wa_list_menu_") {
+		chID := strings.TrimPrefix(data, "chan_wa_list_menu_")
+		return a.channelUI.GetWhatsAppUI().RenderWhitelistManagerMenu(c, chID)
+	}
+	if strings.HasPrefix(data, "chan_wa_input_trust_") {
+		chID := strings.TrimPrefix(data, "chan_wa_input_trust_")
+		ch, err := a.db.GetChannel(chID)
+		if err != nil || ch == nil {
+			return c.Reply("❌ Channel tidak ditemukan.")
+		}
+		a.channelUI.SetSessionStep(c.Sender().ID, chID, ChannelStepAddTrustedNumbers)
+		text := fmt.Sprintf("➕ <b>TAMBAH NOMOR TRUSTED (%s)</b>\n\nKirimkan nomor telepon WhatsApp yang ingin diizinkan (bisa lebih dari satu, pisahkan dengan koma atau baris baru):\n\n<b>Contoh:</b>\n<code>628123456789, 628987654321</code>", html.EscapeString(ch.Name))
+		menu := &tele.ReplyMarkup{}
+		btnCancel := menu.Data("❌ Batal", fmt.Sprintf("chan_wa_list_menu_%s", ch.ID))
+		menu.Inline(menu.Row(btnCancel))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	}
+	if strings.HasPrefix(data, "chan_wa_input_grp_") {
+		chID := strings.TrimPrefix(data, "chan_wa_input_grp_")
+		ch, err := a.db.GetChannel(chID)
+		if err != nil || ch == nil {
+			return c.Reply("❌ Channel tidak ditemukan.")
+		}
+		a.channelUI.SetSessionStep(c.Sender().ID, chID, ChannelStepAddAllowedGroups)
+		text := fmt.Sprintf("➕ <b>TAMBAH ID GRUP WHITELIST (%s)</b>\n\nKirimkan Group JID WhatsApp yang ingin diizinkan (bisa lebih dari satu, pisahkan dengan koma atau baris baru):\n\n<b>Contoh:</b>\n<code>1203630248234@g.us, 120363999999@g.us</code>", html.EscapeString(ch.Name))
+		menu := &tele.ReplyMarkup{}
+		btnCancel := menu.Data("❌ Batal", fmt.Sprintf("chan_wa_list_menu_%s", ch.ID))
+		menu.Inline(menu.Row(btnCancel))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	}
+	if strings.HasPrefix(data, "chan_wa_clr_trust_") {
+		chID := strings.TrimPrefix(data, "chan_wa_clr_trust_")
+		return a.channelUI.GetWhatsAppUI().HandleClearLists(c, chID, "trust")
+	}
+	if strings.HasPrefix(data, "chan_wa_clr_grp_") {
+		chID := strings.TrimPrefix(data, "chan_wa_clr_grp_")
+		return a.channelUI.GetWhatsAppUI().HandleClearLists(c, chID, "grp")
+	}
+
+	// Policy Wizard Shortcut
+	if strings.HasPrefix(data, "pol_wiz_ch_") {
+		chID := strings.TrimPrefix(data, "pol_wiz_ch_")
+		return a.limitsUI.RenderScopeLimitsDashboard(c, "channel", chID)
 	}
 
 	// Tool Perms Matrix Callbacks

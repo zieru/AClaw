@@ -182,7 +182,16 @@ func main() {
 
 	orchestrator := agent.NewOrchestrator(db, sessMgr, memMgr, promptBld, toolReg, provMgr)
 
-	// 7. Load and Initialize Active Channels
+	// 7. Initialize WhatsApp Manager (Multi-Device Store)
+	waMgr, err := wachannel.InitManager(cfg.Server.DataDir, orchestrator, db)
+	if err != nil {
+		log.Printf("⚠️ Gagal inisialisasi WhatsApp Native Manager: %v", err)
+	} else {
+		defer waMgr.Close()
+		log.Println("📱 WhatsApp Native Multi-Device Manager berhasil diinisialisasi.")
+	}
+
+	// 7b. Load and Initialize Active Channels
 	activeChannels := make(map[string]channel.Channel)
 	dbChannels, _ := db.ListChannels()
 	for _, ch := range dbChannels {
@@ -202,14 +211,28 @@ func main() {
 				log.Printf("⚠️ Gagal menjalankan channel Telegram '%s': %v", ch.Name, err)
 			}
 		} else if ch.Type == "whatsapp" {
-			adapter := wachannel.NewBridgeAdapter(ch.ID, ch.Name, ch.Identifier, "", orchestrator, db)
-			activeChannels[ch.ID] = adapter
-			_ = adapter.Start(context.Background())
+			if waMgr != nil {
+				chCopy := ch
+				adapter, err := waMgr.CreateOrGetAdapter(&chCopy)
+				if err == nil {
+					activeChannels[ch.ID] = adapter
+					_ = adapter.Start(context.Background())
+				} else {
+					log.Printf("⚠️ Gagal menjalankan channel WhatsApp '%s': %v", ch.Name, err)
+				}
+			}
 		}
 	}
 
 	// 8. Setup Message Dispatcher for Cron Scheduler
 	messageSender := func(channelType, targetID, text string) error {
+		if channelType == "whatsapp" && waMgr != nil {
+			for _, ad := range waMgr.ListAdapters() {
+				if ad.IsConnected() && ad.IsLoggedIn() {
+					return ad.SendMessage(targetID, text)
+				}
+			}
+		}
 		for _, ch := range activeChannels {
 			if ch.Type() == channelType {
 				return ch.SendMessage(targetID, text)

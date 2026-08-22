@@ -1,12 +1,14 @@
 package admin
 
 import (
+	"encoding/json"
 	"fmt"
 	"html"
 	"strings"
 	"sync"
 	"time"
 
+	"goassistant/internal/channel/whatsapp"
 	"goassistant/internal/storage"
 	"goassistant/internal/tools"
 	tele "gopkg.in/telebot.v3"
@@ -19,6 +21,8 @@ const (
 	ChannelStepIDAndName
 	ChannelStepIdentifier
 	ChannelStepEditIdentifier
+	ChannelStepAddTrustedNumbers
+	ChannelStepAddAllowedGroups
 )
 
 type ChannelSession struct {
@@ -35,16 +39,23 @@ type ChannelSession struct {
 type ChannelUI struct {
 	db           *storage.DB
 	toolRegistry *tools.Registry
+	waUI         *WhatsAppUI
 	mu           sync.RWMutex
 	sessions     map[int64]*ChannelSession
 }
 
 func NewChannelUI(db *storage.DB, tr *tools.Registry) *ChannelUI {
-	return &ChannelUI{
+	cui := &ChannelUI{
 		db:           db,
 		toolRegistry: tr,
 		sessions:     make(map[int64]*ChannelSession),
 	}
+	cui.waUI = NewWhatsAppUI(db, cui)
+	return cui
+}
+
+func (ui *ChannelUI) GetWhatsAppUI() *WhatsAppUI {
+	return ui.waUI
 }
 
 // RenderChannelsList returns summary of all channels in HTML format
@@ -146,11 +157,11 @@ func (ui *ChannelUI) StartChannelWizard(c tele.Context) error {
 func (ui *ChannelUI) RenderAddChannelTypeMenu(c tele.Context) error {
 	text := "📱 <b>PILIH TIPE CHANNEL BARU:</b>\n\n" +
 		"• <b>Telegram Bot:</b> Bot publik tambahan yang dikontrol oleh GoAssistant.\n" +
-		"• <b>WhatsApp Bridge:</b> Integrasi webhook / REST API WhatsApp Gateway."
+		"• <b>WhatsApp Native:</b> Multi-Device Linked Device (Scan QR langsung via Telegram)."
 
 	menu := &tele.ReplyMarkup{}
 	btnTG := menu.Data("✈️ Telegram Bot", "chan_type_telegram")
-	btnWA := menu.Data("🟢 WhatsApp Bridge", "chan_type_whatsapp")
+	btnWA := menu.Data("🟢 WhatsApp (Linked Device)", "chan_type_whatsapp")
 	btnBack := menu.Data("⬅️ Batal / Kembali", "chan_wiz_start")
 
 	menu.Inline(
@@ -191,31 +202,35 @@ func (ui *ChannelUI) PromptChannelIDAndName(c tele.Context, chType string) error
 
 // RenderChannelDashboard displays channel details and management options
 func (ui *ChannelUI) RenderChannelDashboard(c tele.Context, ch *storage.ChannelRecord) error {
+	if ch.Type == "whatsapp" {
+		return ui.waUI.RenderWADashboard(c, ch)
+	}
+
 	statusText := "🟢 <b>Aktif</b>"
 	if !ch.IsActive {
 		statusText = "🔴 <b>Nonaktif</b>"
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📱 <b>MANAJEMEN CHANNEL: %s</b>\n\n", html.EscapeString(ch.Name)))
+	sb.WriteString(fmt.Sprintf("📱 <b>MANAJEMEN CHANNEL TELEGRAM: %s</b>\n\n", html.EscapeString(ch.Name)))
 	sb.WriteString(fmt.Sprintf("• <b>Status:</b> %s\n", statusText))
 	sb.WriteString(fmt.Sprintf("• <b>Channel ID:</b> <code>%s</code>\n", html.EscapeString(ch.ID)))
 	sb.WriteString(fmt.Sprintf("• <b>Tipe:</b> <code>%s</code>\n", html.EscapeString(ch.Type)))
-	sb.WriteString(fmt.Sprintf("• <b>Token / Webhook:</b> <code>%s</code>\n\n", html.EscapeString(ch.Identifier)))
+	sb.WriteString(fmt.Sprintf("• <b>Bot Token:</b> <code>%s</code>\n\n", html.EscapeString(ch.Identifier)))
 	sb.WriteString("Pilih aksi untuk channel ini:")
 
 	menu := &tele.ReplyMarkup{}
 	btnToggle := menu.Data("🔘 Toggle Status", fmt.Sprintf("chan_tgl_%s", ch.ID))
-	btnEditToken := menu.Data("🔑 Ganti Token/Webhook", fmt.Sprintf("chan_ed_tok_%s", ch.ID))
+	btnEditToken := menu.Data("🔑 Ganti Token", fmt.Sprintf("chan_ed_tok_%s", ch.ID))
 	btnToolPerms := menu.Data("🧰 Atur Permissions Tool", fmt.Sprintf("tool_wiz_ch_%s", ch.ID))
+	btnPol := menu.Data("⚙️ Limit & Model Policy", fmt.Sprintf("pol_wiz_ch_%s", ch.ID))
 	btnDel := menu.Data("🗑️ Hapus Channel", fmt.Sprintf("chan_del_%s", ch.ID))
 	btnBack := menu.Data("⬅️ Kembali", "chan_wiz_start")
 
 	menu.Inline(
 		menu.Row(btnToggle, btnEditToken),
-		menu.Row(btnToolPerms),
-		menu.Row(btnDel),
-		menu.Row(btnBack),
+		menu.Row(btnToolPerms, btnPol),
+		menu.Row(btnDel, btnBack),
 	)
 
 	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
@@ -327,10 +342,28 @@ func (ui *ChannelUI) HandleTextMessage(c tele.Context) (bool, error) {
 		}
 		sess.ID = strings.ToLower(strings.TrimSpace(parts[0]))
 		sess.Name = strings.TrimSpace(parts[1])
-		sess.Step = ChannelStepIdentifier
 
-		promptText := fmt.Sprintf("🔑 <b>MASUKKAN TOKEN / ENDPOINT (%s)</b>\n\n"+
-			"Silakan kirimkan Bot Token dari @BotFather (untuk Telegram) atau URL Webhook Bridge (untuk WhatsApp):",
+		if sess.Type == "whatsapp" {
+			rec := &storage.ChannelRecord{
+				ID:           sess.ID,
+				Type:         "whatsapp",
+				Name:         sess.Name,
+				Identifier:   "",
+				IsActive:     true,
+				SettingsJSON: "{}",
+			}
+			if err := ui.db.SaveChannel(rec); err != nil {
+				return true, c.Reply(fmt.Sprintf("❌ Gagal menyimpan channel: %v", html.EscapeString(err.Error())))
+			}
+			ui.CancelWizard(userID)
+			_ = c.Reply(fmt.Sprintf("🎉 <b>CHANNEL WHATSAPP DIBUAT!</b>\n\n• Nama: <b>%s</b>\n• ID: <code>%s</code>\n\nMenyiapkan QR Code...", html.EscapeString(rec.Name), html.EscapeString(rec.ID)), tele.ModeHTML)
+			_ = ui.waUI.SendQRCodePhoto(c, rec.ID)
+			return true, nil
+		}
+
+		sess.Step = ChannelStepIdentifier
+		promptText := fmt.Sprintf("🔑 <b>MASUKKAN BOT TOKEN (%s)</b>\n\n"+
+			"Silakan kirimkan Bot Token dari @BotFather untuk bot Telegram ini:",
 			html.EscapeString(sess.Name))
 		menu := &tele.ReplyMarkup{}
 		btnCancel := menu.Data("❌ Batal", "chan_wiz_start")
@@ -364,6 +397,97 @@ func (ui *ChannelUI) HandleTextMessage(c tele.Context) (bool, error) {
 		ui.CancelWizard(userID)
 		_ = c.Reply(fmt.Sprintf("✅ Token / Endpoint untuk channel <b>%s</b> berhasil diperbarui!", html.EscapeString(ch.Name)), tele.ModeHTML)
 		return true, ui.RenderChannelDashboard(c, ch)
+
+	case ChannelStepAddTrustedNumbers:
+		ch, err := ui.db.GetChannel(sess.EditingChannelID)
+		if err != nil || ch == nil {
+			ui.CancelWizard(userID)
+			return true, c.Reply("❌ Channel tidak ditemukan.")
+		}
+		var st whatsapp.WhatsAppSettings
+		if ch.SettingsJSON != "" {
+			_ = json.Unmarshal([]byte(ch.SettingsJSON), &st)
+		} else {
+			st = whatsapp.DefaultWhatsAppSettings()
+		}
+
+		rawItems := strings.FieldsFunc(msgText, func(r rune) bool {
+			return r == ',' || r == '\n' || r == ';'
+		})
+		for _, item := range rawItems {
+			cleaned := strings.TrimPrefix(strings.TrimSpace(item), "+")
+			if cleaned != "" {
+				// avoid duplicates
+				exists := false
+				for _, n := range st.TrustedNumbers {
+					if n == cleaned {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					st.TrustedNumbers = append(st.TrustedNumbers, cleaned)
+				}
+			}
+		}
+
+		stBytes, _ := json.Marshal(st)
+		ch.SettingsJSON = string(stBytes)
+		_ = ui.db.SaveChannel(ch)
+		if mgr := whatsapp.GetManager(); mgr != nil {
+			if ad := mgr.GetAdapter(ch.ID); ad != nil {
+				_ = ad.UpdateSettings(st)
+			}
+		}
+
+		ui.CancelWizard(userID)
+		_ = c.Reply("✅ Nomor berhasil ditambahkan ke Trusted List WhatsApp!", tele.ModeHTML)
+		return true, ui.waUI.RenderWhitelistManagerMenu(c, ch.ID)
+
+	case ChannelStepAddAllowedGroups:
+		ch, err := ui.db.GetChannel(sess.EditingChannelID)
+		if err != nil || ch == nil {
+			ui.CancelWizard(userID)
+			return true, c.Reply("❌ Channel tidak ditemukan.")
+		}
+		var st whatsapp.WhatsAppSettings
+		if ch.SettingsJSON != "" {
+			_ = json.Unmarshal([]byte(ch.SettingsJSON), &st)
+		} else {
+			st = whatsapp.DefaultWhatsAppSettings()
+		}
+
+		rawItems := strings.FieldsFunc(msgText, func(r rune) bool {
+			return r == ',' || r == '\n' || r == ';'
+		})
+		for _, item := range rawItems {
+			cleaned := strings.TrimSpace(item)
+			if cleaned != "" {
+				exists := false
+				for _, g := range st.AllowedGroups {
+					if g == cleaned {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					st.AllowedGroups = append(st.AllowedGroups, cleaned)
+				}
+			}
+		}
+
+		stBytes, _ := json.Marshal(st)
+		ch.SettingsJSON = string(stBytes)
+		_ = ui.db.SaveChannel(ch)
+		if mgr := whatsapp.GetManager(); mgr != nil {
+			if ad := mgr.GetAdapter(ch.ID); ad != nil {
+				_ = ad.UpdateSettings(st)
+			}
+		}
+
+		ui.CancelWizard(userID)
+		_ = c.Reply("✅ ID Grup berhasil ditambahkan ke Whitelist WhatsApp!", tele.ModeHTML)
+		return true, ui.waUI.RenderWhitelistManagerMenu(c, ch.ID)
 	}
 
 	return false, nil
