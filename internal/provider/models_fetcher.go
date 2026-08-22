@@ -71,7 +71,11 @@ func fetchOpenAICompatibleModels(ctx context.Context, pType, baseURL, apiKey str
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("api error (%d): %s", resp.StatusCode, string(bodyBytes))
+		trimmedBody := strings.TrimSpace(string(bodyBytes))
+		if len(trimmedBody) > 100 {
+			trimmedBody = trimmedBody[:100] + "..."
+		}
+		return nil, fmt.Errorf("api error (%d): %s", resp.StatusCode, trimmedBody)
 	}
 
 	// Parsing OpenAI response: {"data": [{"id": "gpt-4o"}, ...]}
@@ -87,7 +91,11 @@ func fetchOpenAICompatibleModels(ctx context.Context, pType, baseURL, apiKey str
 	}
 
 	if err := json.Unmarshal(bodyBytes, &openAIResp); err != nil {
-		return nil, fmt.Errorf("format json /models tidak dikenal: %w", err)
+		trimmedBody := strings.TrimSpace(string(bodyBytes))
+		if len(trimmedBody) > 80 {
+			trimmedBody = trimmedBody[:80] + "..."
+		}
+		return nil, fmt.Errorf("endpoint /models tidak mengembalikan JSON valid (respon: %s)", trimmedBody)
 	}
 
 	var models []string
