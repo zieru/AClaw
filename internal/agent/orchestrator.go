@@ -343,6 +343,23 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 				finalThinking = resp.Thinking
 			}
 			extractAttachments(finalContent)
+
+			// If the model produced empty text response (e.g. only thinking or finished tools without text),
+			// attempt an auto-continue prompt to prompt the model for its final text answer
+			if strings.TrimSpace(finalContent) == "" && turn < maxTurns-1 {
+				messages = append(messages, provider.ChatMessage{
+					Role:    provider.RoleAssistant,
+					Content: resp.Content,
+				})
+				messages = append(messages, provider.ChatMessage{
+					Role:    provider.RoleUser,
+					Content: "Lanjutkan dan berikan jawaban teks akhirmu berdasarkan analisis atau pemikiran di atas.",
+				})
+				if req.OnProgress != nil {
+					req.OnProgress("✍️ <i>Menyusun respon akhir...</i>")
+				}
+				continue
+			}
 			break
 		}
 
@@ -383,8 +400,13 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		}
 	}
 
-	if finalContent == "" {
-		finalContent = "(Tidak ada respon teks dari model)"
+	if strings.TrimSpace(finalContent) == "" {
+		if strings.TrimSpace(finalThinking) != "" {
+			// Fallback: use thinking/reasoning content as the main text
+			finalContent = strings.TrimSpace(finalThinking)
+		} else {
+			finalContent = "(Tidak ada respon teks dari model)"
+		}
 	}
 
 	// 10. Persist User & Assistant Messages (clean content without metadata footer)
@@ -422,8 +444,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	footer := FormatFooter(policy.FooterMode, totalPromptTokens, totalCompletionTokens, totalThinkingTokens, totalTokensUsed, totalTokensSaved, latency, lastModel, lastProviderName, allToolsCalled)
 	finalText := cleanText
 
-	// Prepend thinking content if enabled and available
-	if finalThinking != "" && policy.ThinkingEnabled {
+	// Prepend thinking content if enabled and available (and not already used as main content fallback)
+	if finalThinking != "" && policy.ThinkingEnabled && cleanText != strings.TrimSpace(finalThinking) {
 		switch strings.ToLower(policy.ThinkingDisplay) {
 		case "full":
 			finalText = "💭 <b>Proses Berpikir:</b>\n<blockquote>" + strings.TrimSpace(finalThinking) + "</blockquote>\n\n" + finalText
