@@ -381,6 +381,8 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 	cleanText := strings.TrimSpace(text)
 	lowerText := strings.ToLower(cleanText)
 
+	log.Printf("📩 [Channel-WA] Pesan masuk dari %s (%s) [Group: %v]: '%s'", senderJID.String(), chatID, isGroup, cleanText)
+
 	// 2. Policy Checks
 	a.mu.RLock()
 	st := a.settings
@@ -389,17 +391,20 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 	if isGroup {
 		// Group Policy
 		if st.GroupPolicy == GroupPolicyBlock {
+			log.Printf("🛡️ [Channel-WA] Pesan grup %s diabaikan (Policy: Block Groups)", chatID)
 			return // Group messages blocked
 		}
 		if st.GroupPolicy == GroupPolicyWhitelist {
 			allowed := false
 			for _, g := range st.AllowedGroups {
-				if strings.EqualFold(strings.TrimSpace(g), chatID) || strings.EqualFold(strings.TrimSpace(g), chatJID.User) {
+				cleanG := strings.TrimSpace(g)
+				if strings.EqualFold(cleanG, chatID) || strings.EqualFold(cleanG, chatJID.User) || strings.Contains(chatID, cleanG) {
 					allowed = true
 					break
 				}
 			}
 			if !allowed {
+				log.Printf("🛡️ [Channel-WA] Pesan grup %s diabaikan karena tidak ada di Whitelist Groups", chatID)
 				return // Group not in whitelist
 			}
 		}
@@ -413,18 +418,19 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 	} else {
 		// DM Policy
 		if st.DMPolicy == DMPolicyBlock {
+			log.Printf("🛡️ [Channel-WA] Pesan DM dari %s diabaikan (Policy: Block All DM)", senderJID.String())
 			return // DM blocked
 		}
 		if st.DMPolicy == DMPolicyTrusted {
 			trusted := false
 			for _, num := range st.TrustedNumbers {
-				cleanNum := strings.TrimPrefix(strings.TrimSpace(num), "+")
-				if cleanNum == senderID || cleanNum == senderJID.String() {
+				if isPhoneMatching(num, senderJID, chatJID) {
 					trusted = true
 					break
 				}
 			}
 			if !trusted {
+				log.Printf("🛡️ [Channel-WA] Pesan DM dari %s (%s) diabaikan karena tidak terdaftar di Trusted List (%v)", senderJID.String(), chatID, st.TrustedNumbers)
 				return // Sender not in trusted list
 			}
 		}
@@ -619,4 +625,45 @@ func getContextInfo(m *waE2E.Message) *waE2E.ContextInfo {
 		return doc.GetContextInfo()
 	}
 	return nil
+}
+
+func normalizePhone(s string) string {
+	var digits strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	str := digits.String()
+	if strings.HasPrefix(str, "08") {
+		str = "628" + str[2:]
+	}
+	return str
+}
+
+func isPhoneMatching(trustedPattern string, senderJID, chatJID waTypes.JID) bool {
+	normTrusted := normalizePhone(trustedPattern)
+	if normTrusted == "" {
+		return false
+	}
+
+	candidates := []string{
+		normalizePhone(senderJID.User),
+		normalizePhone(senderJID.ToNonAD().User),
+		normalizePhone(chatJID.User),
+		normalizePhone(chatJID.ToNonAD().User),
+	}
+
+	for _, c := range candidates {
+		if c != "" && (c == normTrusted || strings.HasSuffix(c, normTrusted) || strings.HasSuffix(normTrusted, c)) {
+			return true
+		}
+	}
+
+	cleanTrusted := strings.TrimPrefix(strings.TrimSpace(trustedPattern), "+")
+	if strings.Contains(senderJID.String(), cleanTrusted) || strings.Contains(chatJID.String(), cleanTrusted) {
+		return true
+	}
+
+	return false
 }

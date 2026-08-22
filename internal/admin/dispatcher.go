@@ -215,6 +215,89 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		chID := strings.TrimPrefix(data, "lim_sc_ch_")
 		return a.limitsUI.RenderScopeLimitsDashboard(c, "channel", chID)
 	}
+	if data == "lim_set_footer_menu" {
+		return a.limitsUI.RenderFooterMenu(c)
+	}
+	if data == "lim_set_upload_menu" {
+		return a.limitsUI.RenderUploadMenu(c)
+	}
+	if data == "lim_set_tokens_menu" {
+		return a.limitsUI.RenderTokensMenu(c)
+	}
+	if data == "lim_set_history_menu" {
+		return a.limitsUI.RenderHistoryMenu(c)
+	}
+	if data == "lim_set_compact_menu" {
+		return a.limitsUI.RenderCompactionMenu(c)
+	}
+	if data == "lim_set_model_menu" {
+		return a.limitsUI.RenderModelMenu(c)
+	}
+	if data == "lim_set_timeout_api_menu" {
+		return a.limitsUI.RenderTimeoutAPIMenu(c)
+	}
+	if data == "lim_set_timeout_handler_menu" {
+		return a.limitsUI.RenderTimeoutHandlerMenu(c)
+	}
+	if data == "lim_set_audit_max_menu" {
+		return a.limitsUI.RenderAuditMaxMenu(c)
+	}
+	if data == "lim_set_budget_menu" {
+		return a.limitsUI.RenderBudgetMenu(c)
+	}
+	if data == "lim_do_rotate_audit" {
+		return a.limitsUI.HandleRotateAudit(c)
+	}
+	if strings.HasPrefix(data, "lim_set_val_") {
+		raw := strings.TrimPrefix(data, "lim_set_val_")
+		firstUnderscore := strings.Index(raw, "_")
+		if firstUnderscore != -1 {
+			param := raw[:firstUnderscore]
+			val := raw[firstUnderscore+1:]
+			return a.limitsUI.HandleSetVal(c, param, val)
+		}
+	}
+	if strings.HasPrefix(data, "lim_input_") {
+		param := strings.TrimPrefix(data, "lim_input_")
+		var step LimitsStep
+		var prompt string
+		switch param {
+		case "upload":
+			step = LimitsStepCustomUpload
+			prompt = "📁 <b>MASUKKAN BATAS MAX UPLOAD (MB)</b>\n\nKirimkan angka MB positif (contoh: <code>25</code>):"
+		case "tokens":
+			step = LimitsStepCustomTokens
+			prompt = "🪙 <b>MASUKKAN BATAS MAX OUTPUT TOKENS</b>\n\nKirimkan angka token positif (contoh: <code>4096</code>):"
+		case "history":
+			step = LimitsStepCustomHistory
+			prompt = "💬 <b>MASUKKAN BATAS MAX HISTORY TURNS</b>\n\nKirimkan angka turn positif (contoh: <code>30</code>):"
+		case "threshold":
+			step = LimitsStepCustomThreshold
+			prompt = "🗜️ <b>MASUKKAN AMBANG BATAS AUTO-COMPACTION</b>\n\nKirimkan angka turn threshold positif (contoh: <code>15</code>):"
+		case "model":
+			step = LimitsStepCustomModel
+			prompt = "🤖 <b>MASUKKAN MODEL / COMBO OVERRIDE</b>\n\nKirimkan nama model atau combo (contoh: <code>gemini-2.5-flash</code> atau <code>combo_smart</code>):"
+		case "timeapi":
+			step = LimitsStepCustomTimeoutAPI
+			prompt = "⏱️ <b>MASUKKAN TIMEOUT API CALL (DETIK)</b>\n\nKirimkan angka detik positif (contoh: <code>90</code>):"
+		case "timehand":
+			step = LimitsStepCustomTimeoutHandler
+			prompt = "⏳ <b>MASUKKAN TIMEOUT HANDLER (DETIK)</b>\n\nKirimkan angka detik positif (contoh: <code>120</code>):"
+		case "auditmax":
+			step = LimitsStepCustomMaxAudit
+			prompt = "📜 <b>MASUKKAN BATAS ROTASI AUDIT LOG</b>\n\nKirimkan angka baris log positif (contoh: <code>5000</code>):"
+		case "budget":
+			step = LimitsStepCustomBudget
+			prompt = "💰 <b>MASUKKAN TOKEN BUDGET</b>\n\nKirimkan angka token budget positif (contoh: <code>10000</code>):"
+		}
+		if step != LimitsStepNone {
+			a.limitsUI.SetSessionStep(c.Sender().ID, step)
+			menu := &tele.ReplyMarkup{}
+			btnCancel := menu.Data("❌ Batal", "lim_back_dash")
+			menu.Inline(menu.Row(btnCancel))
+			return c.EditOrSend(prompt, menu, tele.ModeHTML)
+		}
+	}
 	if strings.HasPrefix(data, "lim_mod_set_") {
 		modVal := strings.TrimPrefix(data, "lim_mod_set_")
 		if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {

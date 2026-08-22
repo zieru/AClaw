@@ -661,3 +661,334 @@ func (ui *LimitsUI) HandleSetFooter(c tele.Context) error {
 
 	return c.Reply(fmt.Sprintf("✅ Tampilan footer untuk <code>%s:%s</code> berhasil diatur ke: <b>%s</b>", html.EscapeString(scope), html.EscapeString(scopeID), html.EscapeString(mode)), tele.ModeHTML)
 }
+
+// RenderFooterMenu renders options for footer mode
+func (ui *LimitsUI) RenderFooterMenu(c tele.Context) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+	text := fmt.Sprintf("📊 <b>PILIH TAMPILAN FOOTER (<code>%s:%s</code>)</b>\n\n"+
+		"• <b>Off:</b> Tanpa footer\n"+
+		"• <b>Tokens:</b> Hanya jumlah token\n"+
+		"• <b>Full:</b> Info lengkap (latency, tokens, context, model)", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+
+	menu := &tele.ReplyMarkup{}
+	bOff := menu.Data("❌ Off", "lim_set_val_footer_off")
+	bTok := menu.Data("🪙 Tokens Only", "lim_set_val_footer_tokens")
+	bFull := menu.Data("📊 Full (Lengkap)", "lim_set_val_footer_full")
+	bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+	menu.Inline(
+		menu.Row(bOff, bTok),
+		menu.Row(bFull),
+		menu.Row(bBack),
+	)
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// RenderUploadMenu renders upload size options
+func (ui *LimitsUI) RenderUploadMenu(c tele.Context) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+	text := fmt.Sprintf("📁 <b>ATUR MAX UPLOAD FILE (<code>%s:%s</code>)</b>\n\nPilih batas ukuran file maksimal:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+
+	menu := &tele.ReplyMarkup{}
+	b5 := menu.Data("5 MB", "lim_set_val_upload_5")
+	b10 := menu.Data("10 MB", "lim_set_val_upload_10")
+	b20 := menu.Data("20 MB", "lim_set_val_upload_20")
+	b50 := menu.Data("50 MB", "lim_set_val_upload_50")
+	bCust := menu.Data("✏️ Custom MB", "lim_input_upload")
+	bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+	menu.Inline(
+		menu.Row(b5, b10),
+		menu.Row(b20, b50),
+		menu.Row(bCust, bBack),
+	)
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// RenderTokensMenu renders max token output options
+func (ui *LimitsUI) RenderTokensMenu(c tele.Context) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+	text := fmt.Sprintf("🪙 <b>ATUR MAX OUTPUT TOKENS (<code>%s:%s</code>)</b>\n\nPilih batas token output per respon:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+
+	menu := &tele.ReplyMarkup{}
+	b1k := menu.Data("1,024", "lim_set_val_tokens_1024")
+	b2k := menu.Data("2,048", "lim_set_val_tokens_2048")
+	b4k := menu.Data("4,096", "lim_set_val_tokens_4096")
+	b8k := menu.Data("8,192", "lim_set_val_tokens_8192")
+	bCust := menu.Data("✏️ Custom Tokens", "lim_input_tokens")
+	bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+	menu.Inline(
+		menu.Row(b1k, b2k),
+		menu.Row(b4k, b8k),
+		menu.Row(bCust, bBack),
+	)
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// RenderHistoryMenu renders context history turns options
+func (ui *LimitsUI) RenderHistoryMenu(c tele.Context) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+	text := fmt.Sprintf("💬 <b>ATUR MAX CONTEXT HISTORY TURNS (<code>%s:%s</code>)</b>\n\nPilih jumlah putaran chat yang diingat dalam sesi:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+
+	menu := &tele.ReplyMarkup{}
+	b10 := menu.Data("10 Turns", "lim_set_val_history_10")
+	b20 := menu.Data("20 Turns", "lim_set_val_history_20")
+	b30 := menu.Data("30 Turns", "lim_set_val_history_30")
+	b50 := menu.Data("50 Turns", "lim_set_val_history_50")
+	bCust := menu.Data("✏️ Custom Turns", "lim_input_history")
+	bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+	menu.Inline(
+		menu.Row(b10, b20),
+		menu.Row(b30, b50),
+		menu.Row(bCust, bBack),
+	)
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// RenderCompactionMenu renders auto compaction toggle and threshold options
+func (ui *LimitsUI) RenderCompactionMenu(c tele.Context) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+	pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
+	autoComp := true
+	if pol != nil {
+		autoComp = pol.AutoCompaction
+	}
+	compStatus := "🟢 Aktif (ON)"
+	if !autoComp {
+		compStatus = "🔴 Nonaktif (OFF)"
+	}
+
+	text := fmt.Sprintf("🗜️ <b>ATUR AUTO-COMPACTION (<code>%s:%s</code>)</b>\n\n"+
+		"Status Auto-Compaction: <b>%s</b>\n\nPilih ambang batas (threshold turns) atau toggle status:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID), compStatus)
+
+	menu := &tele.ReplyMarkup{}
+	bTgl := menu.Data("🔘 Toggle ON/OFF", "lim_set_val_compact_toggle")
+	b10 := menu.Data("Threshold 10", "lim_set_val_thresh_10")
+	b15 := menu.Data("Threshold 15", "lim_set_val_thresh_15")
+	b25 := menu.Data("Threshold 25", "lim_set_val_thresh_25")
+	bCust := menu.Data("✏️ Custom Threshold", "lim_input_threshold")
+	bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+	menu.Inline(
+		menu.Row(bTgl),
+		menu.Row(b10, b15),
+		menu.Row(b25, bCust),
+		menu.Row(bBack),
+	)
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// RenderModelMenu renders model override options
+func (ui *LimitsUI) RenderModelMenu(c tele.Context) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+
+	text := fmt.Sprintf("🤖 <b>ATUR MODEL OVERRIDE (<code>%s:%s</code>)</b>\n\n"+
+		"Kirim teks model override (misal: <code>gemini-2.5-flash</code> atau <code>combo_fast</code>) atau pilih tombol reset:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+
+	menu := &tele.ReplyMarkup{}
+	bCust := menu.Data("✏️ Input Nama Model / Combo", "lim_input_model")
+	bReset := menu.Data("🔄 Reset ke Default Provider", "lim_set_val_model_none")
+	bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+	menu.Inline(
+		menu.Row(bCust),
+		menu.Row(bReset),
+		menu.Row(bBack),
+	)
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// RenderTimeoutAPIMenu renders timeout API call options
+func (ui *LimitsUI) RenderTimeoutAPIMenu(c tele.Context) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+	text := fmt.Sprintf("⏱️ <b>ATUR TIMEOUT API CALL (<code>%s:%s</code>)</b>\n\nPilih batas waktu maksimal pemanggilan API AI:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+
+	menu := &tele.ReplyMarkup{}
+	b30 := menu.Data("30 Detik", "lim_set_val_timeapi_30")
+	b60 := menu.Data("60 Detik", "lim_set_val_timeapi_60")
+	b90 := menu.Data("90 Detik", "lim_set_val_timeapi_90")
+	b120 := menu.Data("120 Detik", "lim_set_val_timeapi_120")
+	bCust := menu.Data("✏️ Custom Detik", "lim_input_timeapi")
+	bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+	menu.Inline(
+		menu.Row(b30, b60),
+		menu.Row(b90, b120),
+		menu.Row(bCust, bBack),
+	)
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// RenderTimeoutHandlerMenu renders timeout handler options
+func (ui *LimitsUI) RenderTimeoutHandlerMenu(c tele.Context) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+	text := fmt.Sprintf("⏳ <b>ATUR TIMEOUT HANDLER (<code>%s:%s</code>)</b>\n\nPilih batas waktu total eksekusi handler pesan:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+
+	menu := &tele.ReplyMarkup{}
+	b60 := menu.Data("60 Detik", "lim_set_val_timehand_60")
+	b120 := menu.Data("120 Detik", "lim_set_val_timehand_120")
+	b180 := menu.Data("180 Detik", "lim_set_val_timehand_180")
+	b300 := menu.Data("300 Detik", "lim_set_val_timehand_300")
+	bCust := menu.Data("✏️ Custom Detik", "lim_input_timehand")
+	bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+	menu.Inline(
+		menu.Row(b60, b120),
+		menu.Row(b180, b300),
+		menu.Row(bCust, bBack),
+	)
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// RenderAuditMaxMenu renders audit log rotation limit options
+func (ui *LimitsUI) RenderAuditMaxMenu(c tele.Context) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+	text := fmt.Sprintf("📜 <b>ATUR ROTASI AUDIT LOG (<code>%s:%s</code>)</b>\n\nPilih batas maksimal riwayat log sebelum dirotasi:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+
+	menu := &tele.ReplyMarkup{}
+	b1k := menu.Data("1,000 Baris", "lim_set_val_auditmax_1000")
+	b3k := menu.Data("3,000 Baris", "lim_set_val_auditmax_3000")
+	b5k := menu.Data("5,000 Baris", "lim_set_val_auditmax_5000")
+	b10k := menu.Data("10,000 Baris", "lim_set_val_auditmax_10000")
+	bCust := menu.Data("✏️ Custom Baris", "lim_input_auditmax")
+	bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+	menu.Inline(
+		menu.Row(b1k, b3k),
+		menu.Row(b5k, b10k),
+		menu.Row(bCust, bBack),
+	)
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// RenderBudgetMenu renders token budget options
+func (ui *LimitsUI) RenderBudgetMenu(c tele.Context) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+	text := fmt.Sprintf("💰 <b>ATUR TOKEN BUDGET (<code>%s:%s</code>)</b>\n\nPilih batas akumulasi token budget:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+
+	menu := &tele.ReplyMarkup{}
+	b0 := menu.Data("♾️ Unlimited (0)", "lim_set_val_budget_0")
+	b10k := menu.Data("10,000", "lim_set_val_budget_10000")
+	b50k := menu.Data("50,000", "lim_set_val_budget_50000")
+	b100k := menu.Data("100,000", "lim_set_val_budget_100000")
+	bCust := menu.Data("✏️ Custom Tokens", "lim_input_budget")
+	bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+	menu.Inline(
+		menu.Row(b0, b10k),
+		menu.Row(b50k, b100k),
+		menu.Row(bCust, bBack),
+	)
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// HandleSetVal applies setting change and refreshes dashboard
+func (ui *LimitsUI) HandleSetVal(c tele.Context, param, val string) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+	pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
+	if pol == nil {
+		pol = &storage.PolicyRecord{
+			Scope:               sess.Scope,
+			ScopeID:             sess.ScopeID,
+			MaxUploadFileMB:     10,
+			MaxTokens:           2048,
+			MaxHistoryTurns:     20,
+			AutoCompaction:      true,
+			CompactionThreshold: 15,
+			FooterMode:          "off",
+			MaxAuditLogs:        5000,
+		}
+	}
+
+	switch param {
+	case "footer":
+		pol.FooterMode = val
+	case "upload":
+		if n, err := strconv.Atoi(val); err == nil {
+			pol.MaxUploadFileMB = n
+		}
+	case "tokens":
+		if n, err := strconv.Atoi(val); err == nil {
+			pol.MaxTokens = n
+		}
+	case "history":
+		if n, err := strconv.Atoi(val); err == nil {
+			pol.MaxHistoryTurns = n
+		}
+	case "compact":
+		if val == "toggle" {
+			pol.AutoCompaction = !pol.AutoCompaction
+		}
+	case "thresh":
+		if n, err := strconv.Atoi(val); err == nil {
+			pol.CompactionThreshold = n
+		}
+	case "model":
+		if val == "none" {
+			pol.ModelOverride = ""
+		} else {
+			pol.ModelOverride = val
+		}
+	case "timeapi":
+		if n, err := strconv.Atoi(val); err == nil {
+			pol.TimeoutAPISeconds = n
+		}
+	case "timehand":
+		if n, err := strconv.Atoi(val); err == nil {
+			pol.TimeoutHandlerSec = n
+		}
+	case "auditmax":
+		if n, err := strconv.Atoi(val); err == nil {
+			pol.MaxAuditLogs = n
+		}
+	case "budget":
+		if n, err := strconv.Atoi(val); err == nil {
+			pol.TokenBudget = n
+		}
+	}
+
+	_ = ui.db.SavePolicy(pol)
+	return ui.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+}
+
+// HandleRotateAudit executes manual pruning of audit logs
+func (ui *LimitsUI) HandleRotateAudit(c tele.Context) error {
+	sess, _ := ui.GetSession(c.Sender().ID)
+	scope, scopeID := "global", "system"
+	if sess != nil && sess.Scope != "" {
+		scope, scopeID = sess.Scope, sess.ScopeID
+	}
+	pol, _ := ui.db.GetPolicy(scope, scopeID)
+	maxLogs := 5000
+	if pol != nil && pol.MaxAuditLogs > 0 {
+		maxLogs = pol.MaxAuditLogs
+	}
+	_, _ = ui.db.RotateAuditLogs(maxLogs)
+	_ = c.Reply("🧹 Pemangkasan / rotasi log audit berhasil dijalankan!", tele.ModeHTML)
+	return ui.RenderScopeLimitsDashboard(c, scope, scopeID)
+}
