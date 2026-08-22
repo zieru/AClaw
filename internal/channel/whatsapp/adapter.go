@@ -15,6 +15,7 @@ import (
 	"goassistant/internal/agent"
 	"goassistant/internal/config"
 	"goassistant/internal/storage"
+	"goassistant/internal/waformat"
 
 	"github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
@@ -253,8 +254,13 @@ func (a *NativeAdapter) SendMessage(targetID, text string) error {
 		return fmt.Errorf("invalid WhatsApp JID %s: %w", targetID, err)
 	}
 
+	formattedText := waformat.MarkdownToWhatsApp(text)
+	if formattedText == "" {
+		formattedText = text
+	}
+
 	msg := &waE2E.Message{
-		Conversation: proto.String(text),
+		Conversation: proto.String(formattedText),
 	}
 
 	_, err = a.client.SendMessage(context.Background(), targetJID, msg)
@@ -277,6 +283,8 @@ func (a *NativeAdapter) SendFile(targetID, filePath, caption string) error {
 		return fmt.Errorf("gagal membaca file %s: %w", filePath, err)
 	}
 
+	formattedCaption := waformat.MarkdownToWhatsApp(caption)
+
 	mimeType := http.DetectContentType(data)
 	ext := strings.ToLower(filepath.Ext(filePath))
 	isImage := strings.HasPrefix(mimeType, "image/") || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp"
@@ -288,7 +296,7 @@ func (a *NativeAdapter) SendFile(targetID, filePath, caption string) error {
 		}
 		msg := &waE2E.Message{
 			ImageMessage: &waE2E.ImageMessage{
-				Caption:       proto.String(caption),
+				Caption:       proto.String(formattedCaption),
 				Mimetype:      proto.String(mimeType),
 				URL:           &uploaded.URL,
 				DirectPath:    &uploaded.DirectPath,
@@ -309,7 +317,7 @@ func (a *NativeAdapter) SendFile(targetID, filePath, caption string) error {
 	fileName := filepath.Base(filePath)
 	msg := &waE2E.Message{
 		DocumentMessage: &waE2E.DocumentMessage{
-			Caption:       proto.String(caption),
+			Caption:       proto.String(formattedCaption),
 			Title:         proto.String(fileName),
 			FileName:      proto.String(fileName),
 			Mimetype:      proto.String(mimeType),
@@ -367,7 +375,15 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 	isGroup := msg.Info.IsGroup
 
 	chatID := chatJID.String()
-	senderID := senderJID.User
+
+	// Resolve real JIDs (in case WhatsApp uses LID instead of Phone Number)
+	realSenderJID := a.resolveRealJID(senderJID)
+	realChatJID := a.resolveRealJID(chatJID)
+
+	senderID := realSenderJID.User
+	if senderID == "" {
+		senderID = senderJID.User
+	}
 	if senderID == "" {
 		senderID = senderJID.String()
 	}
@@ -381,7 +397,7 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 	cleanText := strings.TrimSpace(text)
 	lowerText := strings.ToLower(cleanText)
 
-	log.Printf("📩 [Channel-WA] Pesan masuk dari %s (%s) [Group: %v]: '%s'", senderJID.String(), chatID, isGroup, cleanText)
+	log.Printf("📩 [Channel-WA] Pesan masuk dari %s (%s) [Resolved: %s] [Group: %v]: '%s'", senderJID.String(), chatID, realSenderJID.String(), isGroup, cleanText)
 
 	// 2. Policy Checks
 	a.mu.RLock()
@@ -398,7 +414,7 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 			allowed := false
 			for _, g := range st.AllowedGroups {
 				cleanG := strings.TrimSpace(g)
-				if strings.EqualFold(cleanG, chatID) || strings.EqualFold(cleanG, chatJID.User) || strings.Contains(chatID, cleanG) {
+				if strings.EqualFold(cleanG, chatID) || strings.EqualFold(cleanG, chatJID.User) || strings.EqualFold(cleanG, realChatJID.User) || strings.Contains(chatID, cleanG) {
 					allowed = true
 					break
 				}
@@ -424,13 +440,13 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 		if st.DMPolicy == DMPolicyTrusted {
 			trusted := false
 			for _, num := range st.TrustedNumbers {
-				if isPhoneMatching(num, senderJID, chatJID) {
+				if a.isPhoneMatching(num, senderJID, chatJID) {
 					trusted = true
 					break
 				}
 			}
 			if !trusted {
-				log.Printf("🛡️ [Channel-WA] Pesan DM dari %s (%s) diabaikan karena tidak terdaftar di Trusted List (%v)", senderJID.String(), chatID, st.TrustedNumbers)
+				log.Printf("🛡️ [Channel-WA] Pesan DM dari %s (%s) [Resolved: %s] diabaikan karena tidak terdaftar di Trusted List (%v)", senderJID.String(), chatID, realSenderJID.String(), st.TrustedNumbers)
 				return // Sender not in trusted list
 			}
 		}
@@ -523,6 +539,32 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 		defer func() {
 			a.activeTasks.Delete(chatID)
 			cancel()
+		}()
+
+		// Continuous typing presence indicator
+		presenceStop := make(chan struct{})
+		if a.client != nil && a.client.IsConnected() {
+			_ = a.client.SendChatPresence(context.Background(), chatJID, waTypes.ChatPresenceComposing, waTypes.ChatPresenceMediaText)
+			go func() {
+				ticker := time.NewTicker(3500 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						if a.client != nil && a.client.IsConnected() {
+							_ = a.client.SendChatPresence(context.Background(), chatJID, waTypes.ChatPresenceComposing, waTypes.ChatPresenceMediaText)
+						}
+					case <-presenceStop:
+						if a.client != nil && a.client.IsConnected() {
+							_ = a.client.SendChatPresence(context.Background(), chatJID, waTypes.ChatPresencePaused, waTypes.ChatPresenceMediaText)
+						}
+						return
+					}
+				}
+			}()
+		}
+		defer func() {
+			close(presenceStop)
 		}()
 
 		resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{
@@ -627,6 +669,25 @@ func getContextInfo(m *waE2E.Message) *waE2E.ContextInfo {
 	return nil
 }
 
+func (a *NativeAdapter) resolveRealJID(jid waTypes.JID) waTypes.JID {
+	if jid.IsEmpty() {
+		return jid
+	}
+	if jid.Server == waTypes.HiddenUserServer || jid.Server == "lid" {
+		if a.device != nil {
+			if altJID, err := a.device.GetAltJID(context.Background(), jid); err == nil && !altJID.IsEmpty() {
+				return altJID
+			}
+			if a.device.LIDs != nil {
+				if pnJID, err := a.device.LIDs.GetPNForLID(context.Background(), jid); err == nil && !pnJID.IsEmpty() {
+					return pnJID
+				}
+			}
+		}
+	}
+	return jid
+}
+
 func normalizePhone(s string) string {
 	var digits strings.Builder
 	for _, r := range s {
@@ -641,17 +702,24 @@ func normalizePhone(s string) string {
 	return str
 }
 
-func isPhoneMatching(trustedPattern string, senderJID, chatJID waTypes.JID) bool {
+func (a *NativeAdapter) isPhoneMatching(trustedPattern string, senderJID, chatJID waTypes.JID) bool {
 	normTrusted := normalizePhone(trustedPattern)
 	if normTrusted == "" {
 		return false
 	}
 
+	realSender := a.resolveRealJID(senderJID)
+	realChat := a.resolveRealJID(chatJID)
+
 	candidates := []string{
 		normalizePhone(senderJID.User),
 		normalizePhone(senderJID.ToNonAD().User),
+		normalizePhone(realSender.User),
+		normalizePhone(realSender.ToNonAD().User),
 		normalizePhone(chatJID.User),
 		normalizePhone(chatJID.ToNonAD().User),
+		normalizePhone(realChat.User),
+		normalizePhone(realChat.ToNonAD().User),
 	}
 
 	for _, c := range candidates {
@@ -661,7 +729,8 @@ func isPhoneMatching(trustedPattern string, senderJID, chatJID waTypes.JID) bool
 	}
 
 	cleanTrusted := strings.TrimPrefix(strings.TrimSpace(trustedPattern), "+")
-	if strings.Contains(senderJID.String(), cleanTrusted) || strings.Contains(chatJID.String(), cleanTrusted) {
+	if strings.Contains(senderJID.String(), cleanTrusted) || strings.Contains(chatJID.String(), cleanTrusted) ||
+		strings.Contains(realSender.String(), cleanTrusted) || strings.Contains(realChat.String(), cleanTrusted) {
 		return true
 	}
 
