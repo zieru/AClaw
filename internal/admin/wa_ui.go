@@ -87,6 +87,7 @@ func (ui *WhatsAppUI) RenderWADashboard(c tele.Context, ch *storage.ChannelRecor
 
 	menu := &tele.ReplyMarkup{}
 	btnQR := menu.Data("📲 Scan / Pairing QR", fmt.Sprintf("chan_wa_qr_%s", ch.ID))
+	btnPairCode := menu.Data("🔢 Tautkan Kode 8-Digit", fmt.Sprintf("chan_wa_paircode_prompt_%s", ch.ID))
 	btnDM := menu.Data("💬 DM Policy", fmt.Sprintf("chan_wa_dm_menu_%s", ch.ID))
 	btnGrp := menu.Data("👥 Group Policy", fmt.Sprintf("chan_wa_grp_menu_%s", ch.ID))
 	btnMen := menu.Data("🎯 Mention Mode", fmt.Sprintf("chan_wa_men_menu_%s", ch.ID))
@@ -97,9 +98,9 @@ func (ui *WhatsAppUI) RenderWADashboard(c tele.Context, ch *storage.ChannelRecor
 	btnBack := menu.Data("⬅️ Kembali", "chan_wiz_start")
 
 	menu.Inline(
-		menu.Row(btnQR, btnDM),
-		menu.Row(btnGrp, btnMen),
-		menu.Row(btnLists),
+		menu.Row(btnQR, btnPairCode),
+		menu.Row(btnDM, btnGrp),
+		menu.Row(btnMen, btnLists),
 		menu.Row(btnTools, btnPol),
 		menu.Row(btnDel, btnBack),
 	)
@@ -133,10 +134,13 @@ func (ui *WhatsAppUI) SendQRCodePhoto(c tele.Context, channelID string) error {
 
 	qrBytes, _ := adapter.GetLastQR()
 	if len(qrBytes) == 0 {
-		return c.Reply("⏳ Sedang meminta QR Code ke server WhatsApp...\nSilakan klik tombol <b>🔄 Refresh QR</b> dalam beberapa detik.", &tele.ReplyMarkup{
+		return c.Reply("⏳ Sedang meminta QR Code ke server WhatsApp...\nSilakan klik tombol <b>🔄 Refresh QR</b> dalam beberapa detik atau gunakan opsi <b>🔢 Tautkan via Nomor HP</b>.", &tele.ReplyMarkup{
 			InlineKeyboard: [][]tele.InlineButton{
 				{
 					{Text: "🔄 Refresh QR", Data: fmt.Sprintf("chan_wa_qr_%s", channelID)},
+					{Text: "🔢 Tautkan via No HP", Data: fmt.Sprintf("chan_wa_paircode_prompt_%s", channelID)},
+				},
+				{
 					{Text: "⬅️ Dashboard", Data: fmt.Sprintf("chan_ed_pick_%s", channelID)},
 				},
 			},
@@ -145,15 +149,42 @@ func (ui *WhatsAppUI) SendQRCodePhoto(c tele.Context, channelID string) error {
 
 	photo := &tele.Photo{
 		File:    tele.FromReader(bytes.NewReader(qrBytes)),
-		Caption: fmt.Sprintf("📲 <b>SCAN QR CODE WHATSAPP</b>\n\nChannel: <b>%s</b> (<code>%s</code>)\n\n1. Buka aplikasi WhatsApp di HP Anda.\n2. Buka <b>Pengaturan / Setelan</b> ➡️ <b>Perangkat Tertaut (Linked Devices)</b>.\n3. Ketuk <b>Tautkan Perangkat</b> lalu scan QR Code di atas.\n\n<i>Klik 'Refresh QR' jika QR code kadaluarsa.</i>", html.EscapeString(ch.Name), html.EscapeString(ch.ID)),
+		Caption: fmt.Sprintf("📲 <b>SCAN QR CODE WHATSAPP</b>\n\nChannel: <b>%s</b> (<code>%s</code>)\n\n1. Buka aplikasi WhatsApp di HP Anda.\n2. Buka <b>Pengaturan / Setelan</b> ➡️ <b>Perangkat Tertaut (Linked Devices)</b>.\n3. Ketuk <b>Tautkan Perangkat</b> lalu scan QR Code di atas.\n\n<i>Klik 'Refresh QR' jika QR code kadaluarsa atau gunakan tombol 'Tautkan via No HP'.</i>", html.EscapeString(ch.Name), html.EscapeString(ch.ID)),
 	}
 
 	menu := &tele.ReplyMarkup{}
 	btnRefresh := menu.Data("🔄 Refresh QR", fmt.Sprintf("chan_wa_qr_%s", channelID))
+	btnPairCode := menu.Data("🔢 Tautkan via No HP", fmt.Sprintf("chan_wa_paircode_prompt_%s", channelID))
 	btnDash := menu.Data("⬅️ Kembali ke Dashboard", fmt.Sprintf("chan_ed_pick_%s", channelID))
-	menu.Inline(menu.Row(btnRefresh, btnDash))
+	menu.Inline(
+		menu.Row(btnRefresh, btnPairCode),
+		menu.Row(btnDash),
+	)
 
 	return c.Send(photo, menu, tele.ModeHTML)
+}
+
+// PromptPairCode prompts user for their phone number to generate an 8-digit pairing code
+func (ui *WhatsAppUI) PromptPairCode(c tele.Context, channelID string) error {
+	ch, err := ui.db.GetChannel(channelID)
+	if err != nil || ch == nil {
+		return c.Reply("❌ Channel tidak ditemukan.")
+	}
+
+	ui.channelUI.SetSessionStep(c.Sender().ID, channelID, ChannelStepPairPhoneCode)
+
+	text := fmt.Sprintf("🔢 <b>TAUTKAN WHATSAPP DENGAN NOMOR TELEPON (%s)</b>\n\n"+
+		"Kirimkan nomor WhatsApp yang ingin ditautkan (dengan kode negara):\n\n"+
+		"<b>Contoh:</b>\n"+
+		"<code>6281234567890</code>\n"+
+		"<code>628987654321</code>\n\n"+
+		"<i>Sistem akan meminta kode 8 digit resmi dari WhatsApp yang dapat langsung Anda masukkan di aplikasi WhatsApp di HP.</i>", html.EscapeString(ch.Name))
+
+	menu := &tele.ReplyMarkup{}
+	btnCancel := menu.Data("❌ Batal", fmt.Sprintf("chan_ed_pick_%s", channelID))
+	menu.Inline(menu.Row(btnCancel))
+
+	return c.EditOrSend(text, menu, tele.ModeHTML)
 }
 
 // RenderDMPolicyMenu shows options to configure DM access

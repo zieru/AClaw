@@ -23,6 +23,7 @@ const (
 	ChannelStepEditIdentifier
 	ChannelStepAddTrustedNumbers
 	ChannelStepAddAllowedGroups
+	ChannelStepPairPhoneCode
 )
 
 type ChannelSession struct {
@@ -488,6 +489,48 @@ func (ui *ChannelUI) HandleTextMessage(c tele.Context) (bool, error) {
 		ui.CancelWizard(userID)
 		_ = c.Reply("✅ ID Grup berhasil ditambahkan ke Whitelist WhatsApp!", tele.ModeHTML)
 		return true, ui.waUI.RenderWhitelistManagerMenu(c, ch.ID)
+
+	case ChannelStepPairPhoneCode:
+		ch, err := ui.db.GetChannel(sess.EditingChannelID)
+		if err != nil || ch == nil {
+			ui.CancelWizard(userID)
+			return true, c.Reply("❌ Channel tidak ditemukan.")
+		}
+		mgr := whatsapp.GetManager()
+		if mgr == nil {
+			ui.CancelWizard(userID)
+			return true, c.Reply("❌ WhatsApp Manager belum aktif.")
+		}
+		adapter, err := mgr.CreateOrGetAdapter(ch)
+		if err != nil {
+			ui.CancelWizard(userID)
+			return true, c.Reply(fmt.Sprintf("❌ Gagal menginisialisasi adapter WA: %v", err))
+		}
+
+		code, err := adapter.PairPhone(msgText)
+		if err != nil {
+			ui.CancelWizard(userID)
+			return true, c.Reply(fmt.Sprintf("❌ Gagal meminta pairing code: %v\n\nPastikan nomor WA sudah benar dan memiliki awalan kode negara (contoh: <code>628123456789</code>).", html.EscapeString(err.Error())), tele.ModeHTML)
+		}
+
+		ui.CancelWizard(userID)
+
+		text := fmt.Sprintf("🎉 <b>KODE PAIRING WHATSAPP (8-DIGIT)</b>\n\n"+
+			"Nomor: <code>%s</code>\n\n"+
+			"🔑 Kode Anda:\n<b><code>%s</code></b>\n\n"+
+			"<b>Langkah Aktivasi di HP:</b>\n"+
+			"1. Buka aplikasi <b>WhatsApp</b> di HP.\n"+
+			"2. Buka <b>Setelan / Pengaturan</b> ➡️ <b>Perangkat Tertaut (Linked Devices)</b>.\n"+
+			"3. Ketuk <b>Tautkan Perangkat</b>.\n"+
+			"4. Di bawah layar scanner, ketuk <b>'Tautkan dengan nomor telepon saja'</b> (<i>Link with phone number instead</i>).\n"+
+			"5. Masukkan 8 karakter kode di atas: <b><code>%s</code></b>",
+			html.EscapeString(msgText), code, code)
+
+		menu := &tele.ReplyMarkup{}
+		btnDash := menu.Data("⬅️ Ke Dashboard WA", fmt.Sprintf("chan_ed_pick_%s", ch.ID))
+		menu.Inline(menu.Row(btnDash))
+
+		return true, c.Reply(text, menu, tele.ModeHTML)
 	}
 
 	return false, nil

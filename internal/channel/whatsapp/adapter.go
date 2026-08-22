@@ -46,6 +46,8 @@ type NativeAdapter struct {
 }
 
 func NewNativeAdapter(channelID, name string, device *store.Device, settings WhatsAppSettings, orch *agent.Orchestrator, db *storage.DB) *NativeAdapter {
+	store.SetOSInfo("Chrome (Windows)", [3]uint32{128, 0, 0})
+
 	adapter := &NativeAdapter{
 		channelID:    channelID,
 		name:         name,
@@ -145,6 +147,7 @@ func (a *NativeAdapter) SetOnLoginSuccess(cb func()) {
 }
 
 // StartPairing initiates the QR code generation loop
+// StartPairing initiates the QR code generation loop
 func (a *NativeAdapter) StartPairing() error {
 	a.mu.Lock()
 	if a.cancelQR != nil {
@@ -155,13 +158,14 @@ func (a *NativeAdapter) StartPairing() error {
 	a.isPairing = true
 	a.mu.Unlock()
 
-	qrChan, err := a.client.GetQRChannel(ctx)
-	if err != nil {
-		if !a.client.IsConnected() {
-			_ = a.client.Connect()
-			qrChan, err = a.client.GetQRChannel(ctx)
+	// Ensure client is connected before requesting QR channel
+	if !a.client.IsConnected() {
+		if err := a.client.Connect(); err != nil {
+			return fmt.Errorf("gagal menghubungkan ke server WhatsApp: %w", err)
 		}
 	}
+
+	qrChan, err := a.client.GetQRChannel(ctx)
 	if err != nil {
 		return fmt.Errorf("gagal mendapatkan QR channel: %w", err)
 	}
@@ -169,8 +173,8 @@ func (a *NativeAdapter) StartPairing() error {
 	go func() {
 		for item := range qrChan {
 			if item.Event == "code" {
-				// Generate QR Code PNG
-				pngBytes, err := qrcode.Encode(item.Code, qrcode.Medium, 300)
+				// Generate QR Code PNG with good resolution & border
+				pngBytes, err := qrcode.Encode(item.Code, qrcode.Medium, 400)
 				a.mu.Lock()
 				if err == nil {
 					a.lastQRBytes = pngBytes
@@ -203,10 +207,25 @@ func (a *NativeAdapter) StartPairing() error {
 		}
 	}()
 
-	if !a.client.IsConnected() {
-		_ = a.client.Connect()
-	}
 	return nil
+}
+
+// PairPhone requests an 8-character pairing code for linking via phone number
+func (a *NativeAdapter) PairPhone(phone string) (string, error) {
+	if !a.client.IsConnected() {
+		if err := a.client.Connect(); err != nil {
+			return "", fmt.Errorf("gagal menghubungkan ke WhatsApp: %w", err)
+		}
+	}
+	cleanPhone := strings.TrimPrefix(strings.TrimSpace(phone), "+")
+	cleanPhone = strings.ReplaceAll(cleanPhone, " ", "")
+	cleanPhone = strings.ReplaceAll(cleanPhone, "-", "")
+
+	code, err := a.client.PairPhone(context.Background(), cleanPhone, true, whatsmeow.PairClientChrome, "Chrome (Windows)")
+	if err != nil {
+		return "", fmt.Errorf("gagal meminta pairing code: %w", err)
+	}
+	return code, nil
 }
 
 // Logout unlinks and deletes session

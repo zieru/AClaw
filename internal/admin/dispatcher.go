@@ -274,6 +274,10 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		chID := strings.TrimPrefix(data, "chan_wa_qr_")
 		return a.channelUI.GetWhatsAppUI().SendQRCodePhoto(c, chID)
 	}
+	if strings.HasPrefix(data, "chan_wa_paircode_prompt_") {
+		chID := strings.TrimPrefix(data, "chan_wa_paircode_prompt_")
+		return a.channelUI.GetWhatsAppUI().PromptPairCode(c, chID)
+	}
 	if strings.HasPrefix(data, "chan_wa_dm_menu_") {
 		chID := strings.TrimPrefix(data, "chan_wa_dm_menu_")
 		return a.channelUI.GetWhatsAppUI().RenderDMPolicyMenu(c, chID)
