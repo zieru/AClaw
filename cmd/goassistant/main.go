@@ -26,7 +26,6 @@ import (
 	"goassistant/internal/storage"
 	"goassistant/internal/tools"
 	"goassistant/internal/version"
-	tele "gopkg.in/telebot.v3"
 )
 
 func main() {
@@ -150,7 +149,7 @@ func main() {
 				inst = provider.NewGeminiProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
 			case "anthropic":
 				inst = provider.NewAnthropicProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
-			case "opencode", "opencode_free", "free_router", "free_openai", "free_gemini", "opencodefree", "free":
+			case "free_router", "free_openai", "free_gemini", "opencodefree", "free":
 				inst = provider.NewFreeOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
 			default:
 				inst = provider.NewOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
@@ -229,10 +228,8 @@ func main() {
 	defer scheduler.Stop()
 
 	// 10. Start Admin Control Plane Telegram Bot
-	var adminBot *admin.AdminBot
 	if cfg.AdminTelegram.BotToken != "" {
-		var err error
-		adminBot, err = admin.NewAdminBot(
+		adminBot, err := admin.NewAdminBot(
 			cfg.AdminTelegram.BotToken,
 			cfg,
 			db,
@@ -256,25 +253,7 @@ func main() {
 		log.Println("💡 Anda dapat menyetel token bot Telegram di configs/default_config.yaml lalu jalankan kembali daemon.")
 	}
 
-	// 11. Initialize OAuth Web Bridge (Gemini Web Google Login)
-	httpPort := cfg.HTTPServer.Port
-	if httpPort <= 0 {
-		httpPort = 8080
-	}
-	oauthOnSuccess := func(userID int64, provID string, authData string) error {
-		if adminBot != nil && adminBot.Bot() != nil && userID != 0 {
-			targetUser := &tele.User{ID: userID}
-			msg := "🎉 <b>AUTENTIKASI GOOGLE BERHASIL!</b>\n\n" +
-				"Provider <b>Gemini Web (Google Auth)</b> telah berhasil ditautkan dan aktif di sistem.\n" +
-				"Sesi Anda sudah tersimpan. Anda dapat langsung mulai chatting menggunakan model <code>gemini-web-pro</code>."
-			_, err := adminBot.Bot().Send(targetUser, msg, tele.ModeHTML)
-			return err
-		}
-		return nil
-	}
-	goassisthttp.InitOAuthManager(db, provMgr, httpPort, "localhost", oauthOnSuccess)
-
-	// 12. Start GoAssist HTTP API Server
+	// 11. Start GoAssist HTTP API Server
 	var httpServer *goassisthttp.Server
 	if cfg.HTTPServer.Enabled {
 		readTimeout := time.Duration(cfg.HTTPServer.ReadTimeoutSeconds) * time.Second

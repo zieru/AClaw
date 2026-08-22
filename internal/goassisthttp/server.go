@@ -77,22 +77,6 @@ func NewServer(port int, endpointsFile string, readTimeout, writeTimeout time.Du
 		fmt.Fprintf(w, `{"status":"ok","time":"%s"}`, time.Now().Format(time.RFC3339))
 	})
 
-	// 4. Register OAuth routes for Gemini Web & Google Authentication
-	mux.HandleFunc("/auth/gemini/login", func(w http.ResponseWriter, r *http.Request) {
-		if globalOAuthMgr != nil {
-			globalOAuthMgr.handleGeminiLogin(w, r)
-		} else {
-			http.Error(w, "OAuth Bridge belum diinisialisasi.", http.StatusServiceUnavailable)
-		}
-	})
-	mux.HandleFunc("/auth/gemini/callback", func(w http.ResponseWriter, r *http.Request) {
-		if globalOAuthMgr != nil {
-			globalOAuthMgr.handleGeminiCallback(w, r)
-		} else {
-			http.Error(w, "OAuth Bridge belum diinisialisasi.", http.StatusServiceUnavailable)
-		}
-	})
-
 	serverAddr := fmt.Sprintf(":%d", port)
 	srv := &http.Server{
 		Addr:         serverAddr,

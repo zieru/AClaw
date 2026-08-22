@@ -690,18 +690,10 @@ func (ui *ProviderUI) syncProviderToManager(p *storage.ProviderRecord) {
 
 	var inst provider.Provider
 	switch p.Type {
-	case "gemini_web", "gemini_scrape":
-		authData := p.APIKey
-		if len(keys) > 0 {
-			authData = strings.Join(keys, "; ")
-		}
-		inst = provider.NewGeminiWebProvider(p.Name, authData, p.DefaultModel, models)
 	case "gemini":
 		inst = provider.NewGeminiProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
 	case "anthropic":
 		inst = provider.NewAnthropicProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
-	case "opencode", "opencode_free", "free_router", "free_openai", "free_gemini", "opencodefree", "free":
-		inst = provider.NewFreeOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
 	default: // 9router, openai, groq, deepseek, ollama, custom
 		inst = provider.NewOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
 	}

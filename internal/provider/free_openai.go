@@ -716,18 +716,6 @@ func getBuiltInFreeEndpoints() []*FreeEndpoint {
 		},
 		// --- Community Free Endpoints (OpenAI-compatible format) ---
 		{
-			ID:            "opencode",
-			Name:          "OpenCode AI (opencode.ai)",
-			BaseURL:       "https://api.opencode.ai/v1",
-			DefaultModel:  "gpt-4o-mini",
-			Models:        []string{"gpt-4o-mini", "gpt-4o", "claude-3-5-sonnet", "deepseek-chat", "deepseek-reasoner", "qwen-2.5-coder-32b"},
-			IsActive:      true, // Zero-auth, ready out-of-the-box
-			Priority:      1,
-			MaxRPM:        30,
-			SupportsTools: true,
-			SupportsStream: true,
-		},
-		{
 			ID:            "opencodefree",
 			Name:          "OpenCodeFree",
 			BaseURL:       "https://api.opencodefree.com/v1",
