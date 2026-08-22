@@ -67,9 +67,13 @@ func Open(dbPath string) (*DB, error) {
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN thinking_enabled INTEGER NOT NULL DEFAULT 1")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN thinking_display TEXT NOT NULL DEFAULT 'full'")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN timeout_api_seconds INTEGER NOT NULL DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN timeout_handler_seconds INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN max_audit_logs INTEGER NOT NULL DEFAULT 5000")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN token_budget INTEGER NOT NULL DEFAULT 0")
+
+	// Ensure default global policy exists and has footer_mode 'full' by default
+	_, _ = db.Exec("INSERT OR IGNORE INTO channel_policies (id, scope, scope_id, footer_mode, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold) VALUES ('global', 'global', 'system', 'full', 10, 2048, 20, 1, 15)")
+	// Ensure any stale non-global policies with default 'off' don't override global
+	_, _ = db.Exec("UPDATE channel_policies SET footer_mode = '' WHERE scope != 'global' AND footer_mode = 'off'")
 
 	return &DB{db: db}, nil
 }
@@ -249,7 +253,7 @@ func (d *DB) GetPolicy(scope, scopeID string) (*PolicyRecord, error) {
 	var autoCompInt, proxyPoolInt, streamingInt, thinkingInt int
 	err := d.db.QueryRow(`
 		SELECT id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, 
-		       model_override, COALESCE(footer_mode, 'off'), COALESCE(token_saver_mode, 'auto'), COALESCE(proxy_pool_enabled, 1),
+		       model_override, COALESCE(footer_mode, ''), COALESCE(token_saver_mode, 'auto'), COALESCE(proxy_pool_enabled, 1),
 		       COALESCE(streaming_enabled, 1), COALESCE(thinking_enabled, 1), COALESCE(thinking_display, 'full'),
 		       COALESCE(timeout_api_seconds, 0), COALESCE(timeout_handler_seconds, 0), COALESCE(max_audit_logs, 5000), COALESCE(token_budget, 0),
 		       updated_at 
@@ -265,6 +269,9 @@ func (d *DB) GetPolicy(scope, scopeID string) (*PolicyRecord, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if p.Scope == "global" && p.FooterMode == "" {
+		p.FooterMode = "full"
 	}
 	p.AutoCompaction = autoCompInt == 1
 	p.ProxyPoolEnabled = proxyPoolInt == 1
@@ -345,7 +352,7 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 		AutoCompaction:      true,
 		CompactionThreshold: 15,
 		ModelOverride:       "",
-		FooterMode:          "off",
+		FooterMode:          "full",
 		TokenSaverMode:      "auto",
 		ProxyPoolEnabled:    true,
 		StreamingEnabled:    true,
@@ -420,7 +427,7 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 			if chPol.ModelOverride != "" {
 				res.ModelOverride = chPol.ModelOverride
 			}
-			if chPol.FooterMode != "" {
+			if chPol.FooterMode != "" && chPol.FooterMode != "inherit" {
 				res.FooterMode = chPol.FooterMode
 			}
 			if chPol.TokenSaverMode != "" {
@@ -466,7 +473,7 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 			if chatPol.ModelOverride != "" {
 				res.ModelOverride = chatPol.ModelOverride
 			}
-			if chatPol.FooterMode != "" {
+			if chatPol.FooterMode != "" && chatPol.FooterMode != "inherit" {
 				res.FooterMode = chatPol.FooterMode
 			}
 			if chatPol.TokenSaverMode != "" {

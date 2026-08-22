@@ -18,9 +18,9 @@ func TestStorageAndPolicyResolver(t *testing.T) {
 	defer db.Close()
 	defer os.Remove(dbPath)
 
-	// 1. Test Default Policy Resolution
+	// 1. Test Default Policy Resolution (Default global footer is now 'full')
 	pol := db.GetResolvedPolicy("chan_tg", "chat_group_1")
-	if pol.MaxUploadFileMB != 10 || pol.MaxTokens != 2048 || !pol.AutoCompaction || pol.FooterMode != "off" {
+	if pol.MaxUploadFileMB != 10 || pol.MaxTokens != 2048 || !pol.AutoCompaction || pol.FooterMode != "full" {
 		t.Fatalf("unexpected default policy: %+v", pol)
 	}
 
