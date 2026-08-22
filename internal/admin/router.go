@@ -209,6 +209,7 @@ func (a *AdminBot) registerRoutes() {
 
 	// Wizard Type Selection Callbacks
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_9router"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "9router") })
+	a.bot.Handle(&tele.Btn{Unique: "wiz_type_opencode"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "opencode") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_openai"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "openai") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_deepseek"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "deepseek") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_groq"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "groq") })
@@ -218,6 +219,7 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_ollama"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "ollama") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_custom"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "custom") })
 	a.bot.Handle("/gemini_login", func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "gemini_web") })
+	a.bot.Handle("/opencode", func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "opencode") })
 
 	// Wizard Model Choice Callbacks (0..15)
 	for i := 0; i <= 15; i++ {

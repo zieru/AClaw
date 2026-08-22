@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"goassistant/internal/goassisthttp"
 	"goassistant/internal/provider"
 	"goassistant/internal/proxy"
 	"goassistant/internal/storage"
@@ -81,22 +82,23 @@ func (w *ProviderWizard) StartWizard(c tele.Context) error {
 
 	menu := &tele.ReplyMarkup{}
 	btn9Router := menu.Data("⚡ 9Router Gateway", "wiz_type_9router")
+	btnOpenCode := menu.Data("💻 OpenCode (Zero-Auth)", "wiz_type_opencode")
 	btnOpenAI := menu.Data("🟢 OpenAI Official", "wiz_type_openai")
 	btnDeepSeek := menu.Data("🤖 DeepSeek Official", "wiz_type_deepseek")
 	btnGroq := menu.Data("🚀 Groq (Llama 3.3)", "wiz_type_groq")
 	btnGemini := menu.Data("✨ Google Gemini", "wiz_type_gemini")
-	btnGeminiWeb := menu.Data("🌐 Gemini Web (Scrape)", "wiz_type_gemini_web")
+	btnGeminiWeb := menu.Data("🌐 Gemini Web (Google Auth)", "wiz_type_gemini_web")
 	btnClaude := menu.Data("🧠 Anthropic Claude", "wiz_type_anthropic")
 	btnOllama := menu.Data("🦙 Ollama Local", "wiz_type_ollama")
 	btnCustom := menu.Data("⚙️ Custom Endpoint", "wiz_type_custom")
 	btnCancel := menu.Data("❌ Batal", "wiz_cancel")
 
 	menu.Inline(
-		menu.Row(btn9Router, btnOpenAI),
-		menu.Row(btnDeepSeek, btnGroq),
-		menu.Row(btnGemini, btnGeminiWeb),
-		menu.Row(btnClaude, btnOllama),
-		menu.Row(btnCustom),
+		menu.Row(btn9Router, btnOpenCode),
+		menu.Row(btnOpenAI, btnDeepSeek),
+		menu.Row(btnGroq, btnGemini),
+		menu.Row(btnGeminiWeb, btnClaude),
+		menu.Row(btnOllama, btnCustom),
 		menu.Row(btnCancel),
 	)
 
@@ -242,6 +244,16 @@ func (w *ProviderWizard) HandleTypeSelect(c tele.Context, pType string) error {
 		sess.Step = StepEnterAPIKey
 		return w.promptAPIKey(c, sess)
 
+	case "opencode", "opencode_free":
+		sess.ID = "opencode"
+		sess.Name = "OpenCode AI (opencode.ai)"
+		sess.Type = "opencode"
+		sess.BaseURL = "https://api.opencode.ai/v1"
+		sess.APIKeys = []string{""}
+		sess.DetectedModels = []string{"gpt-4o-mini", "gpt-4o", "claude-3-5-sonnet", "deepseek-chat", "deepseek-reasoner", "qwen-2.5-coder-32b"}
+		sess.DefaultModel = "gpt-4o-mini"
+		return w.finishWizard(c, sess)
+
 	case "openai":
 		sess.ID = "openai"
 		sess.Name = "OpenAI Official"
@@ -309,21 +321,31 @@ func (w *ProviderWizard) HandleTypeSelect(c tele.Context, pType string) error {
 }
 
 func (w *ProviderWizard) promptGeminiWebAuth(c tele.Context, sess *WizardSession) error {
-	text := "🌐 <b>SETUP GEMINI WEB (GOOGLE AUTH SCRAPER)</b>\n\n" +
-		"Provider ini memungkinkan Anda menggunakan Google Gemini Web secara gratis melalui scraping sesi Google.\n\n" +
-		"<b>Langkah Login Google Auth:</b>\n" +
-		"1️⃣ Buka link login berikut di browser Anda:\n" +
-		"👉 <a href=\"https://gemini.google.com/app\">https://gemini.google.com/app</a>\n\n" +
-		"2️⃣ Login dengan Akun Google Anda hingga masuk ke halaman obrolan Gemini.\n\n" +
-		"3️⃣ <b>Cara Mengambil Kredensial:</b>\n" +
-		"• <b>Opsi A (Link / URL):</b> Salin URL address bar / link redirect setelah login, ATAU\n" +
-		"• <b>Opsi B (Cookies DevTools):</b> Tekan <code>F12</code> -> Tab <b>Application/Storage</b> -> <b>Cookies</b> -> Salin nilai cookie <code>__Secure-1PSID</code> (dan <code>__Secure-1PSIDTS</code> bila ada), ATAU\n" +
-		"• <b>Opsi C (Cookie Header):</b> Salin seluruh cookie header (<code>key=value; ...</code>)\n\n" +
-		"4️⃣ <b>Paste / Kirimkan link atau cookie tersebut ke chat ini:</b>"
+	loginURL := "https://gemini.google.com/app"
+	if c.Sender() != nil {
+		if oauthMgr := goassisthttp.GetOAuthManager(); oauthMgr != nil {
+			state := oauthMgr.CreateState(c.Sender().ID, sess.ID)
+			loginURL = oauthMgr.GetLoginURL(state)
+		}
+	}
+
+	text := "🌐 <b>SETUP GEMINI WEB (GOOGLE AUTH)</b>\n\n" +
+		"Provider ini memungkinkan Anda menggunakan Google Gemini Web secara gratis dengan menautkan sesi Google Anda.\n\n" +
+		"✨ <b>Metode 1: Login Otomatis Google (Seperti 9Router)</b>\n" +
+		"1️⃣ Klik tombol <b>🔗 Login Google (Otomatis)</b> di bawah.\n" +
+		"2️⃣ Halaman login/otentikasi akan terbuka di browser Anda.\n" +
+		"3️⃣ Setelah login, sesi otomatis tertaut ke bot tanpa perlu salin kode manual!\n\n" +
+		"🛠️ <b>Metode 2: Input Manual (Alternatif)</b>\n" +
+		"• Buka <a href=\"https://gemini.google.com/app\">gemini.google.com</a> di browser dan login.\n" +
+		"• Salin cookie <code>__Secure-1PSID</code> (atau seluruh cookie header / URL redirect) lalu kirimkan langsung ke chat ini."
 
 	menu := &tele.ReplyMarkup{}
+	btnLogin := menu.URL("🔗 Login Google (Otomatis)", loginURL)
 	btnCancel := menu.Data("❌ Batal Setup", "wiz_cancel")
-	menu.Inline(menu.Row(btnCancel))
+	menu.Inline(
+		menu.Row(btnLogin),
+		menu.Row(btnCancel),
+	)
 
 	return c.EditOrSend(text, menu, tele.ModeHTML)
 }
@@ -993,6 +1015,8 @@ func (w *ProviderWizard) syncProviderToManager(p *storage.ProviderRecord) {
 		inst = provider.NewGeminiProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
 	case "anthropic":
 		inst = provider.NewAnthropicProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
+	case "opencode", "opencode_free", "free_router", "free_openai", "free_gemini", "opencodefree", "free":
+		inst = provider.NewFreeOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
 	default:
 		inst = provider.NewOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
 	}
