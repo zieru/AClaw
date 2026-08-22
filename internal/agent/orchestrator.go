@@ -449,33 +449,45 @@ func FormatFooter(mode string, promptTokens, completionTokens, thinkingTokens, t
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch mode {
 	case "tokens":
-		if totalTokens <= 0 {
-			return ""
+		tokDisplay := totalTokens
+		if tokDisplay <= 0 {
+			tokDisplay = promptTokens + completionTokens
 		}
-		result := fmt.Sprintf("🪙 %s tokens", formatThousands(totalTokens))
+		var result string
+		if tokDisplay > 0 {
+			result = fmt.Sprintf("🪙 %s tokens", formatThousands(tokDisplay))
+		} else {
+			result = "🪙 (tokens recorded)"
+		}
 		if thinkingTokens > 0 {
 			result += fmt.Sprintf(" (💭 %s)", formatThousands(thinkingTokens))
 		}
 		if tokensSaved > 0 {
 			result += fmt.Sprintf(" • 🌿 hemat: %s", formatThousands(tokensSaved))
 		}
-		return result
+		return "—\n" + result
 
 	case "full":
 		var parts []string
 
 		// Latency
 		ms := latency.Milliseconds()
-		if ms < 1000 {
-			parts = append(parts, fmt.Sprintf("⚡ %dms", ms))
-		} else {
-			parts = append(parts, fmt.Sprintf("⚡ %.1fs", float64(ms)/1000.0))
+		if ms > 0 {
+			if ms < 1000 {
+				parts = append(parts, fmt.Sprintf("⚡ %dms", ms))
+			} else {
+				parts = append(parts, fmt.Sprintf("⚡ %.1fs", float64(ms)/1000.0))
+			}
 		}
 
 		// Tokens
-		if totalTokens > 0 {
+		tokDisplay := totalTokens
+		if tokDisplay <= 0 {
+			tokDisplay = promptTokens + completionTokens
+		}
+		if tokDisplay > 0 {
 			if promptTokens > 0 && completionTokens > 0 {
-				tokStr := fmt.Sprintf("🪙 %s (in: %s / out: %s)", formatThousands(totalTokens), formatThousands(promptTokens), formatThousands(completionTokens))
+				tokStr := fmt.Sprintf("🪙 %s (in: %s / out: %s)", formatThousands(tokDisplay), formatThousands(promptTokens), formatThousands(completionTokens))
 				if thinkingTokens > 0 {
 					tokStr += fmt.Sprintf(" 💭 %s", formatThousands(thinkingTokens))
 				}
@@ -484,12 +496,14 @@ func FormatFooter(mode string, promptTokens, completionTokens, thinkingTokens, t
 				}
 				parts = append(parts, tokStr)
 			} else {
-				tokStr := fmt.Sprintf("🪙 %s tokens", formatThousands(totalTokens))
+				tokStr := fmt.Sprintf("🪙 %s tokens", formatThousands(tokDisplay))
 				if tokensSaved > 0 {
 					tokStr += fmt.Sprintf(" • 🌿 hemat %s", formatThousands(tokensSaved))
 				}
 				parts = append(parts, tokStr)
 			}
+		} else if tokensSaved > 0 {
+			parts = append(parts, fmt.Sprintf("🌿 hemat %s tokens", formatThousands(tokensSaved)))
 		}
 
 		// Tools
@@ -505,7 +519,7 @@ func FormatFooter(mode string, promptTokens, completionTokens, thinkingTokens, t
 		}
 
 		if len(parts) == 0 {
-			return ""
+			return "—\n⚡ respons selesai"
 		}
 
 		return "—\n" + strings.Join(parts, " • ")

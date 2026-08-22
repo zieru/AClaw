@@ -6,6 +6,7 @@ import (
 	"html"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"goassistant/internal/provider"
@@ -35,7 +36,7 @@ func (ui *ProviderUI) RenderProvidersList() string {
 	sb.WriteString("🤖 <b>DAFTAR PROVIDER AI (9ROUTER ENGINE)</b>\n\n")
 
 	if len(providers) == 0 {
-		sb.WriteString("(Belum ada provider yang dikonfigurasi)\n\n")
+		sb.WriteString("(Belum ada provider yang dikonfigurasi. Klik tombol di bawah untuk menambahkan!)\n\n")
 	} else {
 		for i, p := range providers {
 			statusIcon := "🟢"
@@ -73,19 +74,289 @@ func (ui *ProviderUI) RenderProvidersList() string {
 		}
 	}
 
-	sb.WriteString("📋 <b>Perintah Manajemen Provider & Proxy:</b>\n")
-	sb.WriteString("• <code>/wizard</code> - Interactive Setup Wizard provider baru\n")
-	sb.WriteString("• <code>/editprovider [id]</code> - Interactive Edit Wizard provider\n")
-	sb.WriteString("• <code>/setproviderproxy &lt;id&gt; &lt;group|off&gt;</code> - Pasang proxy pool ke provider\n")
-	sb.WriteString("• <code>/addkey &lt;provider_id&gt; &lt;api_key&gt;</code> - Tambah key ke pool rotasi\n")
-	sb.WriteString("• <code>/setkeys &lt;provider_id&gt; &lt;key1,key2,...&gt;</code> - Set multiple keys\n")
-	sb.WriteString("• <code>/delkey &lt;provider_id&gt; &lt;index|key&gt;</code> - Hapus key dari pool\n")
-	sb.WriteString("• <code>/keystrategy &lt;provider_id&gt; &lt;round-robin|failover|random&gt;</code>\n")
-	sb.WriteString("• <code>/setmodels &lt;provider_id&gt; &lt;m1,m2,...&gt;</code> - Daftarkan model yang didukung\n")
-	sb.WriteString("• <code>/fetchmodels &lt;provider_id&gt;</code> - Deteksi model otomatis dari /models\n")
-	sb.WriteString("• <code>/combos</code> - Lihat & atur multi-provider combo chains\n")
-
+	sb.WriteString("💡 <i>Klik tombol provider di bawah untuk inspeksi & pengaturan cepat:</i>")
 	return sb.String()
+}
+
+// ProviderMenuKeyboard builds dynamic interactive buttons for each registered provider
+func (ui *ProviderUI) ProviderMenuKeyboard() *tele.ReplyMarkup {
+	menu := &tele.ReplyMarkup{}
+	providers, _ := ui.db.ListProviders()
+
+	var rows []tele.Row
+
+	// Per-provider quick buttons (max 2 per row)
+	var provButtons []tele.Btn
+	for _, p := range providers {
+		status := "🟢"
+		if !p.IsActive {
+			status = "🔴"
+		}
+		label := fmt.Sprintf("%s %s", status, p.Name)
+		btn := menu.Data(label, fmt.Sprintf("prov_view_%s", p.ID))
+		provButtons = append(provButtons, btn)
+	}
+
+	for i := 0; i < len(provButtons); i += 2 {
+		if i+1 < len(provButtons) {
+			rows = append(rows, menu.Row(provButtons[i], provButtons[i+1]))
+		} else {
+			rows = append(rows, menu.Row(provButtons[i]))
+		}
+	}
+
+	// Action buttons
+	btnWizard := menu.Data("➕ Tambah Provider (Wizard)", "wiz_start")
+	btnTestAll := menu.Data("🧪 Test Latensi Semua", "prov_test_all")
+	btnEdit := menu.Data("✏️ Edit Wizard", "wiz_edit_start")
+	btnBack := menu.Data("⬅️ Kembali ke Menu Utama", "menu_main")
+
+	rows = append(rows, menu.Row(btnWizard, btnEdit))
+	rows = append(rows, menu.Row(btnTestAll))
+	rows = append(rows, menu.Row(btnBack))
+
+	menu.Inline(rows...)
+	return menu
+}
+
+// RenderProviderDashboard renders a single provider's details and interactive control buttons
+func (ui *ProviderUI) RenderProviderDashboard(p *storage.ProviderRecord) (string, *tele.ReplyMarkup) {
+	statusStr := "🟢 <b>Aktif</b>"
+	if !p.IsActive {
+		statusStr = "🔴 <b>Nonaktif</b>"
+	}
+
+	keyCount := len(p.APIKeys)
+	if keyCount == 0 && p.APIKey != "" {
+		keyCount = 1
+	}
+
+	modelsStr := "(default only)"
+	if len(p.Models) > 0 {
+		modelsStr = strings.Join(p.Models, ", ")
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🤖 <b>DASHBOARD PROVIDER: %s</b>\n\n", html.EscapeString(p.Name)))
+	sb.WriteString(fmt.Sprintf("• ID: <code>%s</code>\n", html.EscapeString(p.ID)))
+	sb.WriteString(fmt.Sprintf("• Tipe Driver: <code>%s</code>\n", html.EscapeString(p.Type)))
+	sb.WriteString(fmt.Sprintf("• Status: %s\n", statusStr))
+	sb.WriteString(fmt.Sprintf("• Default Model: <code>%s</code>\n", html.EscapeString(p.DefaultModel)))
+	sb.WriteString(fmt.Sprintf("• Model Terdaftar: <code>%s</code>\n", html.EscapeString(modelsStr)))
+	sb.WriteString(fmt.Sprintf("• Key Pool: <b>%d API Key</b> (Strategi: <code>%s</code>)\n", keyCount, html.EscapeString(p.KeyStrategy)))
+
+	if p.ProxyEnabled {
+		grp := p.ProxyGroup
+		if grp == "" {
+			grp = "default"
+		}
+		sb.WriteString(fmt.Sprintf("• Upstream Proxy: 🟢 <b>Aktif</b> (Group: <code>%s</code>)\n", html.EscapeString(grp)))
+	} else {
+		sb.WriteString("• Upstream Proxy: ⚪ <i>Direct / Mati</i>\n")
+	}
+
+	if p.BaseURL != "" {
+		sb.WriteString(fmt.Sprintf("• Base URL: <code>%s</code>\n", html.EscapeString(p.BaseURL)))
+	}
+
+	menu := &tele.ReplyMarkup{}
+	btnTest := menu.Data("⚡ Test Ping & Latensi", fmt.Sprintf("prov_test_%s", p.ID))
+	tglLabel := "🔴 Nonaktifkan"
+	if !p.IsActive {
+		tglLabel = "🟢 Aktifkan"
+	}
+	btnToggle := menu.Data(tglLabel, fmt.Sprintf("prov_tgl_%s", p.ID))
+	btnEdit := menu.Data("✏️ Edit Provider", fmt.Sprintf("wiz_ed_pick_%s", p.ID))
+	btnDel := menu.Data("🗑️ Hapus", fmt.Sprintf("wiz_ed_del_yes_%s", p.ID))
+	btnBack := menu.Data("⬅️ Kembali ke Daftar", "menu_providers")
+
+	menu.Inline(
+		menu.Row(btnTest, btnToggle),
+		menu.Row(btnEdit, btnDel),
+		menu.Row(btnBack),
+	)
+
+	return sb.String(), menu
+}
+
+// HandleToggleActive toggles provider active state
+func (ui *ProviderUI) HandleToggleActive(c tele.Context, provID string) error {
+	p, err := ui.db.GetProvider(provID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	p.IsActive = !p.IsActive
+	if err := ui.db.SaveProvider(p); err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan status: %v", err))
+	}
+	ui.syncProviderToManager(p)
+
+	txt, kb := ui.RenderProviderDashboard(p)
+	return c.EditOrSend(txt, kb, tele.ModeHTML)
+}
+
+// HandleTestLatency runs a test request to the specified provider
+func (ui *ProviderUI) HandleTestLatency(c tele.Context, provID string) error {
+	p, err := ui.db.GetProvider(provID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("Menguji koneksi %s...", p.Name)})
+
+	inst, ok := ui.providerManager.Get(p.Name)
+	if !ok {
+		// Try sync first
+		ui.syncProviderToManager(p)
+		inst, ok = ui.providerManager.Get(p.Name)
+		if !ok {
+			return c.Reply(fmt.Sprintf("❌ Provider <b>%s</b> belum aktif atau tidak terdaftar di runtime manager.", html.EscapeString(p.Name)), tele.ModeHTML)
+		}
+	}
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	testModel := p.DefaultModel
+	if testModel == "" && len(p.Models) > 0 {
+		testModel = p.Models[0]
+	}
+
+	req := provider.ChatRequest{
+		Model: testModel,
+		Messages: []provider.ChatMessage{
+			{Role: provider.RoleUser, Content: "ping"},
+		},
+		MaxTokens:   5,
+		Temperature: 0.1,
+	}
+
+	resp, err := inst.GenerateChat(ctx, req)
+	latency := time.Since(start).Milliseconds()
+
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ <b>Uji Koneksi Gagal (%s)</b>\n• Latensi: <code>%d ms</code>\n• Error: <code>%s</code>", html.EscapeString(p.Name), latency, html.EscapeString(err.Error())), tele.ModeHTML)
+	}
+
+	replyPreview := strings.TrimSpace(resp.Content)
+	if len(replyPreview) > 50 {
+		replyPreview = replyPreview[:50] + "..."
+	}
+
+	return c.Reply(fmt.Sprintf("✅ <b>Uji Koneksi Berhasil! (%s)</b>\n• Model: <code>%s</code>\n• Latensi: <b>%d ms</b>\n• Respon Sample: <i>\"%s\"</i>", html.EscapeString(p.Name), html.EscapeString(testModel), latency, html.EscapeString(replyPreview)), tele.ModeHTML)
+}
+
+// HandleTestAllProviders runs concurrent ping latency tests across all active providers
+func (ui *ProviderUI) HandleTestAllProviders(c tele.Context) error {
+	providers, err := ui.db.ListProviders()
+	if err != nil || len(providers) == 0 {
+		return c.Reply("ℹ️ Belum ada provider yang terdaftar.")
+	}
+
+	_ = c.Respond(&tele.CallbackResponse{Text: "🧪 Memulai pengujian paralel seluruh provider..."})
+	msg, _ := c.Bot().Send(c.Chat(), "⏳ <b>Sedang menguji latensi seluruh provider AI...</b>", tele.ModeHTML)
+
+	type testResult struct {
+		Name     string
+		Model    string
+		Latency  int64
+		Success  bool
+		ErrorMsg string
+	}
+
+	var results []testResult
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, p := range providers {
+		if !p.IsActive {
+			continue
+		}
+		pCopy := p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			inst, ok := ui.providerManager.Get(pCopy.Name)
+			if !ok {
+				ui.syncProviderToManager(&pCopy)
+				inst, ok = ui.providerManager.Get(pCopy.Name)
+			}
+
+			if !ok {
+				mu.Lock()
+				results = append(results, testResult{
+					Name:     pCopy.Name,
+					Success:  false,
+					ErrorMsg: "Tidak terdaftar di manager",
+				})
+				mu.Unlock()
+				return
+			}
+
+			testModel := pCopy.DefaultModel
+			if testModel == "" && len(pCopy.Models) > 0 {
+				testModel = pCopy.Models[0]
+			}
+
+			start := time.Now()
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+			defer cancel()
+
+			_, errGen := inst.GenerateChat(ctx, provider.ChatRequest{
+				Model: testModel,
+				Messages: []provider.ChatMessage{
+					{Role: provider.RoleUser, Content: "hi"},
+				},
+				MaxTokens:   5,
+				Temperature: 0.1,
+			})
+			latency := time.Since(start).Milliseconds()
+
+			mu.Lock()
+			if errGen != nil {
+				results = append(results, testResult{
+					Name:     pCopy.Name,
+					Model:    testModel,
+					Latency:  latency,
+					Success:  false,
+					ErrorMsg: errGen.Error(),
+				})
+			} else {
+				results = append(results, testResult{
+					Name:    pCopy.Name,
+					Model:   testModel,
+					Latency: latency,
+					Success: true,
+				})
+			}
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+
+	var sb strings.Builder
+	sb.WriteString("🧪 <b>HASIL UJI LATENSI PROVIDER AI</b>\n\n")
+
+	for i, r := range results {
+		if r.Success {
+			sb.WriteString(fmt.Sprintf("%d. 🟢 <b>%s</b> (<code>%s</code>): <b>%d ms</b>\n", i+1, html.EscapeString(r.Name), html.EscapeString(r.Model), r.Latency))
+		} else {
+			sb.WriteString(fmt.Sprintf("%d. 🔴 <b>%s</b> (<code>%s</code>): <i>Gagal (%d ms)</i> - <code>%s</code>\n", i+1, html.EscapeString(r.Name), html.EscapeString(r.Model), r.Latency, html.EscapeString(r.ErrorMsg)))
+		}
+	}
+
+	menu := &tele.ReplyMarkup{}
+	btnBack := menu.Data("⬅️ Kembali ke Menu Provider", "menu_providers")
+	menu.Inline(menu.Row(btnBack))
+
+	if msg != nil {
+		_, _ = c.Bot().Edit(msg, sb.String(), tele.ModeHTML, menu)
+		return nil
+	}
+	return c.Send(sb.String(), menu, tele.ModeHTML)
 }
 
 // HandleAddProvider processes `/addprovider`
@@ -144,21 +415,19 @@ func (ui *ProviderUI) HandleAddKey(c tele.Context) error {
 		return c.Reply(fmt.Sprintf("❌ Provider dengan ID '%s' tidak ditemukan", html.EscapeString(id)))
 	}
 
-	// Add key avoiding duplicates
 	for _, k := range p.APIKeys {
 		if k == key {
 			return c.Reply("⚠️ API Key ini sudah ada di dalam pool provider tersebut.")
 		}
 	}
-	p.APIKeys = append(p.APIKeys, key)
-	p.APIKey = p.APIKeys[0]
 
+	p.APIKeys = append(p.APIKeys, key)
 	if err := ui.db.SaveProvider(p); err != nil {
 		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan API key: %v", html.EscapeString(err.Error())))
 	}
 
 	ui.syncProviderToManager(p)
-	return c.Reply(fmt.Sprintf("✅ Berhasil menambahkan key baru ke provider <b>%s</b>!\nTotal pool: <b>%d key</b>", html.EscapeString(p.Name), len(p.APIKeys)), tele.ModeHTML)
+	return c.Reply(fmt.Sprintf("🔑 API Key berhasil ditambahkan ke pool provider <b>%s</b>!\nTotal Key saat ini: <b>%d</b> (Strategi: <code>%s</code>)", html.EscapeString(p.Name), len(p.APIKeys), html.EscapeString(p.KeyStrategy)), tele.ModeHTML)
 }
 
 // HandleSetKeys processes `/setkeys <provider_id> <key1,key2,...>`
@@ -169,14 +438,18 @@ func (ui *ProviderUI) HandleSetKeys(c tele.Context) error {
 	}
 
 	id := args[0]
-	rawKeys := strings.Split(args[1], ",")
+	keysRaw := strings.Join(args[1:], " ")
 
-	var cleanKeys []string
-	for _, k := range rawKeys {
-		k = strings.TrimSpace(k)
-		if k != "" {
-			cleanKeys = append(cleanKeys, k)
+	var newKeys []string
+	for _, k := range strings.Split(keysRaw, ",") {
+		clean := strings.TrimSpace(k)
+		if clean != "" {
+			newKeys = append(newKeys, clean)
 		}
+	}
+
+	if len(newKeys) == 0 {
+		return c.Reply("⚠️ Daftar key kosong.")
 	}
 
 	p, err := ui.db.GetProvider(id)
@@ -184,24 +457,20 @@ func (ui *ProviderUI) HandleSetKeys(c tele.Context) error {
 		return c.Reply(fmt.Sprintf("❌ Provider dengan ID '%s' tidak ditemukan", html.EscapeString(id)))
 	}
 
-	p.APIKeys = cleanKeys
-	if len(cleanKeys) > 0 {
-		p.APIKey = cleanKeys[0]
-	}
-
+	p.APIKeys = newKeys
 	if err := ui.db.SaveProvider(p); err != nil {
-		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan key: %v", html.EscapeString(err.Error())))
+		return c.Reply(fmt.Sprintf("❌ Gagal memperbarui pool API key: %v", html.EscapeString(err.Error())))
 	}
 
 	ui.syncProviderToManager(p)
-	return c.Reply(fmt.Sprintf("✅ Key pool untuk provider <b>%s</b> berhasil diset!\nTotal: <b>%d key</b>", html.EscapeString(p.Name), len(p.APIKeys)), tele.ModeHTML)
+	return c.Reply(fmt.Sprintf("🔑 Pool API key untuk provider <b>%s</b> berhasil disetel!\nTotal Key: <b>%d key</b> (Strategi: <code>%s</code>)", html.EscapeString(p.Name), len(p.APIKeys), html.EscapeString(p.KeyStrategy)), tele.ModeHTML)
 }
 
-// HandleDelKey processes `/delkey <provider_id> <key_or_index>`
+// HandleDelKey processes `/delkey <provider_id> <index|key>`
 func (ui *ProviderUI) HandleDelKey(c tele.Context) error {
 	args := c.Args()
 	if len(args) < 2 {
-		return c.Reply("⚠️ Format salah!\nContoh: <code>/delkey 9router 1</code> atau <code>/delkey 9router sk-xxxx</code>", tele.ModeHTML)
+		return c.Reply("⚠️ Format salah!\nContoh:\n• <code>/delkey 9router 1</code> (hapus key index ke-1)\n• <code>/delkey 9router sk-xxxx</code> (hapus by key value)", tele.ModeHTML)
 	}
 
 	id := args[0]
@@ -212,54 +481,48 @@ func (ui *ProviderUI) HandleDelKey(c tele.Context) error {
 		return c.Reply(fmt.Sprintf("❌ Provider dengan ID '%s' tidak ditemukan", html.EscapeString(id)))
 	}
 
-	var updated []string
-	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(p.APIKeys) {
-		// Index based removal (1-based)
-		for i, k := range p.APIKeys {
-			if i+1 != idx {
-				updated = append(updated, k)
-			}
-		}
+	idx, errIdx := strconv.Atoi(target)
+	deleted := false
+
+	if errIdx == nil && idx > 0 && idx <= len(p.APIKeys) {
+		p.APIKeys = append(p.APIKeys[:idx-1], p.APIKeys[idx:]...)
+		deleted = true
 	} else {
-		// Exact string matching
+		var filtered []string
 		for _, k := range p.APIKeys {
-			if k != target {
-				updated = append(updated, k)
+			if k == target {
+				deleted = true
+			} else {
+				filtered = append(filtered, k)
 			}
 		}
+		p.APIKeys = filtered
 	}
 
-	p.APIKeys = updated
-	if len(updated) > 0 {
-		p.APIKey = updated[0]
-	} else {
-		p.APIKey = ""
+	if !deleted {
+		return c.Reply("⚠️ API Key tidak ditemukan dalam pool provider tersebut.")
 	}
 
 	if err := ui.db.SaveProvider(p); err != nil {
-		return c.Reply(fmt.Sprintf("❌ Gagal menghapus key: %v", html.EscapeString(err.Error())))
+		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan perubahan: %v", html.EscapeString(err.Error())))
 	}
 
 	ui.syncProviderToManager(p)
-	return c.Reply(fmt.Sprintf("✅ Key berhasil dihapus dari provider <b>%s</b>! Sisa: <b>%d key</b>", html.EscapeString(p.Name), len(p.APIKeys)), tele.ModeHTML)
-}
-
-// HandleSetKey processes legacy `/setkey`
-func (ui *ProviderUI) HandleSetKey(c tele.Context) error {
-	return ui.HandleAddKey(c)
+	return c.Reply(fmt.Sprintf("🗑️ API Key berhasil dihapus dari pool provider <b>%s</b>!\nSisa Key: <b>%d key</b>", html.EscapeString(p.Name), len(p.APIKeys)), tele.ModeHTML)
 }
 
 // HandleSetKeyStrategy processes `/keystrategy <provider_id> <round-robin|failover|random>`
 func (ui *ProviderUI) HandleSetKeyStrategy(c tele.Context) error {
 	args := c.Args()
 	if len(args) < 2 {
-		return c.Reply("⚠️ Format salah!\nContoh: <code>/keystrategy 9router round-robin</code>\n(Pilihan: <code>round-robin</code>, <code>failover</code>, <code>random</code>)", tele.ModeHTML)
+		return c.Reply("⚠️ Format salah!\nContoh: <code>/keystrategy 9router round-robin</code>\nPilihan: <code>round-robin</code>, <code>failover</code>, <code>random</code>", tele.ModeHTML)
 	}
 
 	id := args[0]
-	strategy := strings.ToLower(args[1])
-	if strategy != "round-robin" && strategy != "failover" && strategy != "random" {
-		return c.Reply("⚠️ Strategi tidak valid. Pilih: <code>round-robin</code>, <code>failover</code>, atau <code>random</code>", tele.ModeHTML)
+	strat := strings.ToLower(args[1])
+
+	if strat != "round-robin" && strat != "failover" && strat != "random" {
+		return c.Reply("⚠️ Strategi rotasi tidak valid! Pilihan: <code>round-robin</code>, <code>failover</code>, <code>random</code>", tele.ModeHTML)
 	}
 
 	p, err := ui.db.GetProvider(id)
@@ -267,30 +530,30 @@ func (ui *ProviderUI) HandleSetKeyStrategy(c tele.Context) error {
 		return c.Reply(fmt.Sprintf("❌ Provider dengan ID '%s' tidak ditemukan", html.EscapeString(id)))
 	}
 
-	p.KeyStrategy = strategy
+	p.KeyStrategy = strat
 	if err := ui.db.SaveProvider(p); err != nil {
 		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan strategi: %v", html.EscapeString(err.Error())))
 	}
 
 	ui.syncProviderToManager(p)
-	return c.Reply(fmt.Sprintf("✅ Strategi rotasi key untuk provider <b>%s</b> diubah menjadi <code>%s</code>!", html.EscapeString(p.Name), strategy), tele.ModeHTML)
+	return c.Reply(fmt.Sprintf("🔄 Strategi rotasi multi-key untuk provider <b>%s</b> berhasil diubah menjadi: <code>%s</code>", html.EscapeString(p.Name), strat), tele.ModeHTML)
 }
 
-// HandleSetModels processes `/setmodels <provider_id> <model1,model2,...>`
+// HandleSetModels processes `/setmodels <provider_id> <m1,m2,...>`
 func (ui *ProviderUI) HandleSetModels(c tele.Context) error {
 	args := c.Args()
 	if len(args) < 2 {
-		return c.Reply("⚠️ Format salah!\nContoh: <code>/setmodels 9router gpt-4o,gpt-4o-mini,deepseek-chat,claude-3-5-sonnet</code>", tele.ModeHTML)
+		return c.Reply("⚠️ Format salah!\nContoh: <code>/setmodels 9router gpt-4o,gpt-4o-mini,claude-3-5-sonnet</code>", tele.ModeHTML)
 	}
 
 	id := args[0]
-	rawModels := strings.Split(args[1], ",")
+	modelsRaw := strings.Join(args[1:], " ")
 
-	var cleanModels []string
-	for _, m := range rawModels {
-		m = strings.TrimSpace(m)
-		if m != "" {
-			cleanModels = append(cleanModels, m)
+	var models []string
+	for _, m := range strings.Split(modelsRaw, ",") {
+		clean := strings.TrimSpace(m)
+		if clean != "" {
+			models = append(models, clean)
 		}
 	}
 
@@ -299,70 +562,16 @@ func (ui *ProviderUI) HandleSetModels(c tele.Context) error {
 		return c.Reply(fmt.Sprintf("❌ Provider dengan ID '%s' tidak ditemukan", html.EscapeString(id)))
 	}
 
-	p.Models = cleanModels
+	p.Models = models
 	if err := ui.db.SaveProvider(p); err != nil {
-		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan models: %v", html.EscapeString(err.Error())))
+		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan daftar model: %v", html.EscapeString(err.Error())))
 	}
 
 	ui.syncProviderToManager(p)
-	return c.Reply(fmt.Sprintf("✅ Model list untuk provider <b>%s</b> berhasil diperbarui:\n<code>%s</code>", html.EscapeString(p.Name), html.EscapeString(strings.Join(cleanModels, ", "))), tele.ModeHTML)
+	return c.Reply(fmt.Sprintf("🤖 Daftar model untuk provider <b>%s</b> berhasil diperbarui!\nTotal model: <b>%d</b>", html.EscapeString(p.Name), len(models)), tele.ModeHTML)
 }
 
-// HandleAddModel processes `/addmodel <provider_id> <model_name>`
-func (ui *ProviderUI) HandleAddModel(c tele.Context) error {
-	args := c.Args()
-	if len(args) < 2 {
-		return c.Reply("⚠️ Format salah!\nContoh: <code>/addmodel 9router claude-3-5-sonnet</code>", tele.ModeHTML)
-	}
-
-	id := args[0]
-	model := strings.TrimSpace(args[1])
-
-	p, err := ui.db.GetProvider(id)
-	if err != nil || p == nil {
-		return c.Reply(fmt.Sprintf("❌ Provider dengan ID '%s' tidak ditemukan", html.EscapeString(id)))
-	}
-
-	for _, m := range p.Models {
-		if strings.EqualFold(m, model) {
-			return c.Reply("⚠️ Model ini sudah ada di dalam daftar.")
-		}
-	}
-
-	p.Models = append(p.Models, model)
-	if err := ui.db.SaveProvider(p); err != nil {
-		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan model: %v", html.EscapeString(err.Error())))
-	}
-
-	ui.syncProviderToManager(p)
-	return c.Reply(fmt.Sprintf("✅ Model <code>%s</code> berhasil ditambahkan ke provider <b>%s</b>!", html.EscapeString(model), html.EscapeString(p.Name)), tele.ModeHTML)
-}
-
-// HandleSetModel processes `/setmodel`
-func (ui *ProviderUI) HandleSetModel(c tele.Context) error {
-	args := c.Args()
-	if len(args) < 2 {
-		return c.Reply("⚠️ Format salah!\nContoh: <code>/setmodel 9router gpt-4o-mini</code>", tele.ModeHTML)
-	}
-
-	id := args[0]
-	model := strings.TrimSpace(args[1])
-
-	p, err := ui.db.GetProvider(id)
-	if err != nil || p == nil {
-		return c.Reply(fmt.Sprintf("❌ Provider dengan ID '%s' tidak ditemukan", html.EscapeString(id)))
-	}
-
-	p.DefaultModel = model
-	if err := ui.db.SaveProvider(p); err != nil {
-		return c.Reply(fmt.Sprintf("❌ Gagal memperbarui model: %v", html.EscapeString(err.Error())))
-	}
-
-	ui.syncProviderToManager(p)
-	return c.Reply(fmt.Sprintf("✅ Default model untuk provider <b>%s</b> diset ke <code>%s</code>!", html.EscapeString(p.Name), html.EscapeString(model)), tele.ModeHTML)
-}
-
-// HandleFetchModels processes `/fetchmodels <provider_id>`
+// HandleFetchModels fetches models dynamically from `/v1/models` endpoint
 func (ui *ProviderUI) HandleFetchModels(c tele.Context) error {
 	args := c.Args()
 	if len(args) < 1 {
@@ -375,74 +584,36 @@ func (ui *ProviderUI) HandleFetchModels(c tele.Context) error {
 		return c.Reply(fmt.Sprintf("❌ Provider dengan ID '%s' tidak ditemukan", html.EscapeString(id)))
 	}
 
-	_ = c.Notify(tele.Typing)
-	_ = c.Reply(fmt.Sprintf("🔍 <i>Mendeteksi model otomatis dari %s di <code>%s/models</code>...</i>", html.EscapeString(p.Name), html.EscapeString(p.BaseURL)), tele.ModeHTML)
-
-	firstKey := p.APIKey
+	key := p.APIKey
 	if len(p.APIKeys) > 0 {
-		firstKey = p.APIKeys[0]
+		key = p.APIKeys[0]
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	models, err := provider.FetchRemoteModels(ctx, p.Type, p.BaseURL, firstKey, nil)
-	if err != nil {
-		return c.Reply(fmt.Sprintf("❌ Gagal mendeteksi model: %v", html.EscapeString(err.Error())))
-	}
-
-	if len(models) == 0 {
-		return c.Reply("⚠️ Tidak ada model yang ditemukan dari endpoint tersebut.")
+	models, errDetect := provider.FetchRemoteModels(ctx, p.Type, p.BaseURL, key, nil)
+	if errDetect != nil || len(models) == 0 {
+		return c.Reply(fmt.Sprintf("⚠️ Gagal mendeteksi model secara otomatis: %v\nSilakan masukkan model secara manual via <code>/setmodels %s &lt;m1,m2&gt;</code>", errDetect, p.ID), tele.ModeHTML)
 	}
 
 	p.Models = models
-	if p.DefaultModel == "" || !contains(models, p.DefaultModel) {
+	if p.DefaultModel == "" && len(models) > 0 {
 		p.DefaultModel = models[0]
 	}
 
 	if err := ui.db.SaveProvider(p); err != nil {
-		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan data: %v", html.EscapeString(err.Error())))
+		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan hasil deteksi model: %v", html.EscapeString(err.Error())))
 	}
 
 	ui.syncProviderToManager(p)
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("✅ <b>BERHASIL MENDETEKSI %d MODEL UNTUK %s!</b>\n\n", len(models), html.EscapeString(p.Name)))
-	sb.WriteString(fmt.Sprintf("⭐ <b>Default Model:</b> <code>%s</code>\n\n", html.EscapeString(p.DefaultModel)))
-	sb.WriteString("<b>Daftar Model Tersedia:</b>\n")
-	displayCount := len(models)
-	if displayCount > 15 {
-		displayCount = 15
-	}
-	for i := 0; i < displayCount; i++ {
-		sb.WriteString(fmt.Sprintf("%d. <code>%s</code>\n", i+1, html.EscapeString(models[i])))
-	}
-	if len(models) > 15 {
-		sb.WriteString(fmt.Sprintf("<i>...dan %d model lainnya.</i>\n", len(models)-15))
+	preview := strings.Join(models, ", ")
+	if len(preview) > 300 {
+		preview = preview[:300] + "... (dan model lainnya)"
 	}
 
-	return c.Reply(sb.String(), tele.ModeHTML)
-}
-
-func contains(slice []string, val string) bool {
-	for _, s := range slice {
-		if strings.EqualFold(s, val) {
-			return true
-		}
-	}
-	return false
-}
-
-func (ui *ProviderUI) ProviderMenuKeyboard() *tele.ReplyMarkup {
-	menu := &tele.ReplyMarkup{}
-	btnWizard := menu.Data("🧙‍♂️ Setup Wizard", "wiz_start")
-	btnEdit := menu.Data("✏️ Edit Provider", "wiz_edit_start")
-	btnBack := menu.Data("⬅️ Kembali ke Menu Utama", "menu_main")
-	menu.Inline(
-		menu.Row(btnWizard, btnEdit),
-		menu.Row(btnBack),
-	)
-	return menu
+	return c.Reply(fmt.Sprintf("✅ <b>%d model berhasil dideteksi dari provider %s!</b>\n\n• Model default: <code>%s</code>\n• Daftar model: <code>%s</code>", len(models), html.EscapeString(p.Name), html.EscapeString(p.DefaultModel), html.EscapeString(preview)), tele.ModeHTML)
 }
 
 // HandleDelProvider processes `/delprovider <id>`

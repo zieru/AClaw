@@ -280,7 +280,7 @@ func (d *DB) SavePolicy(p *PolicyRecord) error {
 	if p.ID == "" {
 		p.ID = uuid.New().String()[:8]
 	}
-	if p.FooterMode == "" {
+	if p.Scope == "global" && p.FooterMode == "" {
 		p.FooterMode = "off"
 	}
 	if p.TokenSaverMode == "" {
