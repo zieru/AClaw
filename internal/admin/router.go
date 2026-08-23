@@ -79,6 +79,7 @@ func (a *AdminBot) registerRoutes() {
 		return c.EditOrSend(a.auditUI.RenderStatsSummary(), a.auditUI.StatsKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_logs"}, a.auditUI.HandleLogs)
+	a.bot.Handle(&tele.Btn{Unique: "btn_export_logs"}, a.auditUI.HandleExportLogs)
 	a.bot.Handle(&tele.Btn{Unique: "menu_tools"}, func(c tele.Context) error {
 		return c.EditOrSend(a.channelUI.RenderToolsList(), a.channelUI.ChannelsKeyboard(), tele.ModeHTML)
 	})

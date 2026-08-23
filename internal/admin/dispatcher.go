@@ -164,6 +164,9 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 	}
 
 	// Interactive Log UI Callbacks
+	if data == "btn_export_logs" {
+		return a.auditUI.HandleExportLogs(c)
+	}
 	if strings.HasPrefix(data, "log_view_") {
 		logID := strings.TrimPrefix(data, "log_view_")
 		return a.auditUI.HandleViewLogByID(c, logID)
@@ -178,6 +181,10 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 	if strings.HasPrefix(data, "log_toggle_err_") {
 		raw := strings.TrimPrefix(data, "log_toggle_err_")
 		var page int
+		var errFlag int
+		if n, _ := fmt.Sscanf(raw, "%d_%d", &page, &errFlag); n == 2 {
+			return a.auditUI.HandleLogsWithPage(c, page, errFlag == 1)
+		}
 		fmt.Sscanf(raw, "%d", &page)
 		return a.auditUI.HandleLogsWithPage(c, page, true)
 	}

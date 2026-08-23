@@ -143,9 +143,9 @@ func (ui *AuditUI) HandleLogsWithPage(c tele.Context, page int, onlyErrors bool)
 			sb.WriteString(fmt.Sprintf("   • Prompt: <i>\"%s\"</i>\n", html.EscapeString(reqPrev)))
 		}
 		if l.ErrorMessage != "" {
-			errPrev := l.ErrorMessage
-			if len(errPrev) > 60 {
-				errPrev = errPrev[:60] + "..."
+			errPrev := strings.ReplaceAll(l.ErrorMessage, "\n", " ")
+			if len(errPrev) > 80 {
+				errPrev = errPrev[:80] + "..."
 			}
 			sb.WriteString(fmt.Sprintf("   • ⚠️ Error: <code>%s</code>\n", html.EscapeString(errPrev)))
 		}
@@ -189,9 +189,9 @@ func (ui *AuditUI) HandleLogsWithPage(c tele.Context, page int, onlyErrors bool)
 	// Filter toggle row
 	var filterBtn tele.Btn
 	if onlyErrors {
-		filterBtn = menu.Data("📜 Tampilkan Semua", fmt.Sprintf("log_toggle_err_%d", page))
+		filterBtn = menu.Data("📜 Tampilkan Semua", fmt.Sprintf("log_toggle_err_%d_0", page))
 	} else {
-		filterBtn = menu.Data("⚠️ Hanya Error", fmt.Sprintf("log_toggle_err_%d", page))
+		filterBtn = menu.Data("⚠️ Hanya Error", fmt.Sprintf("log_toggle_err_%d_1", page))
 	}
 	btnExport := menu.Data("📥 Export CSV", "btn_export_logs")
 	rows = append(rows, menu.Row(filterBtn, btnExport))
@@ -225,9 +225,11 @@ func (ui *AuditUI) HandleViewLogByID(c tele.Context, logID string) error {
 	sb.WriteString(fmt.Sprintf("• Latensi: <code>%d ms</code> | Token: <code>%d</code> (Cost: <code>$%.6f</code>)\n", logRecord.LatencyMs, logRecord.TotalTokens, logRecord.CostUSD))
 
 	if logRecord.ErrorMessage != "" {
-		sb.WriteString(fmt.Sprintf("• Error: <code>%s</code>\n", html.EscapeString(logRecord.ErrorMessage)))
+		sb.WriteString("⚠️ <b>ERROR / EXCEPTION:</b>\n")
+		sb.WriteString(fmt.Sprintf("<pre><code>%s</code></pre>\n\n", html.EscapeString(logRecord.ErrorMessage)))
+	} else {
+		sb.WriteString("\n")
 	}
-	sb.WriteString("\n")
 
 	sb.WriteString("👤 <b>[1] CLIENT REQUEST (User Prompt):</b>\n")
 	sb.WriteString(fmt.Sprintf("<pre><code>%s</code></pre>\n\n", html.EscapeString(logRecord.ClientRequest)))
@@ -275,9 +277,16 @@ func (ui *AuditUI) HandleViewLog(c tele.Context) error {
 
 // HandleExportLogs exports logs to a CSV file and sends to Telegram
 func (ui *AuditUI) HandleExportLogs(c tele.Context) error {
+	if c.Callback() != nil {
+		_ = c.Respond(&tele.CallbackResponse{Text: "Menyiapkan file CSV..."})
+	}
 	logs, err := ui.db.GetRecentAuditLogs(500)
 	if err != nil {
-		return c.Reply(fmt.Sprintf("❌ Error mengambil data log: %v", html.EscapeString(err.Error())))
+		return c.Send(fmt.Sprintf("❌ Error mengambil data log: %v", html.EscapeString(err.Error())), tele.ModeHTML)
+	}
+
+	if len(logs) == 0 {
+		return c.Send("ℹ️ Belum ada data log aktivitas untuk di-export.")
 	}
 
 	var buf bytes.Buffer
@@ -316,8 +325,8 @@ func (ui *AuditUI) HandleExportLogs(c tele.Context) error {
 	doc := &tele.Document{
 		File:     tele.FromReader(&buf),
 		FileName: fmt.Sprintf("goassistant_audit_logs_%s.csv", time.Now().Format("20060102_150405")),
-		Caption:  fmt.Sprintf("📊 Export Audit Logs (%d baris aktivitas)", len(logs)),
+		Caption:  fmt.Sprintf("📊 <b>Export Audit Logs</b> (%d aktivitas)", len(logs)),
 	}
 
-	return c.Send(doc)
+	return c.Send(doc, tele.ModeHTML)
 }

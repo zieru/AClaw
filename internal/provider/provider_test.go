@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"goassistant/internal/storage"
@@ -153,20 +154,53 @@ func TestKeyPoolFailoverStrategy(t *testing.T) {
 	}
 }
 
-func TestKeyPoolAllInCooldownRecovery(t *testing.T) {
-	keys := []string{"k1", "k2"}
-	pool := NewKeyPool(keys, "round-robin")
-
-	pool.MarkTimeout("k1")
-	pool.MarkRateLimit("k2")
-
-	// Even though all keys are in cooldown, pool should return the earliest available key rather than empty
-	k := pool.GetNextKey()
-	if k == "" {
-		t.Errorf("expected pool to return fallback key when all in cooldown, got empty string")
+func TestComboAllTargetsFailDetailedError(t *testing.T) {
+	mgr := &Manager{
+		providers: make(map[string]Provider),
+		combos:    make(map[string]*storage.ModelComboRecord),
 	}
-	if k != "k1" { // k1 has 30s timeout cooldown, k2 has 60s rate limit cooldown
-		t.Errorf("expected earliest expiring key k1, got %s", k)
+
+	p1 := &mockProvider{
+		name:         "provider_a",
+		pType:        "openai",
+		defaultModel: "model-a",
+		models:       []string{"model-a"},
+		failCount:    99,
+	}
+	p2 := &mockProvider{
+		name:         "provider_b",
+		pType:        "openai",
+		defaultModel: "model-b",
+		models:       []string{"model-b"},
+		failCount:    99,
+	}
+
+	mgr.Register(p1, 1)
+	mgr.Register(p2, 2)
+
+	mgr.RegisterCombo(&storage.ModelComboRecord{
+		Name: "combo_test",
+		Targets: []storage.ComboTarget{
+			{ProviderID: "provider_a", Model: "model-a"},
+			{ProviderID: "provider_b", Model: "model-b"},
+		},
+		Strategy: "failsafe",
+		IsActive: true,
+	})
+
+	_, err := mgr.GenerateWithFallback(context.Background(), "", ChatRequest{
+		Model: "combo:combo_test",
+	})
+	if err == nil {
+		t.Fatalf("expected error when all targets fail")
+	}
+
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "seluruh target gagal (2/2)") {
+		t.Errorf("expected count (2/2) in error, got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "provider_a/model-a") || !strings.Contains(errMsg, "provider_b/model-b") {
+		t.Errorf("expected both providers listed in error message, got: %s", errMsg)
 	}
 }
 

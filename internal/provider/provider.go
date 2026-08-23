@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -237,8 +238,14 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 	// 1. Check if model or preferredName is a registered Combo (e.g. "combo:smart" or "smart")
 	comboName := strings.ToLower(strings.TrimPrefix(req.Model, "combo:"))
 	if combo, ok := m.combos[comboName]; ok && combo.IsActive && len(combo.Targets) > 0 {
-		var lastErr error
-		for _, target := range combo.Targets {
+		var attemptErrors []string
+		for idx, target := range combo.Targets {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+
 			p, exists := m.providers[target.ProviderID]
 			if !exists {
 				// Try case-insensitive lookup
@@ -251,20 +258,31 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 				}
 			}
 			if !exists {
+				errMsg := fmt.Sprintf("[%d/%d %s/%s]: provider tidak terdaftar/nonaktif", idx+1, len(combo.Targets), target.ProviderID, target.Model)
+				attemptErrors = append(attemptErrors, errMsg)
+				log.Printf("[Combo:%s] Target #%d [%s/%s] tidak ditemukan atau nonaktif", combo.Name, idx+1, target.ProviderID, target.Model)
 				continue
 			}
 
 			targetReq := req
 			targetReq.Model = target.Model
 
+			targetStart := time.Now()
 			resp, err := p.GenerateChat(ctx, targetReq)
 			if err == nil && resp != nil {
+				if idx > 0 {
+					log.Printf("[Combo:%s] Berhasil fallback ke target #%d [%s/%s] (latensi: %dms)", combo.Name, idx+1, target.ProviderID, target.Model, time.Since(targetStart).Milliseconds())
+				}
 				return resp, nil
 			}
-			lastErr = fmt.Errorf("[%s/%s] %w", target.ProviderID, target.Model, err)
+
+			latency := time.Since(targetStart).Milliseconds()
+			errItem := fmt.Sprintf("[%d/%d %s/%s (%dms)]: %v", idx+1, len(combo.Targets), target.ProviderID, target.Model, latency, err)
+			attemptErrors = append(attemptErrors, errItem)
+			log.Printf("[Combo:%s] Target #%d [%s/%s] gagal (%dms): %v", combo.Name, idx+1, target.ProviderID, target.Model, latency, err)
 		}
-		if lastErr != nil {
-			return nil, fmt.Errorf("combo '%s' seluruh target gagal: %w", combo.Name, lastErr)
+		if len(attemptErrors) > 0 {
+			return nil, fmt.Errorf("combo '%s' seluruh target gagal (%d/%d): %s", combo.Name, len(attemptErrors), len(combo.Targets), strings.Join(attemptErrors, " | "))
 		}
 	}
 
@@ -310,20 +328,29 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 		return nil, fmt.Errorf("tidak ada provider AI yang aktif atau terdaftar")
 	}
 
-	var lastErr error
-	for _, p := range executionList {
+	var executionErrors []string
+	for idx, p := range executionList {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
 		}
 
+		pStart := time.Now()
 		resp, err := p.GenerateChat(ctx, req)
 		if err == nil && resp != nil {
+			if idx > 0 {
+				log.Printf("[Fallback] Berhasil fallback ke provider #%d [%s] (latensi: %dms)", idx+1, p.Name(), time.Since(pStart).Milliseconds())
+			}
 			return resp, nil
 		}
-		lastErr = fmt.Errorf("[%s] %w", p.Name(), err)
+		latency := time.Since(pStart).Milliseconds()
+		executionErrors = append(executionErrors, fmt.Sprintf("[%d/%d %s (%dms)]: %v", idx+1, len(executionList), p.Name(), latency, err))
+		log.Printf("[Fallback] Provider #%d [%s] gagal (%dms): %v", idx+1, p.Name(), latency, err)
 	}
 
-	return nil, fmt.Errorf("semua provider AI gagal dieksekusi: %w", lastErr)
+	if len(executionErrors) > 0 {
+		return nil, fmt.Errorf("semua provider AI gagal dieksekusi (%d/%d): %s", len(executionErrors), len(executionList), strings.Join(executionErrors, " | "))
+	}
+	return nil, fmt.Errorf("semua provider AI gagal dieksekusi")
 }
