@@ -112,24 +112,28 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle("/checkin_add", func(c tele.Context) error {
 		args := c.Args()
 		if len(args) > 0 {
-			userID := strings.TrimSpace(args[0])
-			if err := a.checkinSvc.AddUserID(userID); err != nil {
-				return c.Reply(fmt.Sprintf("❌ Gagal menambahkan user ID: %v", err))
+			acc := strings.TrimSpace(args[0])
+			if err := a.checkinSvc.AddUserID(acc); err != nil {
+				return c.Reply(fmt.Sprintf("❌ Gagal menambahkan akun: %v", err))
 			}
-			return c.Reply(fmt.Sprintf("✅ User ID <code>%s</code> berhasil ditambahkan ke auto check-in!", html.EscapeString(userID)), tele.ModeHTML)
+			label := acc
+			if colonIdx := strings.Index(acc, ":"); colonIdx > 0 {
+				label = fmt.Sprintf("%s:******", acc[:colonIdx])
+			}
+			return c.Reply(fmt.Sprintf("✅ Akun <code>%s</code> berhasil ditambahkan ke auto check-in!", html.EscapeString(label)), tele.ModeHTML)
 		}
 		return a.checkinUI.PromptAddUser(c)
 	})
 	a.bot.Handle("/checkin_del", func(c tele.Context) error {
 		args := c.Args()
 		if len(args) == 0 {
-			return c.Reply("💡 Gunakan format: <code>/checkin_del &lt;user_id&gt;</code>", tele.ModeHTML)
+			return c.Reply("💡 Gunakan format: <code>/checkin_del &lt;username_atau_index&gt;</code>", tele.ModeHTML)
 		}
-		userID := strings.TrimSpace(args[0])
-		if err := a.checkinSvc.RemoveUserID(userID); err != nil {
-			return c.Reply(fmt.Sprintf("❌ Gagal menghapus user ID: %v", err))
+		target := strings.TrimSpace(args[0])
+		if err := a.checkinSvc.RemoveUserID(target); err != nil {
+			return c.Reply(fmt.Sprintf("❌ Gagal menghapus akun: %v", err))
 		}
-		return c.Reply(fmt.Sprintf("✅ User ID <code>%s</code> berhasil dihapus dari daftar auto check-in.", html.EscapeString(userID)), tele.ModeHTML)
+		return c.Reply(fmt.Sprintf("✅ Akun <code>%s</code> berhasil dihapus dari daftar auto check-in.", html.EscapeString(target)), tele.ModeHTML)
 	})
 
 	a.bot.Handle(&tele.Btn{Unique: "menu_backup"}, a.handleBackup)

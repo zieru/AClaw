@@ -69,20 +69,26 @@ func (ui *CheckinUI) RenderCheckinDashboard() (string, *tele.ReplyMarkup) {
 	sb.WriteString(fmt.Sprintf("• <b>Total User Terdaftar:</b> <code>%d user</code>\n\n", len(users)))
 
 	if len(users) > 0 {
-		sb.WriteString("📋 <b>Daftar New-Api-User ID:</b>\n")
+		sb.WriteString("📋 <b>Daftar Akun / User Terdaftar:</b>\n")
 		for i, u := range users {
-			sb.WriteString(fmt.Sprintf("  %d. <code>%s</code>\n", i+1, html.EscapeString(u)))
+			masked := u
+			if colonIdx := strings.Index(u, ":"); colonIdx > 0 {
+				masked = fmt.Sprintf("%s:******", u[:colonIdx])
+			} else if len(u) > 12 {
+				masked = fmt.Sprintf("%s...%s", u[:4], u[len(u)-4:])
+			}
+			sb.WriteString(fmt.Sprintf("  %d. <code>%s</code>\n", i+1, html.EscapeString(masked)))
 		}
 		sb.WriteString("\n")
 	} else {
-		sb.WriteString("⚠️ <i>Belum ada User ID yang didaftarkan. Klik 'Tambah User ID' untuk mendaftarkan akun.</i>\n\n")
+		sb.WriteString("⚠️ <i>Belum ada Akun yang didaftarkan. Klik 'Tambah Akun' untuk mendaftarkan kredensial.</i>\n\n")
 	}
 
 	sb.WriteString("💡 <i>Pilih aksi di bawah:</i>")
 
 	menu := &tele.ReplyMarkup{}
 	btnRun := menu.Data("🚀 Check-in Sekarang", "checkin_btn_run")
-	btnAdd := menu.Data("➕ Tambah User ID", "checkin_btn_add")
+	btnAdd := menu.Data("➕ Tambah Akun", "checkin_btn_add")
 
 	toggleLabel := "⏸️ Nonaktifkan Auto"
 	if !isEnabled {
@@ -100,7 +106,13 @@ func (ui *CheckinUI) RenderCheckinDashboard() (string, *tele.ReplyMarkup) {
 	if len(users) > 0 && len(users) <= 8 {
 		var delButtons []tele.Btn
 		for i, u := range users {
-			delButtons = append(delButtons, menu.Data(fmt.Sprintf("🗑 Hapus #%d (%s)", i+1, u), fmt.Sprintf("checkin_btn_del_%d", i)))
+			label := u
+			if colonIdx := strings.Index(u, ":"); colonIdx > 0 {
+				label = u[:colonIdx]
+			} else if len(u) > 8 {
+				label = u[:8]
+			}
+			delButtons = append(delButtons, menu.Data(fmt.Sprintf("🗑 Hapus #%d (%s)", i+1, label), fmt.Sprintf("checkin_btn_del_%d", i)))
 		}
 		// Group in pairs of 2
 		for i := 0; i < len(delButtons); i += 2 {
@@ -125,7 +137,7 @@ func (ui *CheckinUI) HandleMenu(c tele.Context) error {
 
 func (ui *CheckinUI) HandleRunNow(c tele.Context) error {
 	_ = c.Respond(&tele.CallbackResponse{Text: "🚀 Menjalankan check-in..."})
-	_ = c.EditOrSend("⏳ <i>Sedang menghubungi https://api.hcnsec.cn untuk eksekusi check-in...</i>", tele.ModeHTML)
+	_ = c.EditOrSend("⏳ <i>Sedang login & menghubungi https://api.hcnsec.cn untuk eksekusi check-in...</i>", tele.ModeHTML)
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -160,9 +172,13 @@ func (ui *CheckinUI) PromptAddUser(c tele.Context) error {
 	btnCancel := menu.Data("❌ Batal", "checkin_btn_cancel")
 	menu.Inline(menu.Row(btnCancel))
 
-	msg := "➕ <b>TAMBAH NEW-API-USER ID</b>\n\n" +
-		"Silakan kirimkan nilai <b>New-Api-User</b> (User ID HCNSEC Anda berupa angka/ID).\n\n" +
-		"<i>Contoh:</i> <code>10294</code> atau beberapa user ID dipisahkan koma: <code>10294, 20381</code>"
+	msg := "➕ <b>TAMBAH AKUN AUTO CHECK-IN HCNSEC</b>\n\n" +
+		"Silakan kirimkan akun Anda dengan salah satu format berikut:\n\n" +
+		"1. <b>Auto-Login (Direkomendasikan):</b>\n" +
+		"   <code>email@domain.com:password</code>\n" +
+		"   atau <code>username:password</code>\n\n" +
+		"2. <b>Manual Session Cookie:</b>\n" +
+		"   <code>session=ey...</code>"
 
 	return c.EditOrSend(msg, menu, tele.ModeHTML)
 }
