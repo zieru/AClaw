@@ -35,6 +35,7 @@ func (a *AdminBot) handleNew(c tele.Context) error {
 	a.mdUI.CancelWizard(userID)
 	a.tavilyUI.CancelSession(userID)
 	a.modelUI.CancelSession(userID)
+	a.checkinUI.CancelSession(userID)
 
 	// 3. Reset database session history for this chat
 	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
@@ -66,6 +67,7 @@ func (a *AdminBot) handleStop(c tele.Context) error {
 	a.mdUI.CancelWizard(userID)
 	a.tavilyUI.CancelSession(userID)
 	a.modelUI.CancelSession(userID)
+	a.checkinUI.CancelSession(userID)
 
 	var text string
 	if stoppedTask {

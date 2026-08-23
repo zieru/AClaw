@@ -16,6 +16,7 @@ import (
 	"goassistant/internal/channel"
 	tgchannel "goassistant/internal/channel/telegram"
 	wachannel "goassistant/internal/channel/whatsapp"
+	"goassistant/internal/checkin"
 	"goassistant/internal/config"
 	"goassistant/internal/cron"
 	"goassistant/internal/goassisthttp"
@@ -26,6 +27,8 @@ import (
 	"goassistant/internal/storage"
 	"goassistant/internal/tools"
 	"goassistant/internal/version"
+
+	tele "gopkg.in/telebot.v3"
 )
 
 func main() {
@@ -260,6 +263,11 @@ func main() {
 	}
 	defer scheduler.Stop()
 
+	// 9b. Start HCNSEC Auto Checkin Service
+	checkinSvc := checkin.NewService(db, nil)
+	checkinSvc.StartBackgroundScheduler(context.Background())
+	defer checkinSvc.Stop()
+
 	// 10. Start Admin Control Plane Telegram Bot
 	if cfg.AdminTelegram.BotToken != "" {
 		adminBot, err := admin.NewAdminBot(
@@ -274,10 +282,17 @@ func main() {
 			memMgr,
 			sessMgr,
 			proxyPool,
+			checkinSvc,
 		)
 		if err != nil {
 			log.Printf("❌ Gagal memulai Telegram Admin Bot: %v", err)
 		} else {
+			// Set notify callback to send checkin report to admin
+			checkinSvc.SetNotifyCallback(func(report string) {
+				for _, uid := range cfg.AdminTelegram.AllowedUserIDs {
+					_, _ = adminBot.Bot().Send(&tele.User{ID: uid}, report, tele.ModeHTML)
+				}
+			})
 			go adminBot.Start()
 			defer adminBot.Stop()
 		}

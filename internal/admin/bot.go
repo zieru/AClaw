@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"goassistant/internal/agent"
+	"goassistant/internal/checkin"
 	"goassistant/internal/config"
 	"goassistant/internal/cron"
 	"goassistant/internal/memory"
@@ -30,6 +31,7 @@ type AdminBot struct {
 	memManager   *memory.Manager
 	sessManager  *memory.SessionManager
 	proxyPool    *proxy.Pool
+	checkinSvc   *checkin.Service
 	activeTasks  sync.Map
 
 	modelUI      *ModelUI
@@ -47,6 +49,7 @@ type AdminBot struct {
 	auditUI      *AuditUI
 	updateUI     *UpdateUI
 	tavilyUI     *TavilyUI
+	checkinUI    *CheckinUI
 }
 
 func NewAdminBot(
@@ -61,6 +64,7 @@ func NewAdminBot(
 	mm *memory.Manager,
 	sm *memory.SessionManager,
 	pool *proxy.Pool,
+	checkinSvc *checkin.Service,
 ) (*AdminBot, error) {
 	pref := tele.Settings{
 		Token:  token,
@@ -84,6 +88,7 @@ func NewAdminBot(
 		memManager:   mm,
 		sessManager:  sm,
 		proxyPool:    pool,
+		checkinSvc:   checkinSvc,
 
 		modelUI:      NewModelUI(db, pm),
 		limitsUI:     NewLimitsUI(db, pm),
@@ -100,6 +105,7 @@ func NewAdminBot(
 		auditUI:      NewAuditUI(db),
 		updateUI:     NewUpdateUI(cfg, bot),
 		tavilyUI:     NewTavilyUI(db, cfg),
+		checkinUI:    NewCheckinUI(db, checkinSvc),
 	}
 
 	a.registerRoutes()

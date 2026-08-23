@@ -62,6 +62,11 @@ func (a *AdminBot) handleTextMessage(c tele.Context) error {
 		return err
 	}
 
+	// 8b. Check Checkin Add User dialog
+	if handled, err := a.checkinUI.HandleTextMessage(c); handled {
+		return err
+	}
+
 	// 9. Direct Chat with Assistant from Admin PM
 	msg := c.Message().Text
 	if msg == "" || msg[0] == '/' {
@@ -567,6 +572,12 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		_ = a.db.DeleteCronJob(cronID)
 		_ = a.scheduler.Reload()
 		return c.EditOrSend(a.cronUI.RenderCronList(), a.cronUI.CronKeyboard(), tele.ModeHTML)
+	}
+
+	// Checkin Callbacks
+	if strings.HasPrefix(data, "checkin_btn_del_") {
+		idxStr := strings.TrimPrefix(data, "checkin_btn_del_")
+		return a.checkinUI.HandleDeleteUserCallback(c, idxStr)
 	}
 
 	// MD Multi-Channel Callbacks

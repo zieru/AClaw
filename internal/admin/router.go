@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html"
 	"log"
+	"strings"
 
 	"goassistant/internal/storage"
 	"goassistant/internal/tokensaver"
@@ -94,6 +95,43 @@ func (a *AdminBot) registerRoutes() {
 		return c.EditOrSend(txt, kb, tele.ModeHTML)
 	})
 	a.bot.Handle("/tavily", a.tavilyUI.HandleMenu)
+
+	// Checkin Callbacks & Commands
+	a.bot.Handle(&tele.Btn{Unique: "menu_checkin"}, a.checkinUI.HandleMenu)
+	a.bot.Handle(&tele.Btn{Unique: "checkin_btn_run"}, a.checkinUI.HandleRunNow)
+	a.bot.Handle(&tele.Btn{Unique: "checkin_btn_add"}, a.checkinUI.PromptAddUser)
+	a.bot.Handle(&tele.Btn{Unique: "checkin_btn_toggle"}, a.checkinUI.HandleToggle)
+	a.bot.Handle(&tele.Btn{Unique: "checkin_btn_refresh"}, a.checkinUI.HandleMenu)
+	a.bot.Handle(&tele.Btn{Unique: "checkin_btn_cancel"}, func(c tele.Context) error {
+		a.checkinUI.CancelSession(c.Sender().ID)
+		txt, kb := a.checkinUI.RenderCheckinDashboard()
+		return c.EditOrSend(txt, kb, tele.ModeHTML)
+	})
+	a.bot.Handle("/checkin", a.checkinUI.HandleMenu)
+	a.bot.Handle("/checkin_run", a.checkinUI.HandleRunNow)
+	a.bot.Handle("/checkin_add", func(c tele.Context) error {
+		args := c.Args()
+		if len(args) > 0 {
+			userID := strings.TrimSpace(args[0])
+			if err := a.checkinSvc.AddUserID(userID); err != nil {
+				return c.Reply(fmt.Sprintf("❌ Gagal menambahkan user ID: %v", err))
+			}
+			return c.Reply(fmt.Sprintf("✅ User ID <code>%s</code> berhasil ditambahkan ke auto check-in!", html.EscapeString(userID)), tele.ModeHTML)
+		}
+		return a.checkinUI.PromptAddUser(c)
+	})
+	a.bot.Handle("/checkin_del", func(c tele.Context) error {
+		args := c.Args()
+		if len(args) == 0 {
+			return c.Reply("💡 Gunakan format: <code>/checkin_del &lt;user_id&gt;</code>", tele.ModeHTML)
+		}
+		userID := strings.TrimSpace(args[0])
+		if err := a.checkinSvc.RemoveUserID(userID); err != nil {
+			return c.Reply(fmt.Sprintf("❌ Gagal menghapus user ID: %v", err))
+		}
+		return c.Reply(fmt.Sprintf("✅ User ID <code>%s</code> berhasil dihapus dari daftar auto check-in.", html.EscapeString(userID)), tele.ModeHTML)
+	})
+
 	a.bot.Handle(&tele.Btn{Unique: "menu_backup"}, a.handleBackup)
 	a.bot.Handle(&tele.Btn{Unique: "menu_update"}, a.updateUI.HandleCheckUpdate)
 	a.bot.Handle(&tele.Btn{Unique: "btn_check_update"}, a.updateUI.HandleCheckUpdate)
@@ -734,6 +772,7 @@ func (a *AdminBot) registerCommands() {
 		{Text: "limits", Description: "Kelola batas token, upload & footer"},
 		{Text: "channels", Description: "Kelola bot Telegram & WhatsApp"},
 		{Text: "tavily", Description: "Konfigurasi Tavily AI search & testing"},
+		{Text: "checkin", Description: "Auto check-in harian & saldo kuota HCNSEC"},
 		{Text: "cron", Description: "Jadwal otomatisasi & trigger cron"},
 		{Text: "memory", Description: "Lihat memori profil & SOP bot"},
 		{Text: "stats", Description: "Statistik token & estimasi biaya"},

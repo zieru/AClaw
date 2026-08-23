@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -265,22 +266,27 @@ func ParseGoogleAuthInput(input string) (map[string]string, error) {
 // FetchSNlM0e fetches the CSRF session token (SNlM0e) from gemini.google.com/app
 func (p *GeminiWebProvider) FetchSNlM0e(ctx context.Context) (string, error) {
 	p.mu.Lock()
-	if p.snlm0e != "" && time.Since(p.snlm0eFetched) < 4*time.Hour {
+	if p.snlm0e != "" && time.Since(p.snlm0eFetched) < 1*time.Hour {
 		token := p.snlm0e
 		p.mu.Unlock()
 		return token, nil
 	}
 	cookieStr := p.cookies
 	client := p.client
+	provName := p.name
 	p.mu.Unlock()
 
 	if cookieStr == "" {
-		return "", errors.New("cookie Google belum diatur. Silakan jalankan /gemini_login")
+		err := errors.New("cookie Google belum diatur. Silakan jalankan /gemini_login")
+		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, err)
+		return "", err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://gemini.google.com/app", nil)
 	if err != nil {
-		return "", fmt.Errorf("gagal membuat request: %w", err)
+		reqErr := fmt.Errorf("gagal membuat request: %w", err)
+		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, reqErr)
+		return "", reqErr
 	}
 
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -290,7 +296,9 @@ func (p *GeminiWebProvider) FetchSNlM0e(ctx context.Context) (string, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("gagal menghubungi gemini.google.com: %w", err)
+		doErr := fmt.Errorf("gagal menghubungi gemini.google.com: %w", err)
+		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, doErr)
+		return "", doErr
 	}
 	defer resp.Body.Close()
 
@@ -302,12 +310,16 @@ func (p *GeminiWebProvider) FetchSNlM0e(ctx context.Context) (string, error) {
 		p.snlm0e = ""
 		p.snlm0eFetched = time.Time{}
 		p.mu.Unlock()
-		return "", errors.New("sesi Google login kedaluwarsa atau tidak valid (HTTP 401/403). Silakan perbarui cookie via /gemini_login")
+		authErr := errors.New("sesi Google login kedaluwarsa atau tidak valid (HTTP 401/403). Silakan perbarui cookie via /gemini_login")
+		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, authErr)
+		return "", authErr
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("gagal membaca response Gemini Web: %w", err)
+		readErr := fmt.Errorf("gagal membaca response Gemini Web: %w", err)
+		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, readErr)
+		return "", readErr
 	}
 
 	bodyStr := string(body)
@@ -321,9 +333,12 @@ func (p *GeminiWebProvider) FetchSNlM0e(ctx context.Context) (string, error) {
 			p.snlm0e = altMatches[1]
 			p.snlm0eFetched = time.Now()
 			p.mu.Unlock()
+			log.Printf("🔄 [GeminiWeb] Session token SNlM0e (%s) berhasil diperbarui", provName)
 			return altMatches[1], nil
 		}
-		return "", errors.New("gagal mengekstrak session token SNlM0e dari Gemini Web. Pastikan cookie __Secure-1PSID sudah benar dan akun sudah login")
+		extractErr := errors.New("gagal mengekstrak session token SNlM0e dari Gemini Web. Pastikan cookie __Secure-1PSID sudah benar dan akun sudah login")
+		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, extractErr)
+		return "", extractErr
 	}
 
 	snlm0e := matches[1]
@@ -332,6 +347,7 @@ func (p *GeminiWebProvider) FetchSNlM0e(ctx context.Context) (string, error) {
 	p.snlm0eFetched = time.Now()
 	p.mu.Unlock()
 
+	log.Printf("🔄 [GeminiWeb] Session token SNlM0e (%s) berhasil diperbarui", provName)
 	return snlm0e, nil
 }
 
