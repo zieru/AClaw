@@ -1,7 +1,10 @@
 package provider
 
 import (
+	"net/http"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseGoogleAuthInput(t *testing.T) {
@@ -67,3 +70,50 @@ func TestGeminiWebProviderInterface(t *testing.T) {
 		t.Errorf("expected IsFreeProvider(gemini_web) to be true")
 	}
 }
+
+func TestGeminiWebCookieAutoUpdate(t *testing.T) {
+	p := NewGeminiWebProvider("gemini_web", "__Secure-1PSID=initial_psid", "gemini-web-pro", nil)
+
+	var callbackInvoked bool
+	var capturedName, capturedCookies string
+	var capturedMap map[string]string
+
+	p.SetOnCookieUpdate(func(provName, newCookies string, cookieMap map[string]string) {
+		callbackInvoked = true
+		capturedName = provName
+		capturedCookies = newCookies
+		capturedMap = cookieMap
+	})
+
+	// Simulate HTTP response with Set-Cookie headers
+	resp := &http.Response{
+		Header: make(http.Header),
+	}
+	resp.Header.Add("Set-Cookie", "__Secure-1PSIDTS=rotated_token_123; Path=/; Domain=.google.com; Secure; HttpOnly")
+	resp.Header.Add("Set-Cookie", "__Secure-1PSIDCC=cc_token_456; Path=/; Domain=.google.com")
+
+	p.updateCookiesFromResponse(resp)
+
+	// Allow goroutine callback to execute
+	time.Sleep(50 * time.Millisecond)
+
+	if !callbackInvoked {
+		t.Fatalf("expected SetOnCookieUpdate callback to be invoked")
+	}
+	if capturedName != "gemini_web" {
+		t.Errorf("expected provName gemini_web, got %s", capturedName)
+	}
+	if capturedMap["__Secure-1PSIDTS"] != "rotated_token_123" {
+		t.Errorf("expected __Secure-1PSIDTS=rotated_token_123, got %s", capturedMap["__Secure-1PSIDTS"])
+	}
+	if capturedMap["__Secure-1PSIDCC"] != "cc_token_456" {
+		t.Errorf("expected __Secure-1PSIDCC=cc_token_456, got %s", capturedMap["__Secure-1PSIDCC"])
+	}
+	if capturedMap["__Secure-1PSID"] != "initial_psid" {
+		t.Errorf("expected __Secure-1PSID=initial_psid to be preserved, got %s", capturedMap["__Secure-1PSID"])
+	}
+	if !strings.Contains(capturedCookies, "__Secure-1PSIDTS=rotated_token_123") {
+		t.Errorf("expected cookies string to contain rotated token: %s", capturedCookies)
+	}
+}
+

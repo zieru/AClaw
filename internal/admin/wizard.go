@@ -988,7 +988,18 @@ func (w *ProviderWizard) syncProviderToManager(p *storage.ProviderRecord) {
 		if len(keys) > 0 {
 			authData = strings.Join(keys, "; ")
 		}
-		inst = provider.NewGeminiWebProvider(p.Name, authData, p.DefaultModel, models)
+		webInst := provider.NewGeminiWebProvider(p.Name, authData, p.DefaultModel, models)
+		if w.db != nil {
+			webInst.SetOnCookieUpdate(func(provName, newCookies string, cookieMap map[string]string) {
+				pRec, err := w.db.GetProvider(provName)
+				if err == nil && pRec != nil {
+					pRec.APIKey = newCookies
+					pRec.APIKeys = []string{newCookies}
+					_ = w.db.SaveProvider(pRec)
+				}
+			})
+		}
+		inst = webInst
 	case "gemini":
 		inst = provider.NewGeminiProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
 	case "anthropic":

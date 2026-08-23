@@ -16,6 +16,9 @@ import (
 	"time"
 )
 
+// CookieUpdateCallback is invoked whenever Google returns updated session cookies (e.g. rotated __Secure-1PSIDTS)
+type CookieUpdateCallback func(providerName string, newCookies string, cookieMap map[string]string)
+
 // GeminiWebProvider scrapes/interacts with Gemini Web (gemini.google.com) using Google session cookies
 type GeminiWebProvider struct {
 	mu             sync.Mutex
@@ -30,6 +33,7 @@ type GeminiWebProvider struct {
 	responseID     string
 	choiceID       string
 	client         *http.Client
+	onCookieUpdate CookieUpdateCallback
 }
 
 var (
@@ -68,6 +72,59 @@ func (p *GeminiWebProvider) Models() []string     { return p.models }
 func (p *GeminiWebProvider) SetHTTPClient(client interface{}) {
 	if c, ok := client.(*http.Client); ok && c != nil {
 		p.client = c
+	}
+}
+
+// SetOnCookieUpdate configures a callback listener for automatic cookie updates
+func (p *GeminiWebProvider) SetOnCookieUpdate(cb CookieUpdateCallback) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onCookieUpdate = cb
+}
+
+// updateCookiesFromResponse extracts Set-Cookie headers and updates local state & triggers persistence
+func (p *GeminiWebProvider) updateCookiesFromResponse(resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	cookies := resp.Cookies()
+	if len(cookies) == 0 {
+		return
+	}
+
+	var updated bool
+	p.mu.Lock()
+	if p.cookieMap == nil {
+		p.cookieMap = make(map[string]string)
+	}
+	for _, c := range cookies {
+		if c.Value != "" && p.cookieMap[c.Name] != c.Value {
+			p.cookieMap[c.Name] = c.Value
+			updated = true
+		}
+	}
+	if !updated {
+		p.mu.Unlock()
+		return
+	}
+
+	var parts []string
+	for k, v := range p.cookieMap {
+		parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+	}
+	p.cookies = strings.Join(parts, "; ")
+
+	cb := p.onCookieUpdate
+	provName := p.name
+	cookieStr := p.cookies
+	cookieMapCopy := make(map[string]string, len(p.cookieMap))
+	for k, v := range p.cookieMap {
+		cookieMapCopy[k] = v
+	}
+	p.mu.Unlock()
+
+	if cb != nil {
+		go cb(provName, cookieStr, cookieMapCopy)
 	}
 }
 
@@ -237,7 +294,14 @@ func (p *GeminiWebProvider) FetchSNlM0e(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 
+	// Capture any rotated cookies
+	p.updateCookiesFromResponse(resp)
+
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		p.mu.Lock()
+		p.snlm0e = ""
+		p.snlm0eFetched = time.Time{}
+		p.mu.Unlock()
 		return "", errors.New("sesi Google login kedaluwarsa atau tidak valid (HTTP 401/403). Silakan perbarui cookie via /gemini_login")
 	}
 
@@ -352,7 +416,16 @@ func (p *GeminiWebProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 	}
 	defer httpResp.Body.Close()
 
+	// Capture any rotated cookies from RPC response
+	p.updateCookiesFromResponse(httpResp)
+
 	if httpResp.StatusCode != http.StatusOK {
+		if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
+			p.mu.Lock()
+			p.snlm0e = ""
+			p.snlm0eFetched = time.Time{}
+			p.mu.Unlock()
+		}
 		bodySample, _ := io.ReadAll(io.LimitReader(httpResp.Body, 512))
 		return nil, fmt.Errorf("Gemini Web mengembalikan status HTTP %d: %s", httpResp.StatusCode, string(bodySample))
 	}
