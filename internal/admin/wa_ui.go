@@ -397,10 +397,6 @@ func (ui *WhatsAppUI) RenderGroupWhitelistWizard(c tele.Context, channelID strin
 		itemRows = append(itemRows, menu.Row(btn))
 	}
 
-	for _, r := range itemRows {
-		menu.Inline(r)
-	}
-
 	// Pagination Navigation
 	var navRow []tele.Btn
 	if page > 0 {
@@ -411,7 +407,7 @@ func (ui *WhatsAppUI) RenderGroupWhitelistWizard(c tele.Context, channelID strin
 		navRow = append(navRow, menu.Data("Next ➡️", fmt.Sprintf("chan_wa_gwiz_%s_%d", channelID, page+1)))
 	}
 	if len(navRow) > 0 {
-		menu.Inline(menu.Row(navRow...))
+		itemRows = append(itemRows, menu.Row(navRow...))
 	}
 
 	btnManual := menu.Data("➕ Input Manual", fmt.Sprintf("chan_wa_input_grp_%s", channelID))
@@ -419,10 +415,12 @@ func (ui *WhatsAppUI) RenderGroupWhitelistWizard(c tele.Context, channelID strin
 	btnClear := menu.Data("🗑️ Kosongkan Whitelist", fmt.Sprintf("chan_wa_clr_grp_%s", channelID))
 	btnBack := menu.Data("⬅️ Kembali ke Menu Whitelist", fmt.Sprintf("chan_wa_list_menu_%s", channelID))
 
-	menu.Inline(
+	itemRows = append(itemRows,
 		menu.Row(btnManual, btnRefresh),
 		menu.Row(btnClear, btnBack),
 	)
+
+	menu.Inline(itemRows...)
 
 	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
 }

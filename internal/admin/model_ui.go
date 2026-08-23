@@ -183,6 +183,7 @@ func (ui *ModelUI) RenderCombosList(c tele.Context) (string, *tele.ReplyMarkup) 
 
 	combos := ui.providerManager.ListCombos()
 	menu := &tele.ReplyMarkup{}
+	var rows []tele.Row
 
 	var sb strings.Builder
 	sb.WriteString("🔀 <b>PILIH MODEL COMBO / CHAIN</b>\n\n")
@@ -191,7 +192,6 @@ func (ui *ModelUI) RenderCombosList(c tele.Context) (string, *tele.ReplyMarkup) 
 		sb.WriteString("<i>(Belum ada combo yang terdaftar. Buat dengan <code>/addcombo</code> atau <code>/combowizard</code>)</i>\n\n")
 	} else {
 		sb.WriteString("Pilih salah satu fallback combo di bawah untuk diterapkan:\n\n")
-		var rows []tele.Row
 		var curRow []tele.Btn
 
 		for i, cRec := range combos {
@@ -211,14 +211,12 @@ func (ui *ModelUI) RenderCombosList(c tele.Context) (string, *tele.ReplyMarkup) 
 		if len(curRow) > 0 {
 			rows = append(rows, menu.Row(curRow...))
 		}
-		for _, r := range rows {
-			menu.Inline(r)
-		}
 		sb.WriteString("\n💡 <i>Klik tombol di bawah atau balas chat dengan nomor/nama combo pilihan Anda:</i>\n")
 	}
 
 	btnBack := menu.Data("⬅️ Kembali ke Menu Model", "mod_main")
-	menu.Inline(menu.Row(btnBack))
+	rows = append(rows, menu.Row(btnBack))
+	menu.Inline(rows...)
 
 	return sb.String(), menu
 }
@@ -231,6 +229,7 @@ func (ui *ModelUI) RenderProvidersList(c tele.Context) (string, *tele.ReplyMarku
 
 	providers := ui.providerManager.ListAll()
 	menu := &tele.ReplyMarkup{}
+	var rows []tele.Row
 
 	var sb strings.Builder
 	sb.WriteString("🤖 <b>PILIH PROVIDER AI</b>\n\n")
@@ -239,8 +238,6 @@ func (ui *ModelUI) RenderProvidersList(c tele.Context) (string, *tele.ReplyMarku
 		sb.WriteString("<i>(Tidak ada provider AI aktif yang terdaftar)</i>\n\n")
 	} else {
 		sb.WriteString("Silakan pilih provider untuk melihat seluruh model yang tersedia:\n\n")
-
-		var rows []tele.Row
 		var curRow []tele.Btn
 
 		for i, p := range providers {
@@ -257,14 +254,12 @@ func (ui *ModelUI) RenderProvidersList(c tele.Context) (string, *tele.ReplyMarku
 		if len(curRow) > 0 {
 			rows = append(rows, menu.Row(curRow...))
 		}
-		for _, r := range rows {
-			menu.Inline(r)
-		}
 		sb.WriteString("\n💡 <i>Klik tombol di bawah atau balas chat dengan nomor/nama provider pilihan Anda:</i>\n")
 	}
 
 	btnBack := menu.Data("⬅️ Kembali ke Menu Model", "mod_main")
-	menu.Inline(menu.Row(btnBack))
+	rows = append(rows, menu.Row(btnBack))
+	menu.Inline(rows...)
 
 	return sb.String(), menu
 }
@@ -342,10 +337,6 @@ func (ui *ModelUI) RenderProviderModels(c tele.Context, provName string, page in
 		rows = append(rows, menu.Row(btn))
 	}
 
-	for _, r := range rows {
-		menu.Inline(r)
-	}
-
 	sb.WriteString("\n💡 <i>Klik tombol atau balas chat dengan nomor/nama model pilihan Anda:</i>\n")
 
 	// Pagination Navigation row
@@ -357,11 +348,15 @@ func (ui *ModelUI) RenderProviderModels(c tele.Context, provName string, page in
 	if page < totalPages-1 {
 		navRow = append(navRow, menu.Data("Next ➡️", fmt.Sprintf("mod_p_next_%s_%d", provName, page+1)))
 	}
-	menu.Inline(menu.Row(navRow...))
+	if len(navRow) > 0 {
+		rows = append(rows, menu.Row(navRow...))
+	}
 
 	btnBackProv := menu.Data("⬅️ Daftar Provider", "mod_menu_providers")
 	btnBackMain := menu.Data("🏠 Menu Model", "mod_main")
-	menu.Inline(menu.Row(btnBackProv, btnBackMain))
+	rows = append(rows, menu.Row(btnBackProv, btnBackMain))
+
+	menu.Inline(rows...)
 
 	return sb.String(), menu
 }
