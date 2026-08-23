@@ -46,3 +46,41 @@ Here is inline code: ` + "`my_variable`" + ` in text.`
 		t.Errorf("Expected code block preserved, got %s", output)
 	}
 }
+
+func TestMarkdownTableToWhatsApp(t *testing.T) {
+	input := `Berikut adalah daftar server kami:
+
+| No | Server Name | Status | CPU |
+| --- | --- | --- | --- |
+| 1 | Web-Primary | Online | 45% |
+| 2 | DB-Replica | Standby | 12% |
+
+Dan berikut konfigurasi simpel:
+
+| Param | Value |
+| --- | --- |
+| Port | 8080 |
+| Host | localhost |
+`
+
+	output := MarkdownToWhatsApp(input)
+
+	// Check table 1
+	if !strings.Contains(output, "*#1 Web-Primary*") {
+		t.Errorf("Expected '*#1 Web-Primary*', got:\n%s", output)
+	}
+	if !strings.Contains(output, "*Status:* Online") {
+		t.Errorf("Expected '*Status:* Online', got:\n%s", output)
+	}
+	if !strings.Contains(output, "*CPU:* 45%") {
+		t.Errorf("Expected '*CPU:* 45%%', got:\n%s", output)
+	}
+
+	// Check 2-column table
+	if !strings.Contains(output, "*Port:* 8080") {
+		t.Errorf("Expected '*Port:* 8080', got:\n%s", output)
+	}
+	if !strings.Contains(output, "*Host:* localhost") {
+		t.Errorf("Expected '*Host:* localhost', got:\n%s", output)
+	}
+}

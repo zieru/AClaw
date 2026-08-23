@@ -71,29 +71,183 @@ func MarkdownToWhatsApp(md string) string {
 	// 4. Convert Horizontal Rules (---, ***, ___) -> clean divider
 	text = hrRegex.ReplaceAllString(text, "───────────────")
 
-	// 5. Convert Headers: ### Title -> *Title*
+	// 5. Convert Markdown Tables to Beautiful WhatsApp Card Lists
+	text = convertMarkdownTables(text)
+
+	// 6. Convert Headers: ### Title -> *Title*
 	text = headerRegex.ReplaceAllString(text, `*$1*`)
 
-	// 6. Convert Bold + Italic: ***text*** -> *_text_*
+	// 7. Convert Bold + Italic: ***text*** -> *_text_*
 	text = boldItalicRegex.ReplaceAllString(text, `*_$1_*`)
 
-	// 7. Convert Bold: **text** -> *text*
+	// 8. Convert Bold: **text** -> *text*
 	text = boldRegex.ReplaceAllString(text, `*$1*`)
 
-	// 8. Convert Strikethrough: ~~text~~ -> ~text~
+	// 9. Convert Strikethrough: ~~text~~ -> ~text~
 	text = strikeRegex.ReplaceAllString(text, `~$1~`)
 
-	// 9. Restore Inline Codes
+	// 10. Restore Inline Codes
 	for i, code := range inlineCodes {
 		placeholder := fmt.Sprintf("___WA_INLINE_CODE_%d___", i)
 		text = strings.ReplaceAll(text, placeholder, code)
 	}
 
-	// 10. Restore Code Blocks
+	// 11. Restore Code Blocks
 	for i, block := range codeBlocks {
 		placeholder := fmt.Sprintf("___WA_CODE_BLOCK_%d___", i)
 		text = strings.ReplaceAll(text, placeholder, block)
 	}
 
 	return strings.TrimSpace(text)
+}
+
+// convertMarkdownTables detects markdown tables and formats them into readable WhatsApp card lists
+func convertMarkdownTables(text string) string {
+	lines := strings.Split(text, "\n")
+	var newLines []string
+	i := 0
+
+	for i < len(lines) {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		// Check if current line is a table header followed by a separator line
+		if isTableLine(trimmed) && i+1 < len(lines) && isTableSeparator(lines[i+1]) {
+			headers := parseTableRow(trimmed)
+			i += 2 // Skip header and separator
+
+			var dataRows [][]string
+			for i < len(lines) && isTableLine(lines[i]) {
+				row := parseTableRow(lines[i])
+				if len(row) > 0 {
+					dataRows = append(dataRows, row)
+				}
+				i++
+			}
+
+			if len(headers) > 0 && len(dataRows) > 0 {
+				newLines = append(newLines, formatTableAsWAList(headers, dataRows)...)
+			}
+			continue
+		}
+
+		newLines = append(newLines, line)
+		i++
+	}
+
+	return strings.Join(newLines, "\n")
+}
+
+func isTableLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.Contains(trimmed, "|") && len(trimmed) > 1
+}
+
+func isTableSeparator(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !strings.Contains(trimmed, "|") || !strings.Contains(trimmed, "-") {
+		return false
+	}
+	// A separator contains only |, -, :, and spaces
+	clean := strings.ReplaceAll(trimmed, "|", "")
+	clean = strings.ReplaceAll(clean, "-", "")
+	clean = strings.ReplaceAll(clean, ":", "")
+	clean = strings.ReplaceAll(clean, " ", "")
+	return clean == ""
+}
+
+func parseTableRow(line string) []string {
+	trimmed := strings.TrimSpace(line)
+	// Remove outer pipes if present
+	trimmed = strings.TrimPrefix(trimmed, "|")
+	trimmed = strings.TrimSuffix(trimmed, "|")
+
+	rawCols := strings.Split(trimmed, "|")
+	var cols []string
+	for _, col := range rawCols {
+		cols = append(cols, strings.TrimSpace(col))
+	}
+	return cols
+}
+
+func formatTableAsWAList(headers []string, rows [][]string) []string {
+	var out []string
+	out = append(out, "") // blank line before table
+
+	for idx, row := range rows {
+		if len(row) == 0 {
+			continue
+		}
+
+		// Clean row items
+		cols := make([]string, len(row))
+		for i, c := range row {
+			cols[i] = strings.TrimSpace(c)
+		}
+
+		if len(cols) == 2 {
+			// Simple 2-column key-value format: • *Key:* Value
+			k := cols[0]
+			v := cols[1]
+			out = append(out, fmt.Sprintf("• *%s:* %s", k, v))
+		} else if len(cols) > 2 {
+			// Multi-column format
+			col1 := cols[0]
+			col2 := cols[1]
+
+			// Check if column 1 is a numeric index / item number
+			isNumeric := isNumberOrIndex(col1)
+			if isNumeric && len(headers) > 1 {
+				out = append(out, fmt.Sprintf("• *#%s %s*", col1, col2))
+				// Output remaining columns as sub-items
+				for cIdx := 2; cIdx < len(cols); cIdx++ {
+					headerName := ""
+					if cIdx < len(headers) {
+						headerName = headers[cIdx]
+					}
+					if headerName != "" {
+						out = append(out, fmt.Sprintf("   — *%s:* %s", headerName, cols[cIdx]))
+					} else {
+						out = append(out, fmt.Sprintf("   — %s", cols[cIdx]))
+					}
+				}
+			} else {
+				// Column 1 as primary title
+				out = append(out, fmt.Sprintf("• *%s*", col1))
+				for cIdx := 1; cIdx < len(cols); cIdx++ {
+					headerName := ""
+					if cIdx < len(headers) {
+						headerName = headers[cIdx]
+					}
+					if headerName != "" {
+						out = append(out, fmt.Sprintf("   — *%s:* %s", headerName, cols[cIdx]))
+					} else {
+						out = append(out, fmt.Sprintf("   — %s", cols[cIdx]))
+					}
+				}
+			}
+
+			if idx < len(rows)-1 {
+				out = append(out, "") // blank line between multi-column cards
+			}
+		} else if len(cols) == 1 {
+			out = append(out, fmt.Sprintf("• %s", cols[0]))
+		}
+	}
+
+	out = append(out, "") // blank line after table
+	return out
+}
+
+func isNumberOrIndex(s string) bool {
+	s = strings.TrimSuffix(strings.TrimSpace(s), ".")
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

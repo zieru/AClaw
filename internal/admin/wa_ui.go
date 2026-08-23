@@ -215,9 +215,9 @@ func (ui *WhatsAppUI) RenderDMPolicyMenu(c tele.Context, channelID string) error
 		"Status Saat Ini: <b>%s</b>", html.EscapeString(ch.Name), strings.ToUpper(st.DMPolicy))
 
 	menu := &tele.ReplyMarkup{}
-	btnAllow := menu.Data("🟢 Allow All (Terbuka)", fmt.Sprintf("chan_wa_set_dm_%s_allow", channelID))
-	btnTrusted := menu.Data("🟡 Trusted List Only", fmt.Sprintf("chan_wa_set_dm_%s_trusted", channelID))
-	btnBlock := menu.Data("🔴 Block All DM", fmt.Sprintf("chan_wa_set_dm_%s_block", channelID))
+	btnAllow := menu.Data("🟢 Allow All (Terbuka)", fmt.Sprintf("chan_wa_set_dm_%s__allow", channelID))
+	btnTrusted := menu.Data("🟡 Trusted List Only", fmt.Sprintf("chan_wa_set_dm_%s__trusted", channelID))
+	btnBlock := menu.Data("🔴 Block All DM", fmt.Sprintf("chan_wa_set_dm_%s__block", channelID))
 	btnBack := menu.Data("⬅️ Kembali ke Menu WA", fmt.Sprintf("chan_ed_pick_%s", channelID))
 
 	menu.Inline(
@@ -252,9 +252,9 @@ func (ui *WhatsAppUI) RenderGroupPolicyMenu(c tele.Context, channelID string) er
 		"Status Saat Ini: <b>%s</b>", html.EscapeString(ch.Name), strings.ToUpper(st.GroupPolicy))
 
 	menu := &tele.ReplyMarkup{}
-	btnAllow := menu.Data("🟢 Allow All Groups", fmt.Sprintf("chan_wa_set_grp_%s_allow_all", channelID))
-	btnWhite := menu.Data("🟡 Whitelist Only", fmt.Sprintf("chan_wa_set_grp_%s_whitelist", channelID))
-	btnBlock := menu.Data("🔴 Block All Groups", fmt.Sprintf("chan_wa_set_grp_%s_block", channelID))
+	btnAllow := menu.Data("🟢 Allow All Groups", fmt.Sprintf("chan_wa_set_grp_%s__allow_all", channelID))
+	btnWhite := menu.Data("🟡 Whitelist Only", fmt.Sprintf("chan_wa_set_grp_%s__whitelist", channelID))
+	btnBlock := menu.Data("🔴 Block All Groups", fmt.Sprintf("chan_wa_set_grp_%s__block", channelID))
 	btnWiz := menu.Data("🧙‍♂️ Wizard Pilih Grup (Auto-Detect)", fmt.Sprintf("chan_wa_gwiz_%s_0", channelID))
 	btnBack := menu.Data("⬅️ Kembali ke Menu WA", fmt.Sprintf("chan_ed_pick_%s", channelID))
 
@@ -290,8 +290,8 @@ func (ui *WhatsAppUI) RenderMentionPolicyMenu(c tele.Context, channelID string) 
 		"Status Saat Ini: <b>%s</b>", html.EscapeString(ch.Name), strings.ToUpper(st.MentionPolicy))
 
 	menu := &tele.ReplyMarkup{}
-	btnReq := menu.Data("🎯 Wajib Mention / Reply (Disarankan)", fmt.Sprintf("chan_wa_set_men_%s_require_mention", channelID))
-	btnAll := menu.Data("📢 Balas Semua Pesan Grup", fmt.Sprintf("chan_wa_set_men_%s_all", channelID))
+	btnReq := menu.Data("🎯 Wajib Mention / Reply (Disarankan)", fmt.Sprintf("chan_wa_set_men_%s__require_mention", channelID))
+	btnAll := menu.Data("📢 Balas Semua Pesan Grup", fmt.Sprintf("chan_wa_set_men_%s__all", channelID))
 	btnBack := menu.Data("⬅️ Kembali ke Menu WA", fmt.Sprintf("chan_ed_pick_%s", channelID))
 
 	menu.Inline(

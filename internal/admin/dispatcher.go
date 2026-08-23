@@ -397,10 +397,8 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 	}
 	if strings.HasPrefix(data, "chan_wa_set_dm_") {
 		raw := strings.TrimPrefix(data, "chan_wa_set_dm_")
-		lastUnderscore := strings.LastIndex(raw, "_")
-		if lastUnderscore != -1 {
-			chID := raw[:lastUnderscore]
-			policy := raw[lastUnderscore+1:]
+		chID, policy := parseChannelPolicyCallback(raw)
+		if chID != "" && policy != "" {
 			return a.channelUI.GetWhatsAppUI().HandleSetDMPolicy(c, chID, policy)
 		}
 	}
@@ -410,10 +408,8 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 	}
 	if strings.HasPrefix(data, "chan_wa_set_grp_") {
 		raw := strings.TrimPrefix(data, "chan_wa_set_grp_")
-		lastUnderscore := strings.LastIndex(raw, "_")
-		if lastUnderscore != -1 {
-			chID := raw[:lastUnderscore]
-			policy := raw[lastUnderscore+1:]
+		chID, policy := parseChannelPolicyCallback(raw)
+		if chID != "" && policy != "" {
 			return a.channelUI.GetWhatsAppUI().HandleSetGroupPolicy(c, chID, policy)
 		}
 	}
@@ -423,10 +419,8 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 	}
 	if strings.HasPrefix(data, "chan_wa_set_men_") {
 		raw := strings.TrimPrefix(data, "chan_wa_set_men_")
-		lastUnderscore := strings.LastIndex(raw, "_")
-		if lastUnderscore != -1 {
-			chID := raw[:lastUnderscore]
-			policy := raw[lastUnderscore+1:]
+		chID, policy := parseChannelPolicyCallback(raw)
+		if chID != "" && policy != "" {
 			return a.channelUI.GetWhatsAppUI().HandleSetMentionPolicy(c, chID, policy)
 		}
 	}
@@ -600,4 +594,16 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 	}
 
 	return nil
+}
+
+func parseChannelPolicyCallback(raw string) (string, string) {
+	if strings.Contains(raw, "__") {
+		parts := strings.SplitN(raw, "__", 2)
+		return parts[0], parts[1]
+	}
+	lastUnderscore := strings.LastIndex(raw, "_")
+	if lastUnderscore != -1 {
+		return raw[:lastUnderscore], raw[lastUnderscore+1:]
+	}
+	return "", ""
 }
