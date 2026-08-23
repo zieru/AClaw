@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,8 @@ import (
 	"goassistant/internal/agent"
 	"goassistant/internal/config"
 	"goassistant/internal/storage"
+	"goassistant/internal/tokensaver"
+	"goassistant/internal/version"
 	"goassistant/internal/waformat"
 
 	"github.com/skip2/go-qrcode"
@@ -508,14 +511,47 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 			}
 			policy := a.db.GetResolvedPolicy(a.channelID, chatID)
 
-			statusText := fmt.Sprintf("🤖 *STATUS ASISTEN AI (WHATSAPP)*\n\n"+
-				"• Channel: *%s*\n"+
+			var mem runtime.MemStats
+			runtime.ReadMemStats(&mem)
+			allocMB := float64(mem.Alloc) / (1024 * 1024)
+			sysMB := float64(mem.Sys) / (1024 * 1024)
+
+			tsStats := tokensaver.GetStats()
+			savedTokens := tsStats.TotalTokensSaved.Load()
+			origTokens := tsStats.TotalOriginalTokens.Load()
+			var pctSaved float64
+			if origTokens > 0 {
+				pctSaved = (float64(savedTokens) / float64(origTokens)) * 100
+			}
+
+			modelInfo := "Default / Auto Router"
+			if policy.ModelOverride != "" {
+				modelInfo = fmt.Sprintf("`%s`", policy.ModelOverride)
+			}
+
+			totalSessions, _ := a.db.CountActiveSessions()
+
+			statusText := fmt.Sprintf("⚡ *STATUS SISTEM & ASISTEN AI (WHATSAPP)*\n\n"+
+				"🖥️ *Sistem & Runtime:*\n"+
+				"• Versi: `%s`\n"+
+				"• RAM (Heap/Sys): `%.2f MB / %.2f MB`\n"+
+				"• Goroutines: `%d aktif` | Cores: `%d CPU`\n\n"+
+				"🤖 *AI Engine & Obrolan:*\n"+
+				"• Channel: *%s* (`%s`)\n"+
 				"• Chat ID: `%s`\n"+
-				"• Sesi Aktif: `%d pesan` (Maks: `%d`)\n"+
-				"• Token Saver: `%s`\n"+
-				"• Model Override: `%s`\n\n"+
-				"💡 Gunakan */stop* untuk membatalkan atau */new* untuk reset sesi.",
-				a.name, chatID, msgCount, policy.MaxHistoryTurns, policy.TokenSaverMode, policy.ModelOverride)
+				"• Sesi Percakapan: `%d pesan` (Maks: `%d`)\n"+
+				"• Model Aktif: %s\n"+
+				"• Total Sesi Aktif: `%d sesi`\n\n"+
+				"🌿 *Token Saver:*\n"+
+				"• Mode: `%s`\n"+
+				"• Total Hemat: `%d tokens` (`%.1f%%` efisiensi)\n\n"+
+				"💡 *Perintah Cepat:*\n"+
+				"• */new* - Reset sesi & mulai percakapan baru\n"+
+				"• */stop* - Batalkan proses respon yang sedang berjalan\n"+
+				"• */help* - Buka panduan bantuan",
+				version.GetFullVersion(), allocMB, sysMB, runtime.NumGoroutine(), runtime.NumCPU(),
+				a.name, a.channelID, chatID, msgCount, policy.MaxHistoryTurns, modelInfo, totalSessions,
+				policy.TokenSaverMode, savedTokens, pctSaved)
 			_ = a.SendMessage(chatID, statusText)
 		}()
 		return

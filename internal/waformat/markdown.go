@@ -15,6 +15,14 @@ var (
 	strikeRegex      = regexp.MustCompile(`~~([^~\n]+)~~`)
 	linkRegex        = regexp.MustCompile(`\[([^\]]+)\]\((https?://[^\s\)]+)\)`)
 	hrRegex          = regexp.MustCompile(`(?m)^(\s*[-*_]\s*){3,}\s*$`)
+
+	htmlPreRegex    = regexp.MustCompile(`(?is)<pre>(.*?)</pre>`)
+	htmlCodeRegex   = regexp.MustCompile(`(?is)<code>(.*?)</code>`)
+	htmlBoldRegex   = regexp.MustCompile(`(?is)<(?:b|strong)>(.*?)</(?:b|strong)>`)
+	htmlItalicRegex = regexp.MustCompile(`(?is)<(?:i|em)>(.*?)</(?:i|em)>`)
+	htmlStrikeRegex = regexp.MustCompile(`(?is)<(?:s|strike|del)>(.*?)</(?:s|strike|del)>`)
+	htmlBrRegex     = regexp.MustCompile(`(?i)<br\s*/?>`)
+	htmlTagRegex    = regexp.MustCompile(`(?i)</?[a-zA-Z0-9_-]+(?:\s+[^>]*)?>`)
 )
 
 // MarkdownToWhatsApp formats standard markdown into WhatsApp-compatible text.
@@ -26,8 +34,12 @@ func MarkdownToWhatsApp(md string) string {
 	var codeBlocks []string
 	var inlineCodes []string
 
-	// 1. Extract and protect fenced code blocks
-	text := codeBlockRegex.ReplaceAllStringFunc(md, func(match string) string {
+	// 1. Convert HTML <pre> and <code> blocks before placeholder extraction
+	text := htmlPreRegex.ReplaceAllString(md, "```\n$1\n```")
+	text = htmlCodeRegex.ReplaceAllString(text, "`$1`")
+
+	// 2. Extract and protect fenced code blocks
+	text = codeBlockRegex.ReplaceAllStringFunc(text, func(match string) string {
 		sub := codeBlockRegex.FindStringSubmatch(match)
 		if len(sub) < 3 {
 			return match
@@ -41,7 +53,7 @@ func MarkdownToWhatsApp(md string) string {
 		return fmt.Sprintf("___WA_CODE_BLOCK_%d___", idx)
 	})
 
-	// 2. Extract and protect inline code
+	// 3. Extract and protect inline code
 	text = inlineCodeRegex.ReplaceAllStringFunc(text, func(match string) string {
 		sub := inlineCodeRegex.FindStringSubmatch(match)
 		if len(sub) < 2 {
@@ -54,7 +66,14 @@ func MarkdownToWhatsApp(md string) string {
 		return fmt.Sprintf("___WA_INLINE_CODE_%d___", idx)
 	})
 
-	// 3. Convert Links: [title](url) -> title (url)
+	// 4. Convert HTML Formatting Tags (<b>, <i>, <s>, <br>)
+	text = htmlBoldRegex.ReplaceAllString(text, `*$1*`)
+	text = htmlItalicRegex.ReplaceAllString(text, `_$1_`)
+	text = htmlStrikeRegex.ReplaceAllString(text, `~$1~`)
+	text = htmlBrRegex.ReplaceAllString(text, "\n")
+	text = htmlTagRegex.ReplaceAllString(text, "") // Strip any remaining HTML tags
+
+	// 5. Convert Links: [title](url) -> title (url)
 	text = linkRegex.ReplaceAllStringFunc(text, func(match string) string {
 		sub := linkRegex.FindStringSubmatch(match)
 		if len(sub) < 3 {
@@ -68,31 +87,31 @@ func MarkdownToWhatsApp(md string) string {
 		return fmt.Sprintf("%s (%s)", title, url)
 	})
 
-	// 4. Convert Horizontal Rules (---, ***, ___) -> clean divider
+	// 6. Convert Horizontal Rules (---, ***, ___) -> clean divider
 	text = hrRegex.ReplaceAllString(text, "───────────────")
 
-	// 5. Convert Markdown Tables to Beautiful WhatsApp Card Lists
+	// 7. Convert Markdown Tables to Beautiful WhatsApp Card Lists
 	text = convertMarkdownTables(text)
 
-	// 6. Convert Headers: ### Title -> *Title*
+	// 8. Convert Headers: ### Title -> *Title*
 	text = headerRegex.ReplaceAllString(text, `*$1*`)
 
-	// 7. Convert Bold + Italic: ***text*** -> *_text_*
+	// 9. Convert Bold + Italic: ***text*** -> *_text_*
 	text = boldItalicRegex.ReplaceAllString(text, `*_$1_*`)
 
-	// 8. Convert Bold: **text** -> *text*
+	// 10. Convert Bold: **text** -> *text*
 	text = boldRegex.ReplaceAllString(text, `*$1*`)
 
-	// 9. Convert Strikethrough: ~~text~~ -> ~text~
+	// 11. Convert Strikethrough: ~~text~~ -> ~text~
 	text = strikeRegex.ReplaceAllString(text, `~$1~`)
 
-	// 10. Restore Inline Codes
+	// 12. Restore Inline Codes
 	for i, code := range inlineCodes {
 		placeholder := fmt.Sprintf("___WA_INLINE_CODE_%d___", i)
 		text = strings.ReplaceAll(text, placeholder, code)
 	}
 
-	// 11. Restore Code Blocks
+	// 13. Restore Code Blocks
 	for i, block := range codeBlocks {
 		placeholder := fmt.Sprintf("___WA_CODE_BLOCK_%d___", i)
 		text = strings.ReplaceAll(text, placeholder, block)

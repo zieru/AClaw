@@ -84,3 +84,21 @@ Dan berikut konfigurasi simpel:
 		t.Errorf("Expected '*Host:* localhost', got:\n%s", output)
 	}
 }
+
+func TestHTMLTagsToWhatsApp(t *testing.T) {
+	input := "⏳ <b>Waktu Tunggu Habis (Timeout)</b>\nServer AI butuh waktu lama. Gunakan <code>/reset</code> jika perlu."
+	output := MarkdownToWhatsApp(input)
+
+	if strings.Contains(output, "<b>") || strings.Contains(output, "</b>") {
+		t.Errorf("Expected no <b> tags, got:\n%s", output)
+	}
+	if strings.Contains(output, "<code>") || strings.Contains(output, "</code>") {
+		t.Errorf("Expected no <code> tags, got:\n%s", output)
+	}
+	if !strings.Contains(output, "*Waktu Tunggu Habis (Timeout)*") {
+		t.Errorf("Expected '*Waktu Tunggu Habis (Timeout)*', got:\n%s", output)
+	}
+	if !strings.Contains(output, "`/reset`") {
+		t.Errorf("Expected '`/reset`', got:\n%s", output)
+	}
+}

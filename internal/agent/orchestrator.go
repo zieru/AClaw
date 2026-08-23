@@ -597,19 +597,19 @@ func FormatUserFriendlyError(err error) string {
 	errStr := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "canceled"):
-		return "🛑 <b>Proses Dibatalkan</b>\nEksekusi permintaan atau proses telah dihentikan oleh pengguna."
+		return "🛑 **Proses Dibatalkan**\nEksekusi permintaan atau proses telah dihentikan oleh pengguna."
 	case strings.Contains(errStr, "context deadline exceeded") || strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline"):
-		return "⏳ <b>Waktu Tunggu Habis (Timeout)</b>\nServer AI membutuhkan waktu terlalu lama untuk memproses (beban server tinggi atau konteks terlalu panjang). Riwayat percakapan telah disederhanakan secara otomatis. Silakan coba kirim ulang pertanyaan Anda, atau gunakan <code>/reset</code> jika kendala berlanjut."
+		return "⏳ **Waktu Tunggu Habis (Timeout)**\nServer AI membutuhkan waktu terlalu lama untuk memproses (beban server tinggi atau konteks terlalu panjang). Riwayat percakapan telah disederhanakan secara otomatis. Silakan coba kirim ulang pertanyaan Anda, atau gunakan `/reset` jika kendala berlanjut."
 	case strings.Contains(errStr, "context_length_exceeded") || strings.Contains(errStr, "maximum context length") || strings.Contains(errStr, "token limit"):
-		return "📏 <b>Batas Konteks Terlampaui</b>\nRiwayat percakapan melebihi kapasitas memori model AI. Riwayat telah dibersihkan otomatis. Silakan kirim ulang pertanyaan Anda."
+		return "📏 **Batas Konteks Terlampaui**\nRiwayat percakapan melebihi kapasitas memori model AI. Riwayat telah dibersihkan otomatis. Silakan kirim ulang pertanyaan Anda."
 	case strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "429") || strings.Contains(errStr, "quota"):
-		return "⚠️ <b>Batas Kuota / Rate Limit</b>\nLayanan AI sedang mencapai batas frekuensi panggilan atau kuota provider telah habis. Silakan coba beberapa saat lagi atau hubungi admin."
+		return "⚠️ **Batas Kuota / Rate Limit**\nLayanan AI sedang mencapai batas frekuensi panggilan atau kuota provider telah habis. Silakan coba beberapa saat lagi atau hubungi admin."
 	case strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no such host") || strings.Contains(errStr, "dial tcp"):
-		return "🔌 <b>Koneksi Terputus</b>\nGagal terhubung ke endpoint server AI. Mohon periksa koneksi jaringan atau coba beberapa saat lagi."
+		return "🔌 **Koneksi Terputus**\nGagal terhubung ke endpoint server AI. Mohon periksa koneksi jaringan atau coba beberapa saat lagi."
 	case strings.Contains(errStr, "seluruh target gagal"):
-		return "❌ <b>Layanan AI Sedang Gangguan</b>\nTarget provider/model AI saat ini tidak dapat merespons. Silakan coba lagi nanti atau hubungi admin."
+		return "❌ **Layanan AI Sedang Gangguan**\nTarget provider/model AI saat ini tidak dapat merespons. Silakan coba lagi nanti atau hubungi admin."
 	default:
-		return "❌ <b>Maaf, terjadi kendala teknis pada layanan AI.</b>\nSilakan coba lagi beberapa saat lagi atau gunakan <code>/reset</code> untuk memulai percakapan baru."
+		return "❌ **Maaf, terjadi kendala teknis pada layanan AI.**\nSilakan coba lagi beberapa saat lagi atau gunakan `/reset` untuk memulai percakapan baru."
 	}
 }
 
