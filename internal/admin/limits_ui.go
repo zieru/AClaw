@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"goassistant/internal/config"
+	"goassistant/internal/provider"
 	"goassistant/internal/storage"
 	tele "gopkg.in/telebot.v3"
 )
@@ -37,15 +38,17 @@ type LimitsSession struct {
 }
 
 type LimitsUI struct {
-	db       *storage.DB
-	mu       sync.RWMutex
-	sessions map[int64]*LimitsSession
+	db          *storage.DB
+	provManager *provider.Manager
+	mu          sync.RWMutex
+	sessions    map[int64]*LimitsSession
 }
 
-func NewLimitsUI(db *storage.DB) *LimitsUI {
+func NewLimitsUI(db *storage.DB, pm *provider.Manager) *LimitsUI {
 	return &LimitsUI{
-		db:       db,
-		sessions: make(map[int64]*LimitsSession),
+		db:          db,
+		provManager: pm,
+		sessions:    make(map[int64]*LimitsSession),
 	}
 }
 
@@ -790,26 +793,288 @@ func (ui *LimitsUI) RenderCompactionMenu(c tele.Context) error {
 	return c.EditOrSend(text, menu, tele.ModeHTML)
 }
 
-// RenderModelMenu renders model override options
+// RenderModelMenu renders interactive visual model override selector
 func (ui *LimitsUI) RenderModelMenu(c tele.Context) error {
 	sess, ok := ui.GetSession(c.Sender().ID)
 	if !ok || sess.Scope == "" {
 		return ui.StartLimitsWizard(c)
 	}
 
-	text := fmt.Sprintf("🤖 <b>ATUR MODEL OVERRIDE (<code>%s:%s</code>)</b>\n\n"+
-		"Kirim teks model override (misal: <code>gemini-2.5-flash</code> atau <code>combo_fast</code>) atau pilih tombol reset:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID))
+	pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
+	curModel := "🔄 (Mengikuti Default Provider)"
+	if pol != nil && pol.ModelOverride != "" {
+		curModel = fmt.Sprintf("🎯 <code>%s</code>", html.EscapeString(pol.ModelOverride))
+	}
+
+	text := fmt.Sprintf("🤖 <b>PENGATURAN MODEL OVERRIDE (<code>%s:%s</code>)</b>\n\n"+
+		"Model Aktif: %s\n\n"+
+		"Pilih salah satu metode untuk menentukan model AI yang digunakan:", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID), curModel)
 
 	menu := &tele.ReplyMarkup{}
-	bCust := menu.Data("✏️ Input Nama Model / Combo", "lim_input_model")
-	bReset := menu.Data("🔄 Reset ke Default Provider", "lim_set_val_model_none")
-	bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+	bCombos := menu.Data("🔀 Pilih Fallback Combo", "lim_mod_combos")
+	bProvs := menu.Data("🤖 Pilih Provider & Model", "lim_mod_provs")
+	bCust := menu.Data("✏️ Input Manual Nama Model", "lim_input_model")
+	bReset := menu.Data("🔄 Reset ke Default Router", "lim_set_val_model_none")
+	bBack := menu.Data("⬅️ Kembali ke Menu Limits", "lim_back_dash")
+
 	menu.Inline(
-		menu.Row(bCust),
-		menu.Row(bReset),
+		menu.Row(bCombos),
+		menu.Row(bProvs),
+		menu.Row(bCust, bReset),
 		menu.Row(bBack),
 	)
 	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// RenderLimitCombosPicker renders active fallback combos for selection
+func (ui *LimitsUI) RenderLimitCombosPicker(c tele.Context) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+
+	var combos []*storage.ModelComboRecord
+	if ui.provManager != nil {
+		combos = ui.provManager.ListCombos()
+	} else {
+		rawCombos, _ := ui.db.ListCombos()
+		for i := range rawCombos {
+			combos = append(combos, &rawCombos[i])
+		}
+	}
+
+	menu := &tele.ReplyMarkup{}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🔀 <b>PILIH FALLBACK COMBO (<code>%s:%s</code>)</b>\n\n", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID)))
+
+	if len(combos) == 0 {
+		sb.WriteString("<i>(Belum ada fallback combo yang terdaftar. Buat dengan /combowizard)</i>\n\n")
+	} else {
+		sb.WriteString("Klik salah satu combo di bawah untuk diterapkan:\n\n")
+		var rows []tele.Row
+		var curRow []tele.Btn
+		for i, combo := range combos {
+			var targets []string
+			for _, t := range combo.Targets {
+				targets = append(targets, fmt.Sprintf("%s/%s", t.ProviderID, t.Model))
+			}
+			sb.WriteString(fmt.Sprintf("%d. <b>%s</b>: <code>%s</code>\n", i+1, html.EscapeString(combo.Name), html.EscapeString(strings.Join(targets, " ➔ "))))
+
+			btn := menu.Data(fmt.Sprintf("🔀 %s", combo.Name), fmt.Sprintf("lim_mod_set_%s", combo.Name))
+			curRow = append(curRow, btn)
+			if len(curRow) == 2 {
+				rows = append(rows, menu.Row(curRow...))
+				curRow = []tele.Btn{}
+			}
+		}
+		if len(curRow) > 0 {
+			rows = append(rows, menu.Row(curRow...))
+		}
+		for _, r := range rows {
+			menu.Inline(r)
+		}
+	}
+
+	btnBack := menu.Data("⬅️ Kembali ke Menu Model", "lim_mod_menu")
+	menu.Inline(menu.Row(btnBack))
+
+	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
+}
+
+// RenderLimitProvidersPicker renders list of active AI providers
+func (ui *LimitsUI) RenderLimitProvidersPicker(c tele.Context) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+
+	if ui.provManager == nil {
+		return c.Reply("❌ Provider Manager tidak tersedia.")
+	}
+
+	providers := ui.provManager.ListAll()
+	menu := &tele.ReplyMarkup{}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🤖 <b>PILIH PROVIDER AI (<code>%s:%s</code>)</b>\n\n", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID)))
+
+	if len(providers) == 0 {
+		sb.WriteString("<i>(Tidak ada provider AI aktif yang terdaftar)</i>\n\n")
+	} else {
+		sb.WriteString("Pilih provider untuk melihat daftar model yang dapat digunakan:\n\n")
+		var rows []tele.Row
+		var curRow []tele.Btn
+		for _, p := range providers {
+			allModels := ui.getAllModelsForProvider(p)
+			btnText := fmt.Sprintf("🤖 %s (%d)", p.Name(), len(allModels))
+			btn := menu.Data(btnText, fmt.Sprintf("lim_mod_prov_%s_0", p.Name()))
+			curRow = append(curRow, btn)
+			if len(curRow) == 2 {
+				rows = append(rows, menu.Row(curRow...))
+				curRow = []tele.Btn{}
+			}
+		}
+		if len(curRow) > 0 {
+			rows = append(rows, menu.Row(curRow...))
+		}
+		for _, r := range rows {
+			menu.Inline(r)
+		}
+	}
+
+	btnBack := menu.Data("⬅️ Kembali ke Menu Model", "lim_mod_menu")
+	menu.Inline(menu.Row(btnBack))
+
+	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
+}
+
+// RenderLimitProviderModelsPicker renders models for a provider with pagination
+func (ui *LimitsUI) RenderLimitProviderModelsPicker(c tele.Context, provName string, page int) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+
+	if ui.provManager == nil {
+		return c.Reply("❌ Provider Manager tidak tersedia.")
+	}
+
+	p, ok := ui.provManager.Get(provName)
+	if !ok || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan atau sedang dinonaktifkan.")
+	}
+
+	allModels := ui.getAllModelsForProvider(p)
+	totalModels := len(allModels)
+	if totalModels == 0 {
+		menu := &tele.ReplyMarkup{}
+		btnBack := menu.Data("⬅️ Pilih Provider Lain", "lim_mod_provs")
+		menu.Inline(menu.Row(btnBack))
+		return c.EditOrSend(fmt.Sprintf("🤖 <b>PROVIDER: %s</b>\n\n<i>(Tidak ada model terdaftar untuk provider ini)</i>", html.EscapeString(provName)), menu, tele.ModeHTML)
+	}
+
+	const modelsPerPage = 6
+	totalPages := (totalModels + modelsPerPage - 1) / modelsPerPage
+	if page < 0 {
+		page = 0
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+
+	startIdx := page * modelsPerPage
+	endIdx := startIdx + modelsPerPage
+	if endIdx > totalModels {
+		endIdx = totalModels
+	}
+
+	pageModels := allModels[startIdx:endIdx]
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🤖 <b>DAFTAR MODEL: %s</b>\n", html.EscapeString(strings.ToUpper(provName))))
+	sb.WriteString(fmt.Sprintf("Scope: <code>%s:%s</code> | Hal <code>%d/%d</code> (Total: <code>%d</code>)\n\n", html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID), page+1, totalPages, totalModels))
+	sb.WriteString("Klik model di bawah untuk mengaktifkannya:\n\n")
+
+	menu := &tele.ReplyMarkup{}
+	var rows []tele.Row
+	for i, m := range pageModels {
+		globalIdx := startIdx + i + 1
+		isDef := strings.EqualFold(m, p.DefaultModel())
+		defTag := ""
+		if isDef {
+			defTag = " ⭐ (Default)"
+		}
+		sb.WriteString(fmt.Sprintf("%d. <code>%s</code>%s\n", globalIdx, html.EscapeString(m), defTag))
+
+		btnLabel := m
+		if len([]rune(btnLabel)) > 26 {
+			btnLabel = string([]rune(btnLabel)[:23]) + "..."
+		}
+		if isDef {
+			btnLabel = "⭐ " + btnLabel
+		}
+		btn := menu.Data(btnLabel, fmt.Sprintf("lim_mod_pick_%s_%d", provName, startIdx+i))
+		rows = append(rows, menu.Row(btn))
+	}
+
+	for _, r := range rows {
+		menu.Inline(r)
+	}
+
+	// Pagination Navigation
+	var navRow []tele.Btn
+	if page > 0 {
+		navRow = append(navRow, menu.Data("⬅️ Prev", fmt.Sprintf("lim_mod_prov_%s_%d", provName, page-1)))
+	}
+	navRow = append(navRow, menu.Data(fmt.Sprintf("📄 %d/%d", page+1, totalPages), "mod_noop"))
+	if page < totalPages-1 {
+		navRow = append(navRow, menu.Data("Next ➡️", fmt.Sprintf("lim_mod_prov_%s_%d", provName, page+1)))
+	}
+	if len(navRow) > 0 {
+		menu.Inline(menu.Row(navRow...))
+	}
+
+	btnBackProv := menu.Data("⬅️ Daftar Provider", "lim_mod_provs")
+	btnBackMain := menu.Data("🏠 Menu Model", "lim_mod_menu")
+	menu.Inline(menu.Row(btnBackProv, btnBackMain))
+
+	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
+}
+
+// HandlePickProviderModel handles model selection from provider models list
+func (ui *LimitsUI) HandlePickProviderModel(c tele.Context, provName string, modelIdx int) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+
+	if ui.provManager == nil {
+		_ = c.Respond(&tele.CallbackResponse{Text: "❌ Provider Manager tidak tersedia"})
+		return ui.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+	}
+
+	p, ok := ui.provManager.Get(provName)
+	if !ok || p == nil {
+		_ = c.Respond(&tele.CallbackResponse{Text: "❌ Provider tidak ditemukan"})
+		return ui.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+	}
+
+	allModels := ui.getAllModelsForProvider(p)
+	if modelIdx < 0 || modelIdx >= len(allModels) {
+		_ = c.Respond(&tele.CallbackResponse{Text: "❌ Model tidak valid"})
+		return ui.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+	}
+
+	chosenModel := allModels[modelIdx]
+	pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
+	if pol == nil {
+		pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
+	}
+	pol.ModelOverride = chosenModel
+	_ = ui.db.SavePolicy(pol)
+
+	_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🎯 Model '%s' aktif!", chosenModel)})
+	return ui.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
+}
+
+func (ui *LimitsUI) getAllModelsForProvider(p provider.Provider) []string {
+	seen := make(map[string]bool)
+	var list []string
+
+	if def := strings.TrimSpace(p.DefaultModel()); def != "" {
+		list = append(list, def)
+		seen[strings.ToLower(def)] = true
+	}
+
+	for _, m := range p.Models() {
+		m = strings.TrimSpace(m)
+		if m != "" && !seen[strings.ToLower(m)] {
+			seen[strings.ToLower(m)] = true
+			list = append(list, m)
+		}
+	}
+
+	return list
 }
 
 // RenderTimeoutAPIMenu renders timeout API call options

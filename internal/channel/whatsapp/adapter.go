@@ -599,30 +599,147 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 	}()
 }
 
+// JoinedGroupInfo holds basic info about a WhatsApp group
+type JoinedGroupInfo struct {
+	JID           string
+	Name          string
+	Topic         string
+	OwnerJID      string
+	IsWhitelisted bool
+}
+
+// GetJoinedGroups retrieves list of WhatsApp groups the bot account is currently a member of
+func (a *NativeAdapter) GetJoinedGroups(ctx context.Context) ([]*JoinedGroupInfo, error) {
+	if a.client == nil || !a.client.IsConnected() {
+		return nil, fmt.Errorf("WhatsApp adapter '%s' tidak sedang terhubung", a.name)
+	}
+
+	rawGroups, err := a.client.GetJoinedGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	st := a.GetSettings()
+	whitelistedMap := make(map[string]bool)
+	for _, g := range st.AllowedGroups {
+		clean := strings.TrimSpace(g)
+		if clean != "" {
+			whitelistedMap[clean] = true
+			whitelistedMap[strings.ToLower(clean)] = true
+		}
+	}
+
+	var res []*JoinedGroupInfo
+	for _, rg := range rawGroups {
+		if rg == nil {
+			continue
+		}
+		gJID := rg.JID.String()
+		name := rg.GroupName.Name
+		if strings.TrimSpace(name) == "" {
+			name = "(Tanpa Nama)"
+		}
+
+		isWhite := whitelistedMap[gJID] || whitelistedMap[rg.JID.User] || whitelistedMap[strings.ToLower(gJID)]
+		res = append(res, &JoinedGroupInfo{
+			JID:           gJID,
+			Name:          name,
+			Topic:         rg.GroupTopic.Topic,
+			OwnerJID:      rg.OwnerJID.String(),
+			IsWhitelisted: isWhite,
+		})
+	}
+
+	return res, nil
+}
+
 // isBotMentionedOrReplied checks if the bot is @mentioned or quoted in a group message
 func (a *NativeAdapter) isBotMentionedOrReplied(msg *events.Message) bool {
-	if a.client.Store.ID == nil {
+	if a.client == nil || a.client.Store == nil || a.client.Store.ID == nil {
 		return false
 	}
-	botUser := a.client.Store.ID.User
 
-	// Check ContextInfo for mentions and reply
+	botID := *a.client.Store.ID
+	botUser := botID.User
+	normBotPhone := normalizePhone(botUser)
+
+	var botLID waTypes.JID
+	if !a.client.Store.LID.IsEmpty() {
+		botLID = a.client.Store.LID
+	}
+
+	// 1. Check ContextInfo for mentions and reply
 	ctxInfo := getContextInfo(msg.Message)
 	if ctxInfo != nil {
-		for _, m := range ctxInfo.GetMentionedJID() {
-			if strings.Contains(m, botUser) {
+		// Check @mentions list
+		for _, mStr := range ctxInfo.GetMentionedJID() {
+			mStr = strings.TrimSpace(mStr)
+			if mStr == "" {
+				continue
+			}
+
+			// Direct string matching with Phone JID, LID, or bot User ID
+			if botUser != "" && strings.Contains(mStr, botUser) {
+				return true
+			}
+			if !botLID.IsEmpty() && (mStr == botLID.String() || strings.Contains(mStr, botLID.User)) {
+				return true
+			}
+			if normBotPhone != "" && strings.Contains(normalizePhone(mStr), normBotPhone) {
+				return true
+			}
+
+			// Parse and resolve Real JID (LID -> Phone JID)
+			if parsedJID, err := waTypes.ParseJID(mStr); err == nil {
+				realJID := a.resolveRealJID(parsedJID)
+				if realJID.User == botUser || (!botLID.IsEmpty() && realJID.User == botLID.User) {
+					return true
+				}
+				if normBotPhone != "" && normalizePhone(realJID.User) == normBotPhone {
+					return true
+				}
+			}
+		}
+
+		// Check Quote Reply (Participant who sent original message)
+		if partStr := ctxInfo.GetParticipant(); partStr != "" {
+			if botUser != "" && strings.Contains(partStr, botUser) {
+				return true
+			}
+			if !botLID.IsEmpty() && (partStr == botLID.String() || strings.Contains(partStr, botLID.User)) {
+				return true
+			}
+			if normBotPhone != "" && strings.Contains(normalizePhone(partStr), normBotPhone) {
+				return true
+			}
+
+			if parsedJID, err := waTypes.ParseJID(partStr); err == nil {
+				realJID := a.resolveRealJID(parsedJID)
+				if realJID.User == botUser || (!botLID.IsEmpty() && realJID.User == botLID.User) {
+					return true
+				}
+				if normBotPhone != "" && normalizePhone(realJID.User) == normBotPhone {
+					return true
+				}
+			}
+		}
+	}
+
+	// 2. Check if raw prompt text includes @botUser, phone number, or bot name
+	text := extractMessageText(msg.Message)
+	if text != "" {
+		if botUser != "" && strings.Contains(text, "@"+botUser) {
+			return true
+		}
+		if normBotPhone != "" && (strings.Contains(text, "@"+normBotPhone) || strings.Contains(text, "@08"+strings.TrimPrefix(normBotPhone, "628"))) {
+			return true
+		}
+		if a.name != "" {
+			cleanName := strings.TrimSpace(a.name)
+			if len(cleanName) >= 3 && strings.Contains(strings.ToLower(text), "@"+strings.ToLower(cleanName)) {
 				return true
 			}
 		}
-		if ctxInfo.GetParticipant() != "" && strings.Contains(ctxInfo.GetParticipant(), botUser) {
-			return true
-		}
-	}
-
-	// Check if prompt includes @botUser or name
-	text := extractMessageText(msg.Message)
-	if strings.Contains(text, "@"+botUser) {
-		return true
 	}
 
 	return false

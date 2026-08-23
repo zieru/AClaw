@@ -2,10 +2,13 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html"
 	"strings"
+	"sync"
+	"time"
 
 	"goassistant/internal/channel/whatsapp"
 	"goassistant/internal/storage"
@@ -13,14 +16,17 @@ import (
 )
 
 type WhatsAppUI struct {
-	db        *storage.DB
-	channelUI *ChannelUI
+	db           *storage.DB
+	channelUI    *ChannelUI
+	mu           sync.RWMutex
+	cachedGroups map[string][]*whatsapp.JoinedGroupInfo
 }
 
 func NewWhatsAppUI(db *storage.DB, cui *ChannelUI) *WhatsAppUI {
 	return &WhatsAppUI{
-		db:        db,
-		channelUI: cui,
+		db:           db,
+		channelUI:    cui,
+		cachedGroups: make(map[string][]*whatsapp.JoinedGroupInfo),
 	}
 }
 
@@ -249,12 +255,14 @@ func (ui *WhatsAppUI) RenderGroupPolicyMenu(c tele.Context, channelID string) er
 	btnAllow := menu.Data("🟢 Allow All Groups", fmt.Sprintf("chan_wa_set_grp_%s_allow_all", channelID))
 	btnWhite := menu.Data("🟡 Whitelist Only", fmt.Sprintf("chan_wa_set_grp_%s_whitelist", channelID))
 	btnBlock := menu.Data("🔴 Block All Groups", fmt.Sprintf("chan_wa_set_grp_%s_block", channelID))
+	btnWiz := menu.Data("🧙‍♂️ Wizard Pilih Grup (Auto-Detect)", fmt.Sprintf("chan_wa_gwiz_%s_0", channelID))
 	btnBack := menu.Data("⬅️ Kembali ke Menu WA", fmt.Sprintf("chan_ed_pick_%s", channelID))
 
 	menu.Inline(
 		menu.Row(btnAllow),
 		menu.Row(btnWhite),
 		menu.Row(btnBlock),
+		menu.Row(btnWiz),
 		menu.Row(btnBack),
 	)
 
@@ -295,6 +303,192 @@ func (ui *WhatsAppUI) RenderMentionPolicyMenu(c tele.Context, channelID string) 
 	return c.EditOrSend(text, menu, tele.ModeHTML)
 }
 
+// RenderGroupWhitelistWizard renders visual group selector with auto-discovery and pagination
+func (ui *WhatsAppUI) RenderGroupWhitelistWizard(c tele.Context, channelID string, page int) error {
+	ch, err := ui.db.GetChannel(channelID)
+	if err != nil || ch == nil {
+		return c.Reply("❌ Channel tidak ditemukan.")
+	}
+
+	mgr := whatsapp.GetManager()
+	var adapter *whatsapp.NativeAdapter
+	if mgr != nil {
+		adapter = mgr.GetAdapter(channelID)
+	}
+
+	if adapter == nil || !adapter.IsConnected() {
+		menu := &tele.ReplyMarkup{}
+		btnManual := menu.Data("➕ Input Manual ID Grup", fmt.Sprintf("chan_wa_input_grp_%s", channelID))
+		btnBack := menu.Data("⬅️ Kembali ke Whitelist", fmt.Sprintf("chan_wa_list_menu_%s", channelID))
+		menu.Inline(menu.Row(btnManual), menu.Row(btnBack))
+
+		return c.EditOrSend("⚠️ <b>WhatsApp Tidak Terhubung</b>\n\nUntuk mendeteksi grup secara otomatis, akun WhatsApp bot harus berstatus online/terhubung.\n\nAnda tetap dapat menambahkan ID grup secara manual:", menu, tele.ModeHTML)
+	}
+
+	// Fetch joined groups from WhatsApp
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	groups, err := adapter.GetJoinedGroups(ctx)
+	if err != nil {
+		menu := &tele.ReplyMarkup{}
+		btnRetry := menu.Data("🔄 Coba Lagi", fmt.Sprintf("chan_wa_gwiz_%s_%d", channelID, page))
+		btnBack := menu.Data("⬅️ Kembali ke Whitelist", fmt.Sprintf("chan_wa_list_menu_%s", channelID))
+		menu.Inline(menu.Row(btnRetry), menu.Row(btnBack))
+
+		return c.EditOrSend(fmt.Sprintf("❌ <b>Gagal Mengambil Daftar Grup:</b>\n<code>%s</code>", html.EscapeString(err.Error())), menu, tele.ModeHTML)
+	}
+
+	ui.mu.Lock()
+	ui.cachedGroups[channelID] = groups
+	ui.mu.Unlock()
+
+	totalGroups := len(groups)
+	if totalGroups == 0 {
+		menu := &tele.ReplyMarkup{}
+		btnManual := menu.Data("➕ Input Manual ID Grup", fmt.Sprintf("chan_wa_input_grp_%s", channelID))
+		btnBack := menu.Data("⬅️ Kembali ke Whitelist", fmt.Sprintf("chan_wa_list_menu_%s", channelID))
+		menu.Inline(menu.Row(btnManual), menu.Row(btnBack))
+
+		return c.EditOrSend(fmt.Sprintf("👥 <b>WIZARD GRUP WHATSAPP (%s)</b>\n\nAkun WhatsApp ini belum bergabung di grup manapun.\nSilakan masukkan bot ke dalam grup WhatsApp terlebih dahulu.", html.EscapeString(ch.Name)), menu, tele.ModeHTML)
+	}
+
+	const groupsPerPage = 6
+	totalPages := (totalGroups + groupsPerPage - 1) / groupsPerPage
+	if page < 0 {
+		page = 0
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+
+	startIdx := page * groupsPerPage
+	endIdx := startIdx + groupsPerPage
+	if endIdx > totalGroups {
+		endIdx = totalGroups
+	}
+
+	pageGroups := groups[startIdx:endIdx]
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🧙‍♂️ <b>WIZARD WHITELIST GRUP (%s)</b>\n\n", html.EscapeString(ch.Name)))
+	sb.WriteString(fmt.Sprintf("Halaman <code>%d/%d</code> (Total: <code>%d grup diikuti</code>)\n\n", page+1, totalPages, totalGroups))
+	sb.WriteString("Klik tombol di bawah untuk <b>mengaktifkan / menonaktifkan (Toggle)</b> whitelist grup:\n\n")
+
+	menu := &tele.ReplyMarkup{}
+	var itemRows []tele.Row
+
+	for i, g := range pageGroups {
+		globalIdx := startIdx + i
+		statusIcon := "⬜"
+		statusText := "Nonaktif"
+		if g.IsWhitelisted {
+			statusIcon = "✅"
+			statusText = "Whitelisted"
+		}
+
+		sb.WriteString(fmt.Sprintf("%d. %s <b>%s</b>\n   • JID: <code>%s</code>\n   • Status: <i>%s</i>\n\n", globalIdx+1, statusIcon, html.EscapeString(g.Name), html.EscapeString(g.JID), statusText))
+
+		btnLabel := fmt.Sprintf("%s %s", statusIcon, g.Name)
+		if len([]rune(btnLabel)) > 26 {
+			btnLabel = string([]rune(btnLabel)[:23]) + "..."
+		}
+		btn := menu.Data(btnLabel, fmt.Sprintf("chan_wa_gtgl_%s_%d_%d", channelID, page, globalIdx))
+		itemRows = append(itemRows, menu.Row(btn))
+	}
+
+	for _, r := range itemRows {
+		menu.Inline(r)
+	}
+
+	// Pagination Navigation
+	var navRow []tele.Btn
+	if page > 0 {
+		navRow = append(navRow, menu.Data("⬅️ Prev", fmt.Sprintf("chan_wa_gwiz_%s_%d", channelID, page-1)))
+	}
+	navRow = append(navRow, menu.Data(fmt.Sprintf("📄 %d/%d", page+1, totalPages), "mod_noop"))
+	if page < totalPages-1 {
+		navRow = append(navRow, menu.Data("Next ➡️", fmt.Sprintf("chan_wa_gwiz_%s_%d", channelID, page+1)))
+	}
+	if len(navRow) > 0 {
+		menu.Inline(menu.Row(navRow...))
+	}
+
+	btnManual := menu.Data("➕ Input Manual", fmt.Sprintf("chan_wa_input_grp_%s", channelID))
+	btnRefresh := menu.Data("🔄 Refresh List", fmt.Sprintf("chan_wa_gwiz_%s_%d", channelID, page))
+	btnClear := menu.Data("🗑️ Kosongkan Whitelist", fmt.Sprintf("chan_wa_clr_grp_%s", channelID))
+	btnBack := menu.Data("⬅️ Kembali ke Menu Whitelist", fmt.Sprintf("chan_wa_list_menu_%s", channelID))
+
+	menu.Inline(
+		menu.Row(btnManual, btnRefresh),
+		menu.Row(btnClear, btnBack),
+	)
+
+	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
+}
+
+// HandleToggleGroupWhitelist toggles a group's whitelist status from the wizard
+func (ui *WhatsAppUI) HandleToggleGroupWhitelist(c tele.Context, channelID string, page, globalIdx int) error {
+	ch, err := ui.db.GetChannel(channelID)
+	if err != nil || ch == nil {
+		return c.Reply("❌ Channel tidak ditemukan.")
+	}
+
+	ui.mu.RLock()
+	groups := ui.cachedGroups[channelID]
+	ui.mu.RUnlock()
+
+	if globalIdx < 0 || globalIdx >= len(groups) {
+		_ = c.Respond(&tele.CallbackResponse{Text: "❌ Grup tidak ditemukan dalam cache"})
+		return ui.RenderGroupWhitelistWizard(c, channelID, page)
+	}
+
+	targetGroup := groups[globalIdx]
+	targetJID := targetGroup.JID
+
+	var st whatsapp.WhatsAppSettings
+	if ch.SettingsJSON != "" {
+		_ = json.Unmarshal([]byte(ch.SettingsJSON), &st)
+	} else {
+		st = whatsapp.DefaultWhatsAppSettings()
+	}
+
+	// Toggle in allowed groups
+	found := false
+	var newAllowed []string
+	for _, g := range st.AllowedGroups {
+		if strings.EqualFold(strings.TrimSpace(g), strings.TrimSpace(targetJID)) {
+			found = true
+		} else {
+			newAllowed = append(newAllowed, g)
+		}
+	}
+
+	statusMsg := ""
+	if found {
+		st.AllowedGroups = newAllowed
+		targetGroup.IsWhitelisted = false
+		statusMsg = fmt.Sprintf("⬜ Whitelist dinonaktifkan: %s", targetGroup.Name)
+	} else {
+		st.AllowedGroups = append(st.AllowedGroups, targetJID)
+		targetGroup.IsWhitelisted = true
+		statusMsg = fmt.Sprintf("✅ Whitelist diaktifkan: %s", targetGroup.Name)
+	}
+
+	stBytes, _ := json.Marshal(st)
+	ch.SettingsJSON = string(stBytes)
+	_ = ui.db.SaveChannel(ch)
+
+	if mgr := whatsapp.GetManager(); mgr != nil {
+		if ad := mgr.GetAdapter(channelID); ad != nil {
+			_ = ad.UpdateSettings(st)
+		}
+	}
+
+	_ = c.Respond(&tele.CallbackResponse{Text: statusMsg})
+	return ui.RenderGroupWhitelistWizard(c, channelID, page)
+}
+
 // RenderWhitelistManagerMenu shows trusted numbers and allowed groups
 func (ui *WhatsAppUI) RenderWhitelistManagerMenu(c tele.Context, channelID string) error {
 	ch, err := ui.db.GetChannel(channelID)
@@ -332,16 +526,18 @@ func (ui *WhatsAppUI) RenderWhitelistManagerMenu(c tele.Context, channelID strin
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("💡 <i>Kirim perintah atau tombol untuk menambah/menghapus list.</i>")
+	sb.WriteString("💡 <i>Gunakan tombol Wizard untuk memilih grup langsung dari WhatsApp.</i>")
 
 	menu := &tele.ReplyMarkup{}
+	btnWizGrp := menu.Data("🧙‍♂️ Wizard Pilih Grup (Auto-Detect)", fmt.Sprintf("chan_wa_gwiz_%s_0", channelID))
 	btnAddTrust := menu.Data("➕ Tambah Nomor Trusted", fmt.Sprintf("chan_wa_input_trust_%s", channelID))
-	btnAddGrp := menu.Data("➕ Tambah ID Grup", fmt.Sprintf("chan_wa_input_grp_%s", channelID))
+	btnAddGrp := menu.Data("➕ Tambah Manual ID Grup", fmt.Sprintf("chan_wa_input_grp_%s", channelID))
 	btnClearTrust := menu.Data("🗑️ Kosongkan Trusted", fmt.Sprintf("chan_wa_clr_trust_%s", channelID))
 	btnClearGrp := menu.Data("🗑️ Kosongkan Grup", fmt.Sprintf("chan_wa_clr_grp_%s", channelID))
 	btnBack := menu.Data("⬅️ Kembali ke Menu WA", fmt.Sprintf("chan_ed_pick_%s", channelID))
 
 	menu.Inline(
+		menu.Row(btnWizGrp),
 		menu.Row(btnAddTrust, btnAddGrp),
 		menu.Row(btnClearTrust, btnClearGrp),
 		menu.Row(btnBack),

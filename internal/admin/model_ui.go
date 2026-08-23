@@ -372,7 +372,7 @@ func (ui *ModelUI) HandleModelCommand(c tele.Context) error {
 	return ui.applyModelOverride(c, scope, chatIDStr, target)
 }
 
-func (ui *ModelUI) applyModelOverride(c tele.Context, scope, chatIDStr, modelOverride string) error {
+func (ui *ModelUI) saveModelOverride(scope, chatIDStr, modelOverride string) (string, error) {
 	scopeType := "chat"
 	scopeID := chatIDStr
 	scopeLabel := "Chat PM Admin Ini"
@@ -393,18 +393,26 @@ func (ui *ModelUI) applyModelOverride(c tele.Context, scope, chatIDStr, modelOve
 
 	pol.ModelOverride = modelOverride
 	if err := ui.db.SavePolicy(pol); err != nil {
-		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan konfigurasi model: %v", html.EscapeString(err.Error())))
+		return "", err
 	}
 
 	if modelOverride == "" {
-		return c.Reply(fmt.Sprintf("✅ Model untuk <b>%s</b> berhasil direset ke <b>Default / Auto Router</b>!", scopeLabel), tele.ModeHTML)
+		return fmt.Sprintf("✅ Model untuk <b>%s</b> berhasil direset ke <b>Default / Auto Router</b>!", scopeLabel), nil
 	}
 
 	if combo, ok := ui.providerManager.GetCombo(modelOverride); ok {
-		return c.Reply(fmt.Sprintf("✅ Model untuk <b>%s</b> berhasil diubah ke Combo: <code>%s</code> (%d targets)!", scopeLabel, html.EscapeString(combo.Name), len(combo.Targets)), tele.ModeHTML)
+		return fmt.Sprintf("✅ Model untuk <b>%s</b> berhasil diubah ke Combo: <code>%s</code> (%d targets)!", scopeLabel, html.EscapeString(combo.Name), len(combo.Targets)), nil
 	}
 
-	return c.Reply(fmt.Sprintf("✅ Model untuk <b>%s</b> berhasil diubah ke model: <code>%s</code>!", scopeLabel, html.EscapeString(modelOverride)), tele.ModeHTML)
+	return fmt.Sprintf("✅ Model untuk <b>%s</b> berhasil diubah ke model: <code>%s</code>!", scopeLabel, html.EscapeString(modelOverride)), nil
+}
+
+func (ui *ModelUI) applyModelOverride(c tele.Context, scope, chatIDStr, modelOverride string) error {
+	msg, err := ui.saveModelOverride(scope, chatIDStr, modelOverride)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan konfigurasi model: %v", html.EscapeString(err.Error())))
+	}
+	return c.Reply(msg, tele.ModeHTML)
 }
 
 // HandleSetDefaultCallback resets model override
@@ -413,8 +421,12 @@ func (ui *ModelUI) HandleSetDefaultCallback(c tele.Context) error {
 	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
 	scope := ui.getScope(userID)
 
-	_ = ui.applyModelOverride(c, scope, chatIDStr, "")
-	_ = c.Respond(&tele.CallbackResponse{Text: "🔄 Model direset ke Default"})
+	_, err := ui.saveModelOverride(scope, chatIDStr, "")
+	if err != nil {
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("❌ Gagal: %v", err)})
+	} else {
+		_ = c.Respond(&tele.CallbackResponse{Text: "🔄 Model direset ke Default"})
+	}
 	return c.EditOrSend(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
 }
 
@@ -424,8 +436,12 @@ func (ui *ModelUI) HandleSetComboCallback(c tele.Context, comboName string) erro
 	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
 	scope := ui.getScope(userID)
 
-	_ = ui.applyModelOverride(c, scope, chatIDStr, comboName)
-	_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🔀 Combo '%s' aktif", comboName)})
+	_, err := ui.saveModelOverride(scope, chatIDStr, comboName)
+	if err != nil {
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("❌ Gagal: %v", err)})
+	} else {
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🔀 Combo '%s' aktif!", comboName)})
+	}
 	return c.EditOrSend(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
 }
 
@@ -448,8 +464,12 @@ func (ui *ModelUI) HandleSetModelCallback(c tele.Context, provName string, model
 	}
 
 	chosenModel := allModels[modelIndex]
-	_ = ui.applyModelOverride(c, scope, chatIDStr, chosenModel)
-	_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🎯 Model '%s' aktif", chosenModel)})
+	_, err := ui.saveModelOverride(scope, chatIDStr, chosenModel)
+	if err != nil {
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("❌ Gagal: %v", err)})
+	} else {
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🎯 Model '%s' aktif!", chosenModel)})
+	}
 	return c.EditOrSend(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
 }
 

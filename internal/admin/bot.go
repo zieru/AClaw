@@ -86,7 +86,7 @@ func NewAdminBot(
 		proxyPool:    pool,
 
 		modelUI:      NewModelUI(db, pm),
-		limitsUI:     NewLimitsUI(db),
+		limitsUI:     NewLimitsUI(db, pm),
 		providerUI:   NewProviderUI(db, pm, pool),
 		wizard:       NewProviderWizard(db, pm, pool, bot),
 		comboUI:      NewComboUI(db, pm),

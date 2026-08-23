@@ -298,6 +298,35 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 			return c.EditOrSend(prompt, menu, tele.ModeHTML)
 		}
 	}
+	if data == "lim_mod_menu" {
+		return a.limitsUI.RenderModelMenu(c)
+	}
+	if data == "lim_mod_combos" {
+		return a.limitsUI.RenderLimitCombosPicker(c)
+	}
+	if data == "lim_mod_provs" {
+		return a.limitsUI.RenderLimitProvidersPicker(c)
+	}
+	if strings.HasPrefix(data, "lim_mod_prov_") {
+		raw := strings.TrimPrefix(data, "lim_mod_prov_")
+		lastUnderscore := strings.LastIndex(raw, "_")
+		if lastUnderscore != -1 {
+			provName := raw[:lastUnderscore]
+			var page int
+			fmt.Sscanf(raw[lastUnderscore+1:], "%d", &page)
+			return a.limitsUI.RenderLimitProviderModelsPicker(c, provName, page)
+		}
+	}
+	if strings.HasPrefix(data, "lim_mod_pick_") {
+		raw := strings.TrimPrefix(data, "lim_mod_pick_")
+		lastUnderscore := strings.LastIndex(raw, "_")
+		if lastUnderscore != -1 {
+			provName := raw[:lastUnderscore]
+			var modelIdx int
+			fmt.Sscanf(raw[lastUnderscore+1:], "%d", &modelIdx)
+			return a.limitsUI.HandlePickProviderModel(c, provName, modelIdx)
+		}
+	}
 	if strings.HasPrefix(data, "lim_mod_set_") {
 		modVal := strings.TrimPrefix(data, "lim_mod_set_")
 		if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
@@ -307,6 +336,7 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 			}
 			pol.ModelOverride = modVal
 			_ = a.db.SavePolicy(pol)
+			_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🔀 Combo '%s' aktif!", modVal)})
 			return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
 		}
 	}
@@ -429,6 +459,27 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		btnCancel := menu.Data("❌ Batal", fmt.Sprintf("chan_wa_list_menu_%s", ch.ID))
 		menu.Inline(menu.Row(btnCancel))
 		return c.EditOrSend(text, menu, tele.ModeHTML)
+	}
+	if strings.HasPrefix(data, "chan_wa_gwiz_") {
+		raw := strings.TrimPrefix(data, "chan_wa_gwiz_")
+		lastUnderscore := strings.LastIndex(raw, "_")
+		if lastUnderscore != -1 {
+			chID := raw[:lastUnderscore]
+			var page int
+			fmt.Sscanf(raw[lastUnderscore+1:], "%d", &page)
+			return a.channelUI.GetWhatsAppUI().RenderGroupWhitelistWizard(c, chID, page)
+		}
+	}
+	if strings.HasPrefix(data, "chan_wa_gtgl_") {
+		raw := strings.TrimPrefix(data, "chan_wa_gtgl_")
+		parts := strings.Split(raw, "_")
+		if len(parts) >= 3 {
+			chID := parts[0]
+			var page, globalIdx int
+			fmt.Sscanf(parts[1], "%d", &page)
+			fmt.Sscanf(parts[2], "%d", &globalIdx)
+			return a.channelUI.GetWhatsAppUI().HandleToggleGroupWhitelist(c, chID, page, globalIdx)
+		}
 	}
 	if strings.HasPrefix(data, "chan_wa_clr_trust_") {
 		chID := strings.TrimPrefix(data, "chan_wa_clr_trust_")
