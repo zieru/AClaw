@@ -57,7 +57,12 @@ func (a *AdminBot) handleTextMessage(c tele.Context) error {
 		return err
 	}
 
-	// 8. Direct Chat with Assistant from Admin PM
+	// 8. Check Model Selection dialog (Combos, Providers, Models)
+	if handled, err := a.modelUI.HandleTextMessage(c); handled {
+		return err
+	}
+
+	// 9. Direct Chat with Assistant from Admin PM
 	msg := c.Message().Text
 	if msg == "" || msg[0] == '/' {
 		return nil

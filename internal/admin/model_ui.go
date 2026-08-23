@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"html"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"goassistant/internal/provider"
 	"goassistant/internal/storage"
@@ -14,6 +16,22 @@ import (
 
 const modelsPerPage = 8
 
+type ModelUIStep int
+
+const (
+	ModelUIStepNone ModelUIStep = iota
+	ModelUIStepPickCombo
+	ModelUIStepPickProvider
+	ModelUIStepPickModel
+)
+
+type ModelUISession struct {
+	Step             ModelUIStep
+	SelectedProvider string
+	Page             int
+	CreatedAt        time.Time
+}
+
 type ModelUI struct {
 	db              *storage.DB
 	providerManager *provider.Manager
@@ -21,6 +39,7 @@ type ModelUI struct {
 	userScope       map[int64]string // "chat" (default) or "global"
 	userPage        map[int64]int
 	userProvider    map[int64]string
+	sessions        map[int64]*ModelUISession
 }
 
 func NewModelUI(db *storage.DB, pm *provider.Manager) *ModelUI {
@@ -30,7 +49,34 @@ func NewModelUI(db *storage.DB, pm *provider.Manager) *ModelUI {
 		userScope:       make(map[int64]string),
 		userPage:        make(map[int64]int),
 		userProvider:    make(map[int64]string),
+		sessions:        make(map[int64]*ModelUISession),
 	}
+}
+
+func (ui *ModelUI) CancelSession(userID int64) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	delete(ui.sessions, userID)
+}
+
+func (ui *ModelUI) setSession(userID int64, step ModelUIStep, prov string, page int) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	ui.sessions[userID] = &ModelUISession{
+		Step:             step,
+		SelectedProvider: prov,
+		Page:             page,
+		CreatedAt:        time.Now(),
+	}
+}
+
+func (ui *ModelUI) getSession(userID int64) *ModelUISession {
+	ui.mu.RLock()
+	defer ui.mu.RUnlock()
+	if sess, ok := ui.sessions[userID]; ok {
+		return sess
+	}
+	return nil
 }
 
 func (ui *ModelUI) getScope(userID int64) string {
@@ -131,6 +177,10 @@ func (ui *ModelUI) ModelMenuKeyboard(userID int64) *tele.ReplyMarkup {
 
 // RenderCombosList renders available combos for selection
 func (ui *ModelUI) RenderCombosList(c tele.Context) (string, *tele.ReplyMarkup) {
+	if c.Sender() != nil {
+		ui.setSession(c.Sender().ID, ModelUIStepPickCombo, "", 0)
+	}
+
 	combos := ui.providerManager.ListCombos()
 	menu := &tele.ReplyMarkup{}
 
@@ -164,6 +214,7 @@ func (ui *ModelUI) RenderCombosList(c tele.Context) (string, *tele.ReplyMarkup) 
 		for _, r := range rows {
 			menu.Inline(r)
 		}
+		sb.WriteString("\n💡 <i>Klik tombol di bawah atau balas chat dengan nomor/nama combo pilihan Anda:</i>\n")
 	}
 
 	btnBack := menu.Data("⬅️ Kembali ke Menu Model", "mod_main")
@@ -174,6 +225,10 @@ func (ui *ModelUI) RenderCombosList(c tele.Context) (string, *tele.ReplyMarkup) 
 
 // RenderProvidersList renders available providers to pick models from
 func (ui *ModelUI) RenderProvidersList(c tele.Context) (string, *tele.ReplyMarkup) {
+	if c.Sender() != nil {
+		ui.setSession(c.Sender().ID, ModelUIStepPickProvider, "", 0)
+	}
+
 	providers := ui.providerManager.ListAll()
 	menu := &tele.ReplyMarkup{}
 
@@ -188,9 +243,10 @@ func (ui *ModelUI) RenderProvidersList(c tele.Context) (string, *tele.ReplyMarku
 		var rows []tele.Row
 		var curRow []tele.Btn
 
-		for _, p := range providers {
+		for i, p := range providers {
 			allModels := ui.getAllModelsForProvider(p)
-			btnText := fmt.Sprintf("🤖 %s (%d models)", p.Name(), len(allModels))
+			sb.WriteString(fmt.Sprintf("%d. <b>%s</b> (<code>%d model</code>)\n", i+1, html.EscapeString(p.Name()), len(allModels)))
+			btnText := fmt.Sprintf("🤖 %s (%d)", p.Name(), len(allModels))
 			btn := menu.Data(btnText, fmt.Sprintf("mod_prov_%s", p.Name()))
 			curRow = append(curRow, btn)
 			if len(curRow) == 2 {
@@ -204,6 +260,7 @@ func (ui *ModelUI) RenderProvidersList(c tele.Context) (string, *tele.ReplyMarku
 		for _, r := range rows {
 			menu.Inline(r)
 		}
+		sb.WriteString("\n💡 <i>Klik tombol di bawah atau balas chat dengan nomor/nama provider pilihan Anda:</i>\n")
 	}
 
 	btnBack := menu.Data("⬅️ Kembali ke Menu Model", "mod_main")
@@ -218,12 +275,18 @@ func (ui *ModelUI) RenderProviderModels(c tele.Context, provName string, page in
 	menu := &tele.ReplyMarkup{}
 
 	if !ok || p == nil {
+		if c.Sender() != nil {
+			ui.CancelSession(c.Sender().ID)
+		}
 		return "❌ Provider tidak ditemukan atau sedang nonaktif.", menu
 	}
 
 	allModels := ui.getAllModelsForProvider(p)
 	totalModels := len(allModels)
 	if totalModels == 0 {
+		if c.Sender() != nil {
+			ui.CancelSession(c.Sender().ID)
+		}
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("🤖 <b>PROVIDER: %s</b>\n\n", html.EscapeString(provName)))
 		sb.WriteString("<i>(Tidak ada model yang terdaftar untuk provider ini)</i>\n")
@@ -240,6 +303,10 @@ func (ui *ModelUI) RenderProviderModels(c tele.Context, provName string, page in
 		page = totalPages - 1
 	}
 
+	if c.Sender() != nil {
+		ui.setSession(c.Sender().ID, ModelUIStepPickModel, provName, page)
+	}
+
 	startIdx := page * modelsPerPage
 	endIdx := startIdx + modelsPerPage
 	if endIdx > totalModels {
@@ -251,7 +318,7 @@ func (ui *ModelUI) RenderProviderModels(c tele.Context, provName string, page in
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🤖 <b>DAFTAR MODEL TERSEDIA: %s</b>\n", html.EscapeString(strings.ToUpper(provName))))
 	sb.WriteString(fmt.Sprintf("Halaman <code>%d/%d</code> (Total: <code>%d model</code>)\n\n", page+1, totalPages, totalModels))
-	sb.WriteString("Klik salah satu model di bawah untuk mengaktifkannya:\n\n")
+	sb.WriteString("Pilih salah satu model di bawah untuk mengaktifkannya:\n\n")
 
 	var rows []tele.Row
 	for i, m := range pageModels {
@@ -278,6 +345,8 @@ func (ui *ModelUI) RenderProviderModels(c tele.Context, provName string, page in
 	for _, r := range rows {
 		menu.Inline(r)
 	}
+
+	sb.WriteString("\n💡 <i>Klik tombol atau balas chat dengan nomor/nama model pilihan Anda:</i>\n")
 
 	// Pagination Navigation row
 	var navRow []tele.Btn
@@ -318,11 +387,150 @@ func (ui *ModelUI) getAllModelsForProvider(p provider.Provider) []string {
 	return list
 }
 
+// HandleTextMessage handles interactive text messages when picking combos, providers, or models
+func (ui *ModelUI) HandleTextMessage(c tele.Context) (bool, error) {
+	if c.Sender() == nil {
+		return false, nil
+	}
+	userID := c.Sender().ID
+	sess := ui.getSession(userID)
+	if sess == nil || sess.Step == ModelUIStepNone {
+		return false, nil
+	}
+
+	msgText := strings.TrimSpace(c.Text())
+	if msgText == "" {
+		return false, nil
+	}
+
+	// Cancellation check
+	if msgText == "/cancel" || strings.EqualFold(msgText, "batal") || msgText == "/stop" {
+		ui.CancelSession(userID)
+		_ = c.Reply("❌ Pemilihan model/combo dibatalkan.")
+		return true, c.Send(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
+	}
+
+	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
+	scope := ui.getScope(userID)
+
+	switch sess.Step {
+	case ModelUIStepPickCombo:
+		combos := ui.providerManager.ListCombos()
+		if len(combos) == 0 {
+			ui.CancelSession(userID)
+			return false, nil
+		}
+
+		// Try matching by 1-based number index
+		if num, err := strconv.Atoi(msgText); err == nil && num >= 1 && num <= len(combos) {
+			targetCombo := combos[num-1]
+			ui.CancelSession(userID)
+			msg, err := ui.saveModelOverride(scope, chatIDStr, targetCombo.Name)
+			if err != nil {
+				return true, c.Reply(fmt.Sprintf("❌ Gagal menyimpan combo: %v", err))
+			}
+			_ = c.Reply(msg, tele.ModeHTML)
+			return true, c.Send(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
+		}
+
+		// Try matching by combo name (case-insensitive)
+		for _, cRec := range combos {
+			if strings.EqualFold(cRec.Name, msgText) {
+				ui.CancelSession(userID)
+				msg, err := ui.saveModelOverride(scope, chatIDStr, cRec.Name)
+				if err != nil {
+					return true, c.Reply(fmt.Sprintf("❌ Gagal menyimpan combo: %v", err))
+				}
+				_ = c.Reply(msg, tele.ModeHTML)
+				return true, c.Send(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
+			}
+		}
+
+		return true, c.Reply(fmt.Sprintf("⚠️ Nomor atau nama combo tidak ditemukan.\n<i>Silakan ketik nomor (1-%d), nama combo, atau ketik <code>/cancel</code> untuk membatalkan.</i>", len(combos)), tele.ModeHTML)
+
+	case ModelUIStepPickProvider:
+		providers := ui.providerManager.ListAll()
+		if len(providers) == 0 {
+			ui.CancelSession(userID)
+			return false, nil
+		}
+
+		var selectedProv provider.Provider
+		// Try matching by 1-based number index
+		if num, err := strconv.Atoi(msgText); err == nil && num >= 1 && num <= len(providers) {
+			selectedProv = providers[num-1]
+		} else {
+			// Try matching by provider name
+			for _, p := range providers {
+				if strings.EqualFold(p.Name(), msgText) {
+					selectedProv = p
+					break
+				}
+			}
+		}
+
+		if selectedProv != nil {
+			txt, kb := ui.RenderProviderModels(c, selectedProv.Name(), 0)
+			return true, c.Send(txt, kb, tele.ModeHTML)
+		}
+
+		return true, c.Reply(fmt.Sprintf("⚠️ Nomor atau nama provider tidak ditemukan.\n<i>Silakan ketik nomor (1-%d), nama provider, atau ketik <code>/cancel</code> untuk membatalkan.</i>", len(providers)), tele.ModeHTML)
+
+	case ModelUIStepPickModel:
+		p, ok := ui.providerManager.Get(sess.SelectedProvider)
+		if !ok || p == nil {
+			ui.CancelSession(userID)
+			return true, c.Reply("❌ Provider tidak ditemukan atau sedang nonaktif.")
+		}
+
+		allModels := ui.getAllModelsForProvider(p)
+		if len(allModels) == 0 {
+			ui.CancelSession(userID)
+			return false, nil
+		}
+
+		var chosenModel string
+		// Try matching by number index
+		if num, err := strconv.Atoi(msgText); err == nil {
+			// Check if index matches 1-based global list
+			if num >= 1 && num <= len(allModels) {
+				chosenModel = allModels[num-1]
+			}
+		}
+
+		// Try matching by exact or case-insensitive model name
+		if chosenModel == "" {
+			for _, m := range allModels {
+				if strings.EqualFold(m, msgText) {
+					chosenModel = m
+					break
+				}
+			}
+		}
+
+		if chosenModel != "" {
+			ui.CancelSession(userID)
+			msg, err := ui.saveModelOverride(scope, chatIDStr, chosenModel)
+			if err != nil {
+				return true, c.Reply(fmt.Sprintf("❌ Gagal menyimpan model: %v", err))
+			}
+			_ = c.Reply(msg, tele.ModeHTML)
+			return true, c.Send(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
+		}
+
+		return true, c.Reply(fmt.Sprintf("⚠️ Model <code>%s</code> tidak ditemukan untuk provider <b>%s</b>.\n<i>Silakan ketik nomor model, nama model yang terdaftar, atau <code>/cancel</code> untuk batal.</i>", html.EscapeString(msgText), html.EscapeString(p.Name())), tele.ModeHTML)
+	}
+
+	return false, nil
+}
+
 // HandleModelCommand handles `/model` and `/models` CLI command
 func (ui *ModelUI) HandleModelCommand(c tele.Context) error {
 	args := c.Args()
 	userID := c.Sender().ID
 	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
+
+	ui.CancelSession(userID)
 
 	if len(args) == 0 {
 		return c.Reply(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
@@ -431,6 +639,7 @@ func (ui *ModelUI) applyModelOverride(c tele.Context, scope, chatIDStr, modelOve
 // HandleSetDefaultCallback resets model override
 func (ui *ModelUI) HandleSetDefaultCallback(c tele.Context) error {
 	userID := c.Sender().ID
+	ui.CancelSession(userID)
 	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
 	scope := ui.getScope(userID)
 
@@ -446,6 +655,7 @@ func (ui *ModelUI) HandleSetDefaultCallback(c tele.Context) error {
 // HandleSetComboCallback sets combo as active override
 func (ui *ModelUI) HandleSetComboCallback(c tele.Context, comboName string) error {
 	userID := c.Sender().ID
+	ui.CancelSession(userID)
 	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
 	scope := ui.getScope(userID)
 
@@ -461,6 +671,7 @@ func (ui *ModelUI) HandleSetComboCallback(c tele.Context, comboName string) erro
 // HandleSetModelCallback sets specific model from provider as active override
 func (ui *ModelUI) HandleSetModelCallback(c tele.Context, provName string, modelIndex int) error {
 	userID := c.Sender().ID
+	ui.CancelSession(userID)
 	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
 	scope := ui.getScope(userID)
 
