@@ -436,6 +436,16 @@ func (a *AdminBot) registerRoutes() {
 		}
 		return a.comboWizard.HandleEditDelTargetMenu(c, sess.EditingComboName)
 	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_reorder"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.HandleEditReorderMenu(c, sess.EditingComboName)
+	})
 	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_strat"}, func(c tele.Context) error {
 		if c.Sender() == nil {
 			return nil
@@ -465,6 +475,37 @@ func (a *AdminBot) registerRoutes() {
 			return a.comboWizard.StartEditWizard(c, "")
 		}
 		return a.comboWizard.HandleEditSetStrategy(c, sess.EditingComboName, "round-robin")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_desc"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.PromptEditStep(c, sess.EditingComboName, StepComboEditDesc,
+			"📝 <b>UBAH DESKRIPSI COMBO</b>\n\nKirimkan deskripsi baru untuk combo ini:")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_toggle"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.HandleEditToggleActive(c, sess.EditingComboName)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_del"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.HandleEditDeletePrompt(c, sess.EditingComboName)
 	})
 
 	// Limits Dashboard & Wizard Callbacks

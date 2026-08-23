@@ -213,9 +213,34 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		provID := strings.TrimPrefix(data, "cwiz_prov_")
 		return a.comboWizard.HandleProviderSelect(c, provID)
 	}
+	if strings.HasPrefix(data, "cwiz_mod_") {
+		var idx int
+		fmt.Sscanf(strings.TrimPrefix(data, "cwiz_mod_"), "%d", &idx)
+		return a.comboWizard.HandleModelSelect(c, idx)
+	}
 	if strings.HasPrefix(data, "cwiz_ed_prov_") {
 		provID := strings.TrimPrefix(data, "cwiz_ed_prov_")
 		return a.comboWizard.HandleEditAddTargetProvSelect(c, provID)
+	}
+	if strings.HasPrefix(data, "cwiz_ed_mod_") {
+		var idx int
+		fmt.Sscanf(strings.TrimPrefix(data, "cwiz_ed_mod_"), "%d", &idx)
+		return a.comboWizard.HandleEditAddTargetModSelect(c, idx)
+	}
+	if strings.HasPrefix(data, "cwiz_ed_rem_") {
+		var idx int
+		fmt.Sscanf(strings.TrimPrefix(data, "cwiz_ed_rem_"), "%d", &idx)
+		return a.comboWizard.HandleEditDelTargetExecute(c, idx)
+	}
+	if strings.HasPrefix(data, "cwiz_ed_mvup_") {
+		var idx int
+		fmt.Sscanf(strings.TrimPrefix(data, "cwiz_ed_mvup_"), "%d", &idx)
+		return a.comboWizard.HandleEditReorderMove(c, idx, "up")
+	}
+	if strings.HasPrefix(data, "cwiz_ed_mvdn_") {
+		var idx int
+		fmt.Sscanf(strings.TrimPrefix(data, "cwiz_ed_mvdn_"), "%d", &idx)
+		return a.comboWizard.HandleEditReorderMove(c, idx, "down")
 	}
 	if strings.HasPrefix(data, "cwiz_ed_del_yes_") {
 		comboName := strings.TrimPrefix(data, "cwiz_ed_del_yes_")

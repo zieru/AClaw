@@ -785,3 +785,114 @@ func (w *ComboWizard) PromptEditStep(c tele.Context, comboName string, step Comb
 	return c.EditOrSend(promptMsg, menu, tele.ModeHTML)
 }
 
+// GetSession returns active session
+func (w *ComboWizard) GetSession(userID int64) (*ComboWizardSession, bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	s, ok := w.sessions[userID]
+	return s, ok
+}
+
+// HandleEditReorderMenu shows interactive chain reordering menu with Up / Down buttons
+func (w *ComboWizard) HandleEditReorderMenu(c tele.Context, comboName string) error {
+	combo, err := w.db.GetCombo(comboName)
+	if err != nil || combo == nil {
+		return c.Reply("❌ Combo tidak ditemukan.")
+	}
+
+	if len(combo.Targets) <= 1 {
+		_ = c.Reply("⚠️ Rantai combo memiliki kurang dari 2 target sehingga tidak perlu disusun ulang.")
+		return w.RenderComboEditDashboard(c, combo)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🔄 <b>SUSUN ULANG CHAIN: %s</b>\n\n", html.EscapeString(combo.Name)))
+	sb.WriteString("Gunakan tombol ⬆️ / ⬇️ di samping setiap target untuk mengubah urutan prioritas rantai fallback:\n\n")
+
+	for i, t := range combo.Targets {
+		sb.WriteString(fmt.Sprintf("  <b>#%d</b> ➔ <code>%s/%s</code>\n", i+1, html.EscapeString(t.ProviderID), html.EscapeString(t.Model)))
+	}
+
+	menu := &tele.ReplyMarkup{}
+	var rows []tele.Row
+
+	for i, t := range combo.Targets {
+		var btns []tele.Btn
+		targetLabel := fmt.Sprintf("#%d %s/%s", i+1, t.ProviderID, t.Model)
+		if len(targetLabel) > 20 {
+			targetLabel = targetLabel[:18] + ".."
+		}
+		btnLabel := menu.Data(targetLabel, "mod_noop")
+		btns = append(btns, btnLabel)
+
+		if i > 0 {
+			btnUp := menu.Data("⬆️", fmt.Sprintf("cwiz_ed_mvup_%d", i))
+			btns = append(btns, btnUp)
+		}
+		if i < len(combo.Targets)-1 {
+			btnDown := menu.Data("⬇️", fmt.Sprintf("cwiz_ed_mvdn_%d", i))
+			btns = append(btns, btnDown)
+		}
+		rows = append(rows, menu.Row(btns...))
+	}
+
+	btnBack := menu.Data("⬅️ Selesai / Kembali", fmt.Sprintf("cwiz_ed_pick_%s", combo.Name))
+	rows = append(rows, menu.Row(btnBack))
+	menu.Inline(rows...)
+
+	if c.Sender() != nil {
+		w.mu.Lock()
+		w.sessions[c.Sender().ID] = &ComboWizardSession{
+			IsEditing:        true,
+			EditingComboName: combo.Name,
+			CreatedAt:        time.Now(),
+		}
+		w.mu.Unlock()
+	}
+
+	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
+}
+
+// HandleEditReorderMove swaps target priority and updates combo
+func (w *ComboWizard) HandleEditReorderMove(c tele.Context, targetIdx int, direction string) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	userID := c.Sender().ID
+
+	w.mu.RLock()
+	sess, exists := w.sessions[userID]
+	w.mu.RUnlock()
+
+	if !exists || sess.EditingComboName == "" {
+		return c.Reply("⚠️ Sesi edit telah berakhir. Gunakan <code>/editcombo</code>.", tele.ModeHTML)
+	}
+
+	combo, err := w.db.GetCombo(sess.EditingComboName)
+	if err != nil || combo == nil {
+		return c.Reply("❌ Combo tidak ditemukan.")
+	}
+
+	swapIdx := targetIdx
+	if direction == "up" && targetIdx > 0 {
+		swapIdx = targetIdx - 1
+	} else if direction == "down" && targetIdx < len(combo.Targets)-1 {
+		swapIdx = targetIdx + 1
+	} else {
+		return c.Respond(&tele.CallbackResponse{})
+	}
+
+	// Swap targets
+	combo.Targets[targetIdx], combo.Targets[swapIdx] = combo.Targets[swapIdx], combo.Targets[targetIdx]
+
+	// Normalize priorities
+	for i := range combo.Targets {
+		combo.Targets[i].Priority = i + 1
+	}
+
+	_ = w.db.SaveCombo(combo)
+	w.providerManager.RegisterCombo(combo)
+
+	return w.HandleEditReorderMenu(c, combo.Name)
+}
+
