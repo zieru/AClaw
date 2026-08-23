@@ -94,6 +94,21 @@ func (ui *ModelUI) setScope(userID int64, scope string) {
 	ui.userScope[userID] = scope
 }
 
+// formatModelDesc returns a friendly label for a model/combo override
+func (ui *ModelUI) formatModelDesc(modelName string) string {
+	if modelName == "" {
+		return "🔄 <b>Default / Auto Router</b> (Mengikuti provider & model default sistem)"
+	}
+	if combo, ok := ui.providerManager.GetCombo(modelName); ok {
+		var targets []string
+		for _, t := range combo.Targets {
+			targets = append(targets, fmt.Sprintf("<code>%s/%s</code>", html.EscapeString(t.ProviderID), html.EscapeString(t.Model)))
+		}
+		return fmt.Sprintf("🔀 <b>Combo:</b> <code>%s</code>\n   • <i>Chain:</i> %s", html.EscapeString(combo.Name), strings.Join(targets, " ➔ "))
+	}
+	return fmt.Sprintf("🎯 <b>Custom Model:</b> <code>%s</code>", html.EscapeString(modelName))
+}
+
 // RenderModelDashboard returns HTML formatted model selector dashboard
 func (ui *ModelUI) RenderModelDashboard(c tele.Context) string {
 	userID := int64(0)
@@ -111,21 +126,33 @@ func (ui *ModelUI) RenderModelDashboard(c tele.Context) string {
 		scopeLabel = "🌐 Global (Semua Channel/Chat)"
 	}
 
-	policy := ui.db.GetResolvedPolicy("admin", chatIDStr)
-	currentOverride := policy.ModelOverride
+	globPol, _ := ui.db.GetPolicy("global", "system")
+	chatPol, _ := ui.db.GetPolicy("chat", chatIDStr)
 
-	// Check if override is currently empty, a combo, or a specific model
+	globOverride := ""
+	if globPol != nil {
+		globOverride = globPol.ModelOverride
+	}
+
+	chatOverride := ""
+	if chatPol != nil {
+		chatOverride = chatPol.ModelOverride
+	}
+
+	// Determine active description based on selected target scope
 	var activeDesc string
-	if currentOverride == "" {
-		activeDesc = "🔄 <b>Default / Auto Router</b> (Mengikuti default provider & model sistem)"
-	} else if combo, ok := ui.providerManager.GetCombo(currentOverride); ok {
-		var targets []string
-		for _, t := range combo.Targets {
-			targets = append(targets, fmt.Sprintf("<code>%s/%s</code>", html.EscapeString(t.ProviderID), html.EscapeString(t.Model)))
-		}
-		activeDesc = fmt.Sprintf("🔀 <b>Combo:</b> <code>%s</code>\n   • <i>Chain:</i> %s", html.EscapeString(combo.Name), strings.Join(targets, " ➔ "))
+	if scope == "global" {
+		activeDesc = ui.formatModelDesc(globOverride)
 	} else {
-		activeDesc = fmt.Sprintf("🎯 <b>Custom Model:</b> <code>%s</code>", html.EscapeString(currentOverride))
+		if chatOverride != "" {
+			activeDesc = fmt.Sprintf("%s\n   • <i>Status:</i> ⚠️ <b>Meng-override Global khusus chat ini</b>", ui.formatModelDesc(chatOverride))
+		} else {
+			inheritedLabel := "Default Router Sistem"
+			if globOverride != "" {
+				inheritedLabel = fmt.Sprintf("Global (%s)", globOverride)
+			}
+			activeDesc = fmt.Sprintf("🔄 <b>Auto / Inherit Global</b>\n   • <i>Status:</i> Mengikuti <code>%s</code>", html.EscapeString(inheritedLabel))
+		}
 	}
 
 	// Providers & Combos summary
@@ -134,17 +161,29 @@ func (ui *ModelUI) RenderModelDashboard(c tele.Context) string {
 
 	var sb strings.Builder
 	sb.WriteString("🎛️ <b>PENGATURAN MODEL & COMBO AI</b>\n\n")
-	sb.WriteString(fmt.Sprintf("📌 <b>Target Scope:</b> <code>%s</code>\n", scopeLabel))
-	sb.WriteString(fmt.Sprintf("⚡ <b>Model Aktif:</b>\n%s\n\n", activeDesc))
+	sb.WriteString(fmt.Sprintf("📌 <b>Target Scope Yang Diedit:</b> <code>%s</code>\n", scopeLabel))
+	sb.WriteString(fmt.Sprintf("⚡ <b>Model Aktif Scope Ini:</b>\n%s\n\n", activeDesc))
+
+	sb.WriteString("📊 <b>Ringkasan Hirarki Scope Saat Ini:</b>\n")
+	globShort := "🔄 Default Auto"
+	if globOverride != "" {
+		globShort = fmt.Sprintf("<code>%s</code>", html.EscapeString(globOverride))
+	}
+	chatShort := "🔄 Inherit Global"
+	if chatOverride != "" {
+		chatShort = fmt.Sprintf("🎯 <code>%s</code> (Khusus Chat Ini)", html.EscapeString(chatOverride))
+	}
+	sb.WriteString(fmt.Sprintf("• 🌐 <b>Global:</b> %s\n", globShort))
+	sb.WriteString(fmt.Sprintf("• 💬 <b>Chat Ini:</b> %s\n\n", chatShort))
 
 	sb.WriteString("📦 <b>Ketersediaan Engine:</b>\n")
 	sb.WriteString(fmt.Sprintf("• AI Providers Aktif: <code>%d provider</code>\n", len(allProvs)))
 	sb.WriteString(fmt.Sprintf("• Fallback Combos: <code>%d combo</code>\n\n", len(allCombos)))
 
-	sb.WriteString("💡 <i>Pilih opsi di bawah untuk mengganti model secara instan atau gunakan perintah langsung:</i>\n")
-	sb.WriteString("• <code>/model default</code> - Reset ke auto / default router\n")
-	sb.WriteString("• <code>/model &lt;combo_name&gt;</code> - Aktifkan combo tertentu\n")
-	sb.WriteString("• <code>/model &lt;provider&gt; &lt;model&gt;</code> - Pilih model spesifik")
+	sb.WriteString("💡 <i>Gunakan tombol di bawah untuk memilih model/combo untuk scope yang dipilih:</i>\n")
+	sb.WriteString("• <code>/model default</code> - Reset scope ini ke auto/inherit\n")
+	sb.WriteString("• <code>/model &lt;combo_name&gt;</code> - Aktifkan combo\n")
+	sb.WriteString("• <code>/model &lt;provider&gt; &lt;model&gt;</code> - Pilih model")
 
 	return sb.String()
 }
