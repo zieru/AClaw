@@ -328,47 +328,60 @@ func (ui *ModelUI) HandleModelCommand(c tele.Context) error {
 		return c.Reply(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
 	}
 
-	target := strings.TrimSpace(args[0])
 	scope := ui.getScope(userID)
 
 	// Check if first arg specifies scope
-	if strings.EqualFold(target, "global") {
+	if strings.EqualFold(args[0], "global") {
 		if len(args) == 1 {
 			ui.setScope(userID, "global")
 			return c.Reply("🌐 Target scope diset ke <b>Global</b>.", tele.ModeHTML)
 		}
 		scope = "global"
-		target = strings.TrimSpace(args[1])
-	} else if strings.EqualFold(target, "chat") || strings.EqualFold(target, "pm") {
+		args = args[1:]
+	} else if strings.EqualFold(args[0], "chat") || strings.EqualFold(args[0], "pm") {
 		if len(args) == 1 {
 			ui.setScope(userID, "chat")
 			return c.Reply("💬 Target scope diset ke <b>Chat Ini</b>.", tele.ModeHTML)
 		}
 		scope = "chat"
-		target = strings.TrimSpace(args[1])
+		args = args[1:]
 	}
+
+	if len(args) == 0 {
+		return c.Reply(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
+	}
+
+	target := strings.TrimSpace(args[0])
 
 	// 1. Reset / Default
 	if strings.EqualFold(target, "default") || strings.EqualFold(target, "reset") || strings.EqualFold(target, "auto") {
 		return ui.applyModelOverride(c, scope, chatIDStr, "")
 	}
 
-	// 2. Combo
+	// 2. Combo prefix / keyword: `/model combo <name>`
 	if strings.EqualFold(target, "combo") && len(args) >= 2 {
 		comboName := strings.TrimSpace(args[1])
 		return ui.applyModelOverride(c, scope, chatIDStr, comboName)
 	}
 
-	// 3. Provider + Model (e.g. `/model 9router gpt-4o`)
+	// 3. Provider + Model (e.g. `/model gemini gemini-2.0-flash` or `/model 9router gpt-4o`)
 	if len(args) >= 2 {
 		provName := args[0]
 		modelName := strings.TrimSpace(args[1])
 		if _, ok := ui.providerManager.Get(provName); ok {
 			return ui.applyModelOverride(c, scope, chatIDStr, modelName)
 		}
+		// If 2 args provided and args[0] didn't match provider directly, treat args[1] as the model name
+		return ui.applyModelOverride(c, scope, chatIDStr, modelName)
 	}
 
-	// 4. Direct combo name or model name
+	// 4. Single argument: check if it's a provider name without model (e.g. `/model gemini`)
+	if p, ok := ui.providerManager.Get(target); ok {
+		// If user typed provider name e.g. "/model gemini", set to its default model
+		return ui.applyModelOverride(c, scope, chatIDStr, p.DefaultModel())
+	}
+
+	// 5. Direct combo name or model name (e.g. `/model smart` or `/model gemini-2.0-flash`)
 	return ui.applyModelOverride(c, scope, chatIDStr, target)
 }
 

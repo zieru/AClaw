@@ -209,12 +209,44 @@ func (m *Manager) ListCombos() []*storage.ModelComboRecord {
 	return list
 }
 
-// Get finds a provider by name
+// Get finds a provider by name (exact, case-insensitive, type, or substring)
 func (m *Manager) Get(name string) (Provider, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	p, ok := m.providers[name]
-	return p, ok
+
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, false
+	}
+
+	// 1. Exact match
+	if p, ok := m.providers[name]; ok {
+		return p, true
+	}
+
+	// 2. Case-insensitive exact name match
+	for _, p := range m.providers {
+		if strings.EqualFold(p.Name(), name) {
+			return p, true
+		}
+	}
+
+	// 3. Match by Type() (e.g. "gemini", "groq", "openai", "anthropic")
+	for _, p := range m.providers {
+		if strings.EqualFold(p.Type(), name) {
+			return p, true
+		}
+	}
+
+	// 4. Substring / Prefix match in provider name
+	nameLower := strings.ToLower(name)
+	for _, p := range m.providers {
+		if strings.Contains(strings.ToLower(p.Name()), nameLower) {
+			return p, true
+		}
+	}
+
+	return nil, false
 }
 
 // ListAll returns all active registered providers
