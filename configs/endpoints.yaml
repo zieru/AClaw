@@ -40,3 +40,40 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
+
+  # ----------------------------------------------------------------------------
+  # 1. Visit Data API (Rincian Lengkap Data Visit)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: "*"
+      order-by: '"Trx Date" desc'
+
+  # ----------------------------------------------------------------------------
+  # 2. Visit Pivot Matrix API (Kalkulasi Matriks Status Layanan: Dilayani vs Batal)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/pivot"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: '"Trx Date", regional, "Nama Grapari", "Service", "Subjek Serving", case when flag_dilayani = 1 then ''Dilayani'' else ''Batal'' end as status_layanan, sum(total) as total_visit'
+      group-by: '"Trx Date", regional, "Nama Grapari", "Service", "Subjek Serving", status_layanan'
+      pivot: "status_layanan"
+      pivot-fill: "0"
+      order-by: '"Trx Date" desc'
+
+
+
+
+
+

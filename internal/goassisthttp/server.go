@@ -80,7 +80,7 @@ func NewServer(port int, endpointsFile string, readTimeout, writeTimeout time.Du
 	serverAddr := fmt.Sprintf(":%d", port)
 	srv := &http.Server{
 		Addr:         serverAddr,
-		Handler:      mux,
+		Handler:      corsMiddleware(mux),
 		ReadTimeout:  readTimeout,
 		WriteTimeout: writeTimeout,
 	}
@@ -91,6 +91,24 @@ func NewServer(port int, endpointsFile string, readTimeout, writeTimeout time.Du
 		endpoints:  registeredEndpoints,
 	}
 }
+
+// corsMiddleware menangani CORS header dan HTTP OPTIONS preflight request
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Requested-With, Origin")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 
 // Start menjalankan HTTP server secara asinkron (background goroutine)
 func (s *Server) Start() {

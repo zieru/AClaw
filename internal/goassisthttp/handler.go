@@ -146,6 +146,8 @@ func CreateDynamicHandler(ep EndpointItem) http.HandlerFunc {
 // writeJSON adalah helper untuk serialize data ke format JSON dan mengirim HTTP status
 func writeJSON(w http.ResponseWriter, statusCode int, data APIResponse) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(data)
 }
+

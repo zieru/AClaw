@@ -77,3 +77,43 @@ func TestRoutesDiscoveryEndpoint(t *testing.T) {
 		t.Errorf("expected status success, got %v", data["status"])
 	}
 }
+
+func TestLoadEndpointsConfig_VisitEndpoint(t *testing.T) {
+	cfg, err := LoadEndpointsConfig("../../configs/endpoints.yaml")
+	if err != nil {
+		t.Fatalf("gagal memuat endpoints.yaml: %v", err)
+	}
+
+	foundVisit := false
+	foundPivot := false
+	for _, ep := range cfg.Endpoints {
+		if ep.Path == "/api/visit" {
+			foundVisit = true
+			if ep.Method != "GET" {
+				t.Errorf("expected GET method, got %s", ep.Method)
+			}
+			if ep.Binary != "g3a" {
+				t.Errorf("expected binary g3a, got %s", ep.Binary)
+			}
+			if ep.Type != "regular" {
+				t.Errorf("expected type regular, got %s", ep.Type)
+			}
+		}
+		if ep.Path == "/api/visit/pivot" {
+			foundPivot = true
+			if ep.Defaults["pivot"] != "status_layanan" {
+				t.Errorf("expected pivot on status_layanan, got %s", ep.Defaults["pivot"])
+			}
+		}
+	}
+
+	if !foundVisit {
+		t.Errorf("endpoint /api/visit tidak ditemukan di endpoints.yaml")
+	}
+	if !foundPivot {
+		t.Errorf("endpoint /api/visit/pivot tidak ditemukan di endpoints.yaml")
+	}
+
+}
+
+
