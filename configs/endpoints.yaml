@@ -41,24 +41,14 @@ endpoints:
     defaults:
       output: "json"
 
-  # ----------------------------------------------------------------------------
-  # 1. Visit Data API (Rincian Lengkap Data Visit)
-  # ----------------------------------------------------------------------------
-  - path: "/api/visit"
-    method: "GET"
-    binary: "g3a"
-    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
-    type: "regular"
-    timeout_seconds: 30
-    defaults:
-      output: "json"
-      select: "*"
-      order-by: '"Trx Date" desc'
+  # ============================================================================
+  # Modular Visit Analytics API Endpoints (Dihitung langsung via DuckDB Engine g3a)
+  # ============================================================================
 
   # ----------------------------------------------------------------------------
-  # 2. Visit Pivot Matrix API (Kalkulasi Matriks Status Layanan: Dilayani vs Batal)
+  # 1. Visit KPI Ringkasan Kartu
   # ----------------------------------------------------------------------------
-  - path: "/api/visit/pivot"
+  - path: "/api/visit/kpi"
     method: "GET"
     binary: "g3a"
     command: "/home/zieru/Onedrive/antreaja/visit_parquet"
@@ -66,11 +56,69 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: '"Trx Date", regional, "Nama Grapari", "Service", "Subjek Serving", case when flag_dilayani = 1 then ''Dilayani'' else ''Batal'' end as status_layanan, sum(total) as total_visit'
-      group-by: '"Trx Date", regional, "Nama Grapari", "Service", "Subjek Serving", status_layanan'
-      pivot: "status_layanan"
-      pivot-fill: "0"
-      order-by: '"Trx Date" desc'
+      select: 'sum(total) as total_visits, sum(case when flag_dilayani = 1 then total else 0 end) as served_count, sum(case when flag_dilayani = 0 then total else 0 end) as unserved_count, printf(''%.1f%%'', 100.0 * sum(case when flag_dilayani = 1 then total else 0 end) / nullif(sum(total), 0)) as served_ratio'
+
+  # ----------------------------------------------------------------------------
+  # 2. Visit Tren Harian (Trx Date)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/trend"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: '"Trx Date", sum(total) as total'
+      group-by: '"Trx Date"'
+      order-by: '"Trx Date" asc'
+
+  # ----------------------------------------------------------------------------
+  # 3. Proporsi Layanan (Service)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/service"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: '"Service", sum(total) as total'
+      group-by: '"Service"'
+      order-by: 'total desc'
+
+  # ----------------------------------------------------------------------------
+  # 4. Kunjungan per Regional
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/regional"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: 'regional, sum(total) as total'
+      group-by: 'regional'
+      order-by: 'total desc'
+
+  # ----------------------------------------------------------------------------
+  # 5. SLA Layani vs Tunggu per GraPARI
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/sla"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: '"Nama Grapari", regional, sum(total) as total'
+      group-by: '"Nama Grapari", regional'
+      order-by: 'total desc'
+      limit: '8'
+
 
 
 

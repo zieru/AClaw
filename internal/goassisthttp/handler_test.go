@@ -84,36 +84,35 @@ func TestLoadEndpointsConfig_VisitEndpoint(t *testing.T) {
 		t.Fatalf("gagal memuat endpoints.yaml: %v", err)
 	}
 
-	foundVisit := false
-	foundPivot := false
+	expectedPaths := map[string]bool{
+		"/api/visit/kpi":      false,
+		"/api/visit/trend":    false,
+		"/api/visit/service":  false,
+		"/api/visit/regional": false,
+		"/api/visit/sla":      false,
+	}
+
 	for _, ep := range cfg.Endpoints {
-		if ep.Path == "/api/visit" {
-			foundVisit = true
+		if _, ok := expectedPaths[ep.Path]; ok {
+			expectedPaths[ep.Path] = true
 			if ep.Method != "GET" {
-				t.Errorf("expected GET method, got %s", ep.Method)
+				t.Errorf("expected GET method for %s, got %s", ep.Path, ep.Method)
 			}
 			if ep.Binary != "g3a" {
-				t.Errorf("expected binary g3a, got %s", ep.Binary)
+				t.Errorf("expected binary g3a for %s, got %s", ep.Path, ep.Binary)
 			}
 			if ep.Type != "regular" {
-				t.Errorf("expected type regular, got %s", ep.Type)
-			}
-		}
-		if ep.Path == "/api/visit/pivot" {
-			foundPivot = true
-			if ep.Defaults["pivot"] != "status_layanan" {
-				t.Errorf("expected pivot on status_layanan, got %s", ep.Defaults["pivot"])
+				t.Errorf("expected type regular for %s, got %s", ep.Path, ep.Type)
 			}
 		}
 	}
 
-	if !foundVisit {
-		t.Errorf("endpoint /api/visit tidak ditemukan di endpoints.yaml")
+	for path, found := range expectedPaths {
+		if !found {
+			t.Errorf("endpoint %s tidak ditemukan di endpoints.yaml", path)
+		}
 	}
-	if !foundPivot {
-		t.Errorf("endpoint /api/visit/pivot tidak ditemukan di endpoints.yaml")
-	}
-
 }
+
 
 

@@ -20,7 +20,6 @@ type APIResponse struct {
 	Status     string          `json:"status"`               // "success" atau "error"
 	Type       string          `json:"type,omitempty"`       // "pagination" atau "regular"
 	Pagination *PaginationMeta `json:"pagination,omitempty"` // Metadata pagination (jika tipe pagination)
-	Command    string          `json:"command,omitempty"`    // Command yang dijalankan
 	Output     interface{}     `json:"output,omitempty"`     // Output dari binary
 	Message    string          `json:"message,omitempty"`    // Pesan error jika gagal
 }
@@ -102,14 +101,9 @@ func CreateDynamicHandler(ep EndpointItem) http.HandlerFunc {
 		timeout := time.Duration(ep.TimeoutSeconds) * time.Second
 		result, err := ExecuteDynamicCommand(r.Context(), ep.Binary, ep.Command, flags, timeout)
 		if err != nil {
-			var cmdStr string
-			if result != nil {
-				cmdStr = result.Command
-			}
 			writeJSON(w, http.StatusInternalServerError, APIResponse{
 				Status:  "error",
 				Type:    ep.Type,
-				Command: cmdStr,
 				Message: err.Error(),
 			})
 			return
@@ -125,7 +119,6 @@ func CreateDynamicHandler(ep EndpointItem) http.HandlerFunc {
 					Status:     "success",
 					Type:       ep.Type,
 					Pagination: paginationMeta,
-					Command:    result.Command,
 					Output:     parsedJSON,
 				})
 				return
@@ -137,11 +130,11 @@ func CreateDynamicHandler(ep EndpointItem) http.HandlerFunc {
 			Status:     "success",
 			Type:       ep.Type,
 			Pagination: paginationMeta,
-			Command:    result.Command,
 			Output:     result.Output,
 		})
 	}
 }
+
 
 // writeJSON adalah helper untuk serialize data ke format JSON dan mengirim HTTP status
 func writeJSON(w http.ResponseWriter, statusCode int, data APIResponse) {
