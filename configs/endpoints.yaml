@@ -42,6 +42,7 @@ endpoints:
       output: "json"
 
   # ============================================================================
+  # ============================================================================
   # Modular Visit Analytics API Endpoints (Dihitung langsung via DuckDB Engine g3a)
   # ============================================================================
 
@@ -56,7 +57,7 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: 'sum(total) as total_visits, sum(case when flag_dilayani = 1 then total else 0 end) as served_count, sum(case when flag_dilayani = 0 then total else 0 end) as unserved_count, printf(''%.1f%%'', 100.0 * sum(case when flag_dilayani = 1 then total else 0 end) / nullif(sum(total), 0)) as served_ratio'
+      select: 'count(1) as total_visits, count(1) filter (where flag_dilayani = 1 or flag_dilayani = ''1'' or lower(cast(flag_dilayani as varchar)) like ''%dilayani%'') as served_count, count(1) filter (where flag_dilayani = 0 or flag_dilayani = ''0'' or lower(cast(flag_dilayani as varchar)) like ''%batal%'' or lower(cast(flag_dilayani as varchar)) like ''%tidak%'') as unserved_count, printf(''%.1f%%'', 100.0 * count(1) filter (where flag_dilayani = 1 or flag_dilayani = ''1'' or lower(cast(flag_dilayani as varchar)) like ''%dilayani%'') / nullif(count(1), 0)) as served_ratio, count(1) filter (where hvc_tsel = 1 or hvc_tsel = ''1'') as total_momo, count(1) filter (where hvc_indihome = 1 or hvc_indihome = ''1'') as total_tomo'
 
   # ----------------------------------------------------------------------------
   # 2. Visit Tren Harian (Trx Date)
@@ -69,9 +70,9 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: '"Trx Date", sum(total) as total'
-      group-by: '"Trx Date"'
-      order-by: '"Trx Date" asc'
+      select: 'strftime(cast("Trx Date" as date), ''%Y-%m-%d'') as "Trx Date", count(1) as total'
+      group-by: 'strftime(cast("Trx Date" as date), ''%Y-%m-%d'')'
+      order-by: 'strftime(cast("Trx Date" as date), ''%Y-%m-%d'') asc'
 
   # ----------------------------------------------------------------------------
   # 3. Proporsi Layanan (Service)
@@ -84,7 +85,7 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: '"Service", sum(total) as total'
+      select: '"Service", count(1) as total'
       group-by: '"Service"'
       order-by: 'total desc'
 
@@ -99,14 +100,14 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: 'regional, sum(total) as total'
+      select: 'regional, count(1) as total'
       group-by: 'regional'
       order-by: 'total desc'
 
   # ----------------------------------------------------------------------------
-  # 5. SLA Layani vs Tunggu per GraPARI
+  # 5. Kunjungan per GraPARI (Untuk Top 10 & Bottom 10)
   # ----------------------------------------------------------------------------
-  - path: "/api/visit/sla"
+  - path: "/api/visit/grapari"
     method: "GET"
     binary: "g3a"
     command: "/home/zieru/Onedrive/antreaja/visit_parquet"
@@ -114,9 +115,10 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: '"Nama Grapari", regional, sum(total) as total'
+      select: '"Nama Grapari", regional, count(1) as total'
       group-by: '"Nama Grapari", regional'
       order-by: 'total desc'
+
   # ----------------------------------------------------------------------------
   # 6. MoM (Month-over-Month) Aggregation & Comparison
   # ----------------------------------------------------------------------------
@@ -128,10 +130,11 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: 'strftime("Trx Date", ''%Y-%m'') as periode, sum(total) as total_visits, sum(case when flag_dilayani = 1 then total else 0 end) as served_count, sum(case when flag_dilayani = 0 then total else 0 end) as unserved_count, printf(''%.1f%%'', 100.0 * sum(case when flag_dilayani = 1 then total else 0 end) / nullif(sum(total), 0)) as served_ratio'
-      group-by: 'strftime("Trx Date", ''%Y-%m'')'
-      order-by: 'strftime("Trx Date", ''%Y-%m'') asc'
+      select: 'strftime(cast("Trx Date" as date), ''%Y-%m'') as periode, count(1) as total_visits, count(1) filter (where flag_dilayani = 1 or flag_dilayani = ''1'' or lower(cast(flag_dilayani as varchar)) like ''%dilayani%'') as served_count, count(1) filter (where flag_dilayani = 0 or flag_dilayani = ''0'' or lower(cast(flag_dilayani as varchar)) like ''%batal%'' or lower(cast(flag_dilayani as varchar)) like ''%tidak%'') as unserved_count, printf(''%.1f%%'', 100.0 * count(1) filter (where flag_dilayani = 1 or flag_dilayani = ''1'' or lower(cast(flag_dilayani as varchar)) like ''%dilayani%'') / nullif(count(1), 0)) as served_ratio'
+      group-by: 'strftime(cast("Trx Date" as date), ''%Y-%m'')'
+      order-by: 'strftime(cast("Trx Date" as date), ''%Y-%m'') asc'
       limit: '24'
+
 
 
 

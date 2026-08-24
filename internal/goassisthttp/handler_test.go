@@ -89,7 +89,7 @@ func TestLoadEndpointsConfig_VisitEndpoint(t *testing.T) {
 		"/api/visit/trend":    false,
 		"/api/visit/service":  false,
 		"/api/visit/regional": false,
-		"/api/visit/sla":      false,
+		"/api/visit/grapari":  false,
 		"/api/visit/mom":      false,
 	}
 
