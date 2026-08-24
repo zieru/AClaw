@@ -90,6 +90,7 @@ func TestLoadEndpointsConfig_VisitEndpoint(t *testing.T) {
 		"/api/visit/service":  false,
 		"/api/visit/regional": false,
 		"/api/visit/sla":      false,
+		"/api/visit/mom":      false,
 	}
 
 	for _, ep := range cfg.Endpoints {

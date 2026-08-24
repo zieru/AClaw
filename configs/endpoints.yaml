@@ -117,7 +117,23 @@ endpoints:
       select: '"Nama Grapari", regional, sum(total) as total'
       group-by: '"Nama Grapari", regional'
       order-by: 'total desc'
-      limit: '8'
+  # ----------------------------------------------------------------------------
+  # 6. MoM (Month-over-Month) Aggregation & Comparison
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/mom"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: 'strftime("Trx Date", ''%Y-%m'') as periode, sum(total) as total_visits, sum(case when flag_dilayani = 1 then total else 0 end) as served_count, sum(case when flag_dilayani = 0 then total else 0 end) as unserved_count, printf(''%.1f%%'', 100.0 * sum(case when flag_dilayani = 1 then total else 0 end) / nullif(sum(total), 0)) as served_ratio'
+      group-by: 'strftime("Trx Date", ''%Y-%m'')'
+      order-by: 'strftime("Trx Date", ''%Y-%m'') asc'
+      limit: '24'
+
+
 
 
 
