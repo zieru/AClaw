@@ -83,15 +83,12 @@ func TestSmartFallbackAndCombos(t *testing.T) {
 	mgr.Register(p1, 1)
 	mgr.Register(p2, 2)
 
-	// 1. Test Failsafe fallback across providers
-	resp, err := mgr.GenerateWithFallback(context.Background(), "openai", ChatRequest{
+	// 1. Test Strict non-combo: should fail if the selected provider fails without combo
+	_, err := mgr.GenerateWithFallback(context.Background(), "openai", ChatRequest{
 		Model: "gpt-4o-mini",
 	})
-	if err != nil {
-		t.Fatalf("expected fallback to succeed, got: %v", err)
-	}
-	if resp == nil || resp.Content != "response from anthropic (gpt-4o-mini)" {
-		t.Errorf("unexpected response text: %v", resp)
+	if err == nil {
+		t.Fatalf("expected non-combo failure without fallback, but got success")
 	}
 
 	// 2. Test Combo resolution

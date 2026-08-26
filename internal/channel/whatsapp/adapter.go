@@ -32,21 +32,21 @@ import (
 
 // NativeAdapter manages a native WhatsApp Multi-Device connection
 type NativeAdapter struct {
-	channelID       string
-	name            string
-	device          *store.Device
-	client          *whatsmeow.Client
-	orchestrator    *agent.Orchestrator
-	db              *storage.DB
-	settings        WhatsAppSettings
-	mu              sync.RWMutex
-	activeTasks     sync.Map // chatID -> context.CancelFunc
-	lastQRBytes     []byte
-	lastQRStr       string
-	isPairing       bool
-	qrChan          <-chan whatsmeow.QRChannelItem
-	cancelQR        context.CancelFunc
-	onLoginSuccess  func()
+	channelID      string
+	name           string
+	device         *store.Device
+	client         *whatsmeow.Client
+	orchestrator   *agent.Orchestrator
+	db             *storage.DB
+	settings       WhatsAppSettings
+	mu             sync.RWMutex
+	activeTasks    sync.Map // chatID -> context.CancelFunc
+	lastQRBytes    []byte
+	lastQRStr      string
+	isPairing      bool
+	qrChan         <-chan whatsmeow.QRChannelItem
+	cancelQR       context.CancelFunc
+	onLoginSuccess func()
 }
 
 func NewNativeAdapter(channelID, name string, device *store.Device, settings WhatsAppSettings, orch *agent.Orchestrator, db *storage.DB) *NativeAdapter {

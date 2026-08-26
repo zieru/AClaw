@@ -248,6 +248,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 			Temperature:     0.7,
 			MaxTokens:       policy.MaxTokens,
 			ThinkingEnabled: policy.ThinkingEnabled,
+			OnProgress:      req.OnProgress,
 		}
 
 		resp, err := o.providerManager.GenerateWithFallback(ctx, req.PreferredProv, chatReq)
@@ -295,6 +296,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 					Tools:       allowedTools,
 					Temperature: 0.7,
 					MaxTokens:   policy.MaxTokens,
+					OnProgress:  req.OnProgress,
 				}
 
 				// Fresh 2-minute context if original ctx was timed out

@@ -67,6 +67,7 @@ type ChatRequest struct {
 	StreamCallback  StreamCallback // Callback for streaming chunks
 	ThinkingEnabled bool           // Enable thinking/reasoning output
 	ThinkingBudget  int            // Max tokens for thinking (0 = provider default)
+	OnProgress      func(status string) // Optional progress callback during retry attempts
 }
 
 // ChatResponse holds the output from an LLM call
@@ -296,6 +297,14 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 				continue
 			}
 
+			if idx > 0 && req.OnProgress != nil {
+				if idx == 1 {
+					req.OnProgress(fmt.Sprintf("⏳ Mencoba target cadangan combo (%s/%s), butuh sedikit waktu...", target.ProviderID, target.Model))
+				} else {
+					req.OnProgress(fmt.Sprintf("⏳ Percobaan combo ke-%d (%s/%s), masih membutuhkan waktu...", idx+1, target.ProviderID, target.Model))
+				}
+			}
+
 			targetReq := req
 			targetReq.Model = target.Model
 
@@ -353,10 +362,19 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 	}
 
 	var executionList []Provider
-	executionList = append(executionList, primaryCandidates...)
-	executionList = append(executionList, secondaryCandidates...)
+	// Jika user secara eksplisit menentukan single model (bukan combo), HANYA jalankan provider yang mendukung model tersebut
+	if req.Model != "" && len(primaryCandidates) > 0 {
+		executionList = primaryCandidates
+	} else if preferredName != "" && len(secondaryCandidates) > 0 {
+		executionList = secondaryCandidates
+	} else {
+		executionList = append(primaryCandidates, secondaryCandidates...)
+	}
 
 	if len(executionList) == 0 {
+		if req.Model != "" {
+			return nil, fmt.Errorf("tidak ada provider aktif yang mendukung model '%s'", req.Model)
+		}
 		return nil, fmt.Errorf("tidak ada provider AI yang aktif atau terdaftar")
 	}
 
@@ -366,6 +384,14 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
+		}
+
+		if idx > 0 && req.OnProgress != nil {
+			if idx == 1 {
+				req.OnProgress(fmt.Sprintf("⏳ Sedang mencoba ulang (%s), butuh sedikit waktu...", p.Name()))
+			} else {
+				req.OnProgress(fmt.Sprintf("⏳ Percobaan ke-%d (%s), masih membutuhkan waktu...", idx+1, p.Name()))
+			}
 		}
 
 		pStart := time.Now()
@@ -378,11 +404,11 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 		}
 		latency := time.Since(pStart).Milliseconds()
 		executionErrors = append(executionErrors, fmt.Sprintf("[%d/%d %s (%dms)]: %v", idx+1, len(executionList), p.Name(), latency, err))
-		log.Printf("[Fallback] Provider #%d [%s] gagal (%dms): %v", idx+1, p.Name(), latency, err)
+		log.Printf("[Execution] Provider #%d [%s] gagal (%dms): %v", idx+1, p.Name(), latency, err)
 	}
 
 	if len(executionErrors) > 0 {
-		return nil, fmt.Errorf("semua provider AI gagal dieksekusi (%d/%d): %s", len(executionErrors), len(executionList), strings.Join(executionErrors, " | "))
+		return nil, fmt.Errorf("provider AI gagal dieksekusi (%d/%d): %s", len(executionErrors), len(executionList), strings.Join(executionErrors, " | "))
 	}
 	return nil, fmt.Errorf("semua provider AI gagal dieksekusi")
 }

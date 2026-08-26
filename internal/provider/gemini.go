@@ -242,6 +242,14 @@ func (p *GeminiProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 			return nil, ctx.Err()
 		}
 
+		if attempt > 0 && req.OnProgress != nil {
+			if attempt == 1 {
+				req.OnProgress("⏳ Mencoba kunci API cadangan, butuh sedikit waktu...")
+			} else {
+				req.OnProgress(fmt.Sprintf("⏳ Percobaan kunci ke-%d, masih membutuhkan waktu...", attempt+1))
+			}
+		}
+
 		apiKey := p.keyPool.GetNextKey()
 		url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, apiKey)
 
