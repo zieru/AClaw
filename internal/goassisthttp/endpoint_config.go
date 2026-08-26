@@ -21,10 +21,13 @@ type EndpointItem struct {
 	Method         string            `yaml:"method"`          // HTTP Method: GET, POST, dll (default GET)
 	Binary         string            `yaml:"binary"`          // Nama executable binary (default: "g3a")
 	Command        string            `yaml:"command"`         // Argumen perintah dasar CLI (misal: "/datafunneling/funneling")
-	Type           string            `yaml:"type"`            // "pagination" atau "regular"
+	Type           string            `yaml:"type"`            // "pagination", "regular", atau "llm" / "ai"
 	TimeoutSeconds int               `yaml:"timeout_seconds"` // Timeout eksekusi binary dalam detik
 	Defaults       map[string]string `yaml:"defaults"`        // Default flags CLI jika query param tidak diberikan
 	Pagination     PaginationConfig  `yaml:"pagination"`      // Konfigurasi khusus pagination
+	Prompt         string            `yaml:"prompt"`          // Custom user prompt untuk endpoint LLM/AI
+	SystemPrompt   string            `yaml:"system_prompt"`   // System prompt untuk endpoint LLM/AI
+	Model          string            `yaml:"model"`           // Model override (opsional, default: global active model)
 }
 
 // EndpointsConfig struktur utama file configs/endpoints.yaml

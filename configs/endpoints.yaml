@@ -42,6 +42,111 @@ endpoints:
       output: "json"
 
   # ============================================================================
+  # Status Order Fallout Analytics Endpoints (Engine g3a)
+  # ============================================================================
+
+  # ----------------------------------------------------------------------------
+  # 1. Total KPI Fallout (Periode Jun - Agu)
+  # ----------------------------------------------------------------------------
+  - path: "/api/fallout/kpi"
+    method: "GET"
+    binary: "g3a"
+    command: "funneling"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: "count(1) filter (where mapping_kategori in ('PENDING','FALLOUT') and periode in (6,7,8)) as total_fallout, count(1) filter (where periode in (6,7,8)) as total_order, printf('%.2f%%', 100.0 * count(1) filter (where mapping_kategori in ('PENDING','FALLOUT') and periode in (6,7,8)) / nullif(count(1) filter (where periode in (6,7,8)), 0)) as fallout_rate"
+      where: "periode in (6,7,8)"
+
+  # ----------------------------------------------------------------------------
+  # 2. Rekap Fallout per Regional & Periode Bulan (Bar Chart Data)
+  # ----------------------------------------------------------------------------
+  - path: "/api/fallout/regional"
+    method: "GET"
+    binary: "g3a"
+    command: "funneling"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: "region, count(1) filter (where mapping_kategori in ('PENDING','FALLOUT') and periode=6) as juni, count(1) filter (where mapping_kategori in ('PENDING','FALLOUT') and periode=7) as juli, count(1) filter (where mapping_kategori in ('PENDING','FALLOUT') and periode=8) as agustus, count(1) filter (where mapping_kategori in ('PENDING','FALLOUT') and periode in (6,7,8)) as total"
+      where: "periode in (6,7,8)"
+      group-by: "region"
+      order-by: "total desc"
+
+  # ----------------------------------------------------------------------------
+  # 3. Top Fallout Reasons / Root Causes
+  # ----------------------------------------------------------------------------
+  - path: "/api/fallout/reasons"
+    method: "GET"
+    binary: "g3a"
+    command: "funneling"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: "coalesce(fallout_reason, order_status_desc, 'Unknown') as reason, count(1) as total"
+      where: "mapping_kategori in ('PENDING','FALLOUT') and periode in (6,7,8)"
+      group-by: "coalesce(fallout_reason, order_status_desc, 'Unknown')"
+      order-by: "total desc"
+      limit: "10"
+
+  # ----------------------------------------------------------------------------
+  # 4. Fallout Resolver (Need Support Alignment)
+  # ----------------------------------------------------------------------------
+  - path: "/api/fallout/resolver"
+    method: "GET"
+    binary: "g3a"
+    command: "funneling"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: "coalesce(mapping_resolver, 'Need Alignment') as resolver, count(1) as total"
+      where: "mapping_kategori in ('PENDING','FALLOUT') and periode in (6,7,8)"
+      group-by: "coalesce(mapping_resolver, 'Need Alignment')"
+      order-by: "total desc"
+      limit: "10"
+
+  # ----------------------------------------------------------------------------
+  # 5. AI Business Insights: Paint Points & Need Support (Built-in Global LLM)
+  # Endpoint: GET /api/fallout/ai-insights
+  # ----------------------------------------------------------------------------
+  - path: "/api/fallout/ai-insights"
+    method: "GET"
+    type: "llm"
+    timeout_seconds: 45
+    binary: "g3a"
+    command: "funneling"
+    defaults:
+      output: "json"
+      select: "coalesce(fallout_reason, order_status_desc, 'Unknown') as reason, count(1) as total"
+      where: "mapping_kategori in ('PENDING','FALLOUT') and periode in (6,7,8)"
+      group-by: "coalesce(fallout_reason, order_status_desc, 'Unknown')"
+      order-by: "total desc"
+      limit: "15"
+    system_prompt: |
+      Anda adalah AI Analis Data Operasional dan Solusi Bisnis Telkomsel.
+      Tugas Anda adalah membaca ringkasan data kendala fallout order dan mensintesis 3 Paint Points utama serta 3 Need Support yang konkret dan tajam.
+      
+      Format output WAJIB JSON murni persis seperti ini:
+      {
+        "paint_points": [
+          "Ketidaksinkronan status order antara DSC dan UFO...",
+          "Order stuck karena membutuhkan proses pelurusan data...",
+          "Keterangan status Fallout masih menggunakan istilah teknis..."
+        ],
+        "need_support": [
+          "Sinkronisasi status order DSC dan UFO...",
+          "Simplifikasi proses pelurusan data untuk order Fallout/Stuck...",
+          "Enhancement informasi status Fallout..."
+        ]
+      }
+    prompt: |
+      Berdasarkan data fallout reasons teratas yang diberikan dari sistem query engine g3a, formulasikan 3 Paint Points dan 3 Need Support yang tajam, profesional, dan actionable.
+
+  # ============================================================================
   # ============================================================================
   # Modular Visit Analytics API Endpoints (Dihitung langsung via DuckDB Engine g3a)
   # ============================================================================
@@ -57,7 +162,22 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: 'count(1) as total_visits, count(1) filter (where flag_dilayani = 1 or flag_dilayani = ''1'' or lower(cast(flag_dilayani as varchar)) like ''%dilayani%'') as served_count, count(1) filter (where flag_dilayani = 0 or flag_dilayani = ''0'' or lower(cast(flag_dilayani as varchar)) like ''%batal%'' or lower(cast(flag_dilayani as varchar)) like ''%tidak%'') as unserved_count, printf(''%.1f%%'', 100.0 * count(1) filter (where flag_dilayani = 1 or flag_dilayani = ''1'' or lower(cast(flag_dilayani as varchar)) like ''%dilayani%'') / nullif(count(1), 0)) as served_ratio, count(1) filter (where hvc_tsel = 1 or hvc_tsel = ''1'') as total_momo, count(1) filter (where hvc_indihome = 1 or hvc_indihome = ''1'') as total_tomo'
+      select: 'sum(total) as total_visits, sum(case when flag_dilayani = 1 or flag_dilayani = ''1'' or lower(cast(flag_dilayani as varchar)) like ''%dilayani%'' then total else 0 end) as served_count, sum(case when flag_dilayani = 0 or flag_dilayani = ''0'' or lower(cast(flag_dilayani as varchar)) like ''%batal%'' or lower(cast(flag_dilayani as varchar)) like ''%tidak%'' then total else 0 end) as unserved_count, printf(''%.1f%%'', 100.0 * sum(case when flag_dilayani = 1 or flag_dilayani = ''1'' or lower(cast(flag_dilayani as varchar)) like ''%dilayani%'' then total else 0 end) / nullif(sum(total), 0)) as served_ratio'
+
+  # ----------------------------------------------------------------------------
+  # 1b. Ringkasan Jenis Mitra (Group By BISMOD Dinamis)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/mitra"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: '"BISMOD" as mitra, sum(total) as total'
+      group-by: '"BISMOD"'
+      order-by: 'total desc'
 
   # ----------------------------------------------------------------------------
   # 2. Visit Tren Harian (Trx Date)
@@ -70,7 +190,7 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: 'strftime(cast("Trx Date" as date), ''%Y-%m-%d'') as "Trx Date", count(1) as total'
+      select: 'strftime(cast("Trx Date" as date), ''%Y-%m-%d'') as "Trx Date", sum(total) as total'
       group-by: 'strftime(cast("Trx Date" as date), ''%Y-%m-%d'')'
       order-by: 'strftime(cast("Trx Date" as date), ''%Y-%m-%d'') asc'
 
@@ -85,9 +205,10 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: '"Service", count(1) as total'
+      select: '"Service", sum(total) as total'
       group-by: '"Service"'
       order-by: 'total desc'
+      limit: '10'
 
   # ----------------------------------------------------------------------------
   # 4. Kunjungan per Regional
@@ -100,7 +221,7 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: 'regional, count(1) as total'
+      select: 'regional, sum(total) as total'
       group-by: 'regional'
       order-by: 'total desc'
 
@@ -115,7 +236,7 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: '"Nama Grapari", regional, count(1) as total'
+      select: '"Nama Grapari", regional, sum(total) as total'
       group-by: '"Nama Grapari", regional'
       order-by: 'total desc'
 
@@ -130,12 +251,57 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: 'strftime(cast("Trx Date" as date), ''%Y-%m'') as periode, count(1) as total_visits, count(1) filter (where flag_dilayani = 1 or flag_dilayani = ''1'' or lower(cast(flag_dilayani as varchar)) like ''%dilayani%'') as served_count, count(1) filter (where flag_dilayani = 0 or flag_dilayani = ''0'' or lower(cast(flag_dilayani as varchar)) like ''%batal%'' or lower(cast(flag_dilayani as varchar)) like ''%tidak%'') as unserved_count, printf(''%.1f%%'', 100.0 * count(1) filter (where flag_dilayani = 1 or flag_dilayani = ''1'' or lower(cast(flag_dilayani as varchar)) like ''%dilayani%'') / nullif(count(1), 0)) as served_ratio'
+      select: 'strftime(cast("Trx Date" as date), ''%Y-%m'') as periode, sum(total) as total_visits, sum(case when flag_dilayani = 1 or flag_dilayani = ''1'' or lower(cast(flag_dilayani as varchar)) like ''%dilayani%'' then total else 0 end) as served_count, sum(case when flag_dilayani = 0 or flag_dilayani = ''0'' or lower(cast(flag_dilayani as varchar)) like ''%batal%'' or lower(cast(flag_dilayani as varchar)) like ''%tidak%'' then total else 0 end) as unserved_count, printf(''%.1f%%'', 100.0 * sum(case when flag_dilayani = 1 or flag_dilayani = ''1'' or lower(cast(flag_dilayani as varchar)) like ''%dilayani%'' then total else 0 end) / nullif(sum(total), 0)) as served_ratio'
       group-by: 'strftime(cast("Trx Date" as date), ''%Y-%m'')'
       order-by: 'strftime(cast("Trx Date" as date), ''%Y-%m'') asc'
       limit: '24'
 
+  # ============================================================================
+  # Visit Performance Dashboard Endpoints
+  # ============================================================================
 
+  # ----------------------------------------------------------------------------
+  # 7. Performance Total (Area Sumatera Aggregate)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/performance-total"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: 'sum(total) as total_visit, round(avg(epoch(average_waiting)) / 60.0, 2) as avg_waiting_minutes, round(avg(epoch(average_serving)) / 60.0, 2) as avg_serving_minutes'
+
+  # ----------------------------------------------------------------------------
+  # 8. Performance per Regional
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/performance-regional"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: 'regional, sum(total) as total_visit, round(avg(epoch(average_waiting)) / 60.0, 2) as avg_waiting_minutes, round(avg(epoch(average_serving)) / 60.0, 2) as avg_serving_minutes'
+      group-by: 'regional'
+      order-by: 'regional asc'
+
+  # ----------------------------------------------------------------------------
+  # 9. Performance per Territory (Top Branch)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/performance-territory"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: 'territory, regional, sum(total) as total_visit, round(avg(epoch(average_waiting)) / 60.0, 2) as avg_waiting_minutes, round(avg(epoch(average_serving)) / 60.0, 2) as avg_serving_minutes'
+      group-by: 'territory, regional'
+      order-by: 'total_visit desc'
 
 
 

@@ -86,6 +86,7 @@ func TestLoadEndpointsConfig_VisitEndpoint(t *testing.T) {
 
 	expectedPaths := map[string]bool{
 		"/api/visit/kpi":      false,
+		"/api/visit/mitra":    false,
 		"/api/visit/trend":    false,
 		"/api/visit/service":  false,
 		"/api/visit/regional": false,

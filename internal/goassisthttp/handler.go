@@ -1,11 +1,15 @@
 package goassisthttp
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"goassistant/internal/provider"
 )
 
 // PaginationMeta metadata informasi pagination di respons JSON
@@ -18,9 +22,9 @@ type PaginationMeta struct {
 // APIResponse mendefinisikan struktur response standar JSON
 type APIResponse struct {
 	Status     string          `json:"status"`               // "success" atau "error"
-	Type       string          `json:"type,omitempty"`       // "pagination" atau "regular"
+	Type       string          `json:"type,omitempty"`       // "pagination", "regular", atau "llm" / "ai"
 	Pagination *PaginationMeta `json:"pagination,omitempty"` // Metadata pagination (jika tipe pagination)
-	Output     interface{}     `json:"output,omitempty"`     // Output dari binary
+	Output     interface{}     `json:"output,omitempty"`     // Output dari binary atau LLM
 	Message    string          `json:"message,omitempty"`    // Pesan error jika gagal
 }
 
@@ -28,7 +32,7 @@ type APIResponse struct {
 func CreateDynamicHandler(ep EndpointItem) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Validasi HTTP Method
-		if r.Method != ep.Method {
+		if r.Method != ep.Method && !(ep.Method == "" && r.Method == http.MethodGet) {
 			writeJSON(w, http.StatusMethodNotAllowed, APIResponse{
 				Status:  "error",
 				Message: "Method tidak diizinkan. Gunakan " + ep.Method,
@@ -50,7 +54,18 @@ func CreateDynamicHandler(ep EndpointItem) http.HandlerFunc {
 			}
 		}
 
-		// 3. Logika khusus jika endpoint bertipe "pagination"
+		timeout := time.Duration(ep.TimeoutSeconds) * time.Second
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+
+		// 3. Khusus endpoint bertipe LLM / AI yang menggunakan built-in global AI engine
+		if strings.EqualFold(ep.Type, "llm") || strings.EqualFold(ep.Type, "ai") {
+			handleLLMEndpoint(w, r, ep, flags, timeout)
+			return
+		}
+
+		// 4. Logika khusus jika endpoint bertipe "pagination"
 		var paginationMeta *PaginationMeta
 		if ep.Type == "pagination" {
 			page := ep.Pagination.DefaultPage
@@ -97,8 +112,7 @@ func CreateDynamicHandler(ep EndpointItem) http.HandlerFunc {
 			}
 		}
 
-		// 4. Eksekusi binary
-		timeout := time.Duration(ep.TimeoutSeconds) * time.Second
+		// 5. Eksekusi binary
 		result, err := ExecuteDynamicCommand(r.Context(), ep.Binary, ep.Command, flags, timeout)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, APIResponse{
@@ -109,7 +123,7 @@ func CreateDynamicHandler(ep EndpointItem) http.HandlerFunc {
 			return
 		}
 
-		// 5. Cek apakah output adalah JSON valid agar di-render sebagai JSON object terstruktur
+		// 6. Cek apakah output adalah JSON valid agar di-render sebagai JSON object terstruktur
 		var parsedJSON interface{}
 		trimmedOutput := strings.TrimSpace(result.Output)
 		if (strings.HasPrefix(trimmedOutput, "{") && strings.HasSuffix(trimmedOutput, "}")) ||
@@ -135,6 +149,84 @@ func CreateDynamicHandler(ep EndpointItem) http.HandlerFunc {
 	}
 }
 
+// handleLLMEndpoint menangani eksekusi endpoint berbasis built-in Global LLM GoAssistant
+func handleLLMEndpoint(w http.ResponseWriter, r *http.Request, ep EndpointItem, flags map[string]string, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	var dataContext string
+	if ep.Command != "" {
+		res, err := ExecuteDynamicCommand(ctx, ep.Binary, ep.Command, flags, timeout)
+		if err == nil && res != nil {
+			dataContext = strings.TrimSpace(res.Output)
+		}
+	}
+
+	systemPrompt := ep.SystemPrompt
+	if systemPrompt == "" {
+		systemPrompt = "Anda adalah AI Analis Data Operasional dan Solusi Bisnis handal. Analisis data yang diberikan dan hasilkan output berupa format JSON yang rapi, tajam, dan langsung dapat ditindaklanjuti."
+	}
+
+	userPrompt := ep.Prompt
+	if userPrompt == "" {
+		userPrompt = "Berikan analisis paint points dan need support dari data berikut."
+	}
+
+	if dataContext != "" {
+		userPrompt = fmt.Sprintf("%s\n\n[DATA SUMBER OPERASIONAL / G3A]:\n%s", userPrompt, dataContext)
+	}
+
+	messages := []provider.ChatMessage{
+		{Role: provider.RoleSystem, Content: systemPrompt},
+		{Role: provider.RoleUser, Content: userPrompt},
+	}
+
+	provMgr := provider.GetManager()
+	chatReq := provider.ChatRequest{
+		Model:       ep.Model,
+		Messages:    messages,
+		Temperature: 0.3,
+		MaxTokens:   2000,
+	}
+
+	resp, err := provMgr.GenerateWithFallback(ctx, "", chatReq)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, APIResponse{
+			Status:  "error",
+			Type:    ep.Type,
+			Message: fmt.Sprintf("Gagal mengeksekusi built-in global LLM GoAssistant: %v", err),
+		})
+		return
+	}
+
+	rawContent := strings.TrimSpace(resp.Content)
+	cleanContent := rawContent
+	if strings.HasPrefix(cleanContent, "```json") {
+		cleanContent = strings.TrimPrefix(cleanContent, "```json")
+		cleanContent = strings.TrimSuffix(cleanContent, "```")
+		cleanContent = strings.TrimSpace(cleanContent)
+	} else if strings.HasPrefix(cleanContent, "```") {
+		cleanContent = strings.TrimPrefix(cleanContent, "```")
+		cleanContent = strings.TrimSuffix(cleanContent, "```")
+		cleanContent = strings.TrimSpace(cleanContent)
+	}
+
+	var parsedJSON interface{}
+	if err := json.Unmarshal([]byte(cleanContent), &parsedJSON); err == nil {
+		writeJSON(w, http.StatusOK, APIResponse{
+			Status: "success",
+			Type:   ep.Type,
+			Output: parsedJSON,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, APIResponse{
+		Status: "success",
+		Type:   ep.Type,
+		Output: rawContent,
+	})
+}
 
 // writeJSON adalah helper untuk serialize data ke format JSON dan mengirim HTTP status
 func writeJSON(w http.ResponseWriter, statusCode int, data APIResponse) {
@@ -143,4 +235,3 @@ func writeJSON(w http.ResponseWriter, statusCode int, data APIResponse) {
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(data)
 }
-
