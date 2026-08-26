@@ -17,7 +17,7 @@ func (t *BashTool) Name() string {
 }
 
 func (t *BashTool) Description() string {
-	return "Menjalankan perintah terminal/shell (bash di Linux atau powershell/cmd di Windows). Hanya gunakan jika diizinkan."
+	return "Eksekusi perintah terminal/shell di server lokal (misal: menjalankan query analitik g3a, script visualisasi chart, export data, atau utilitas sistem). Gunakan tool ini secara langsung saat pengguna meminta analisis data atau eksekusi perintah."
 }
 
 func (t *BashTool) Parameters() ParametersSchema {
