@@ -231,7 +231,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		}
 	}
 
-	maxTurns := 5
+	maxTurns := 8
 	for turn := 0; turn < maxTurns; turn++ {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -399,6 +399,50 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 
 		if req.OnProgress != nil && len(resp.ToolCalls) > 0 {
 			req.OnProgress("🤔 <i>Menganalisis hasil data...</i>")
+		}
+	}
+
+	// Jika loop tool selesai tapi teks respon masih kosong (misal model hanya menjalankan tools beruntun),
+	// lakukan final synthesis call tanpa tools agar model merumuskan jawaban lengkap
+	if strings.TrimSpace(finalContent) == "" {
+		if req.OnProgress != nil {
+			req.OnProgress("✍️ <i>Menyusun kesimpulan & analisis akhir...</i>")
+		}
+
+		synthMsgs := append([]provider.ChatMessage{}, messages...)
+		synthMsgs = append(synthMsgs, provider.ChatMessage{
+			Role:    provider.RoleUser,
+			Content: "Berdasarkan seluruh hasil dan data yang telah diperoleh dari eksekusi tool di atas, berikan kesimpulan analisis lengkap, terstruktur, dan jawaban akhirmu sekarang secara jelas.",
+		})
+
+		synthCompressedMsgs, synthSaverReport := tokensaver.CompressMessages(synthMsgs, policy.TokenSaverMode, policy.MaxTokens*4)
+		totalTokensSaved += synthSaverReport.TokensSaved
+
+		synthReq := provider.ChatRequest{
+			Model:           policy.ModelOverride,
+			Messages:        synthCompressedMsgs,
+			Tools:           nil, // Paksa hasil berupa teks (tanpa pemanggilan tool lagi)
+			Temperature:     0.7,
+			MaxTokens:       policy.MaxTokens,
+			ThinkingEnabled: policy.ThinkingEnabled,
+			OnProgress:      req.OnProgress,
+		}
+
+		synthResp, synthErr := o.providerManager.GenerateWithFallback(ctx, req.PreferredProv, synthReq)
+		if synthErr == nil && synthResp != nil && strings.TrimSpace(synthResp.Content) != "" {
+			finalContent = synthResp.Content
+			if synthResp.Thinking != "" {
+				finalThinking = synthResp.Thinking
+			}
+			totalPromptTokens += synthResp.PromptTokens
+			totalCompletionTokens += synthResp.CompletionTokens
+			totalThinkingTokens += synthResp.ThinkingTokens
+			totalTokensUsed += synthResp.TotalTokens
+			totalTokensSaved += synthResp.CacheReadTokens
+			totalCostUSD += synthResp.CostUSD
+			lastModel = synthResp.Model
+			lastProviderName = synthResp.ProviderName
+			extractAttachments(finalContent)
 		}
 	}
 
