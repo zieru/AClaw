@@ -84,6 +84,20 @@ type AgentResponse struct {
 func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*AgentResponse, error) {
 	start := time.Now()
 
+	// Enrich context with request metadata for tools
+	if req.UserID != "" {
+		ctx = context.WithValue(ctx, "user_id", req.UserID)
+	}
+	if req.ChannelID != "" {
+		ctx = context.WithValue(ctx, "channel_id", req.ChannelID)
+	}
+	if req.ChatID != "" {
+		ctx = context.WithValue(ctx, "chat_id", req.ChatID)
+	}
+	if req.UserName != "" {
+		ctx = context.WithValue(ctx, "user_name", req.UserName)
+	}
+
 	// 0. Handle Local Deterministic Commands (0 Token, Instant)
 	if localResp, handled := o.commandRouter.TryHandleLocal(ctx, req); handled {
 		return localResp, nil

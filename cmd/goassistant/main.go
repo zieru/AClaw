@@ -78,6 +78,7 @@ func main() {
 	toolReg := tools.GetRegistry()
 	provMgr := provider.GetManager()
 	memMgr := memory.NewManager(db)
+	toolReg.Register(tools.NewUserMemoryTool(memMgr))
 	sessMgr := memory.NewSessionManager(db)
 	mdLoader := agent.NewMDLoader(cfg.Server.MDDir)
 	promptBld := agent.NewPromptBuilder(mdLoader)

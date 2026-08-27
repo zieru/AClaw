@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -1111,6 +1112,23 @@ func (d *DB) AddMemoryItem(scope, scopeID, keyTag, content, category string) err
 	return err
 }
 
+func (d *DB) UpsertMemoryItem(scope, scopeID, keyTag, content, category string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var existingID string
+	err := d.db.QueryRow("SELECT id FROM memory_items WHERE scope = ? AND scope_id = ? AND key_tag = ?", scope, scopeID, keyTag).Scan(&existingID)
+	if err == nil && existingID != "" {
+		_, updateErr := d.db.Exec("UPDATE memory_items SET content = ?, category = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", content, category, existingID)
+		return updateErr
+	}
+
+	id := uuid.New().String()
+	_, insertErr := d.db.Exec("INSERT INTO memory_items (id, scope, scope_id, key_tag, content, category) VALUES (?, ?, ?, ?, ?, ?)",
+		id, scope, scopeID, keyTag, content, category)
+	return insertErr
+}
+
 func (d *DB) ListMemoryItems(scope, scopeID string) ([]MemoryRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -1132,10 +1150,39 @@ func (d *DB) ListMemoryItems(scope, scopeID string) ([]MemoryRecord, error) {
 	return list, nil
 }
 
+func (d *DB) SearchMemoryItems(scope, scopeID, query string) ([]MemoryRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	pattern := "%" + strings.TrimSpace(query) + "%"
+	rows, err := d.db.Query("SELECT id, scope, scope_id, key_tag, content, category, created_at, updated_at FROM memory_items WHERE scope = ? AND scope_id = ? AND (key_tag LIKE ? OR content LIKE ? OR category LIKE ?) ORDER BY updated_at DESC", scope, scopeID, pattern, pattern, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []MemoryRecord
+	for rows.Next() {
+		var m MemoryRecord
+		if err := rows.Scan(&m.ID, &m.Scope, &m.ScopeID, &m.KeyTag, &m.Content, &m.Category, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
 func (d *DB) DeleteMemoryItem(id string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, err := d.db.Exec("DELETE FROM memory_items WHERE id = ?", id)
+	return err
+}
+
+func (d *DB) DeleteMemoryByKey(scope, scopeID, keyTag string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM memory_items WHERE scope = ? AND scope_id = ? AND key_tag = ?", scope, scopeID, keyTag)
 	return err
 }
 

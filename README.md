@@ -50,10 +50,17 @@ Sistem ini menjamin **100% kompatibilitas dengan GLIBC versi lama** (`pypa/manyl
 9. **⏰ Cron Task Scheduler**
    - Jalankan tugas AI otomatis dan kirimkan pesan proaktif ke grup atau user tertentu berdasarkan jadwal cron (`robfig/cron/v3`).
 
-10. **🧠 Memory Management & Session Tracking**
-    - Penyimpanan riwayat sesi percakapan, sliding window buffer, auto-summarizer, dan memori profil jangka panjang di SQLite.
+10. **🧠 Long-Term Memory & User Memory Tool (`user_memory`)**
+    - Sistem memori profil dan catatan jangka panjang berbasis SQLite pada lingkup `user`, `channel`, dan `global`.
+    - **Otomatis Di-inject ke System Prompt**: Setiap pesan baru otomatis memuat preferensi dan profil pengguna tanpa konsumsi token berlebih.
+    - **AI Function Calling (`user_memory`)**: AI dapat secara mandiri menyimpan catatan (`save`), mencari fakta (`search`), melihat daftar memori (`list`), menghapus (`delete`), dan membersihkan (`clear`) catatan pengguna saat diminta dalam percakapan.
 
-11. **📊 Audit Log & Token Tracker**
+11. **🌐 Native Browser Automation (Go-Rod & CDP Stealth Engine)**
+    - Otomasi browser modern berbasis **Chrome DevTools Protocol (CDP)** menggunakan `go-rod` (100% Pure Go tanpa ketergantungan Node.js / Puppeteer / Playwright).
+    - Mendukung rendering JavaScript dinamis (React, Vue, SPA), klik tombol (`click`), pengisian form input keyboard native (`type`), eksekusi JavaScript (`eval_js`), scroll halaman (`scroll`), dan tangkapan layar web presisi tinggi (`screenshot`).
+    - **Memory & Zombie Guard**: Dilengkapi *leakless supervisor* untuk mencegah proses zombie, pembersihan otomatis direktori temporary profile/cache browser, pembatasan RAM heap V8 (max 256MB), serta auto-purge file screenshot lama (> 24 jam).
+
+12. **📊 Audit Log & Token Tracker**
     - Pencatatan seluruh request/response, token in/out, latency, status, tools yang dipanggil, dan estimasi biaya.
     - Laporan ringkas `/stats`, `/logs`, dan fitur ekspor CSV langsung ke chat Telegram.
 

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -107,8 +109,12 @@ func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]int
 		Set("disable-sync").
 		Set("mute-audio").
 		Set("no-first-run").
-		Set("no-default-browser-check").
-		Set("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+		Set("no-default-browser-check")
+
+	// Prioritaskan binary browser modern yang terpasang di host OS
+	if bin := findLocalBrowserBinary(); bin != "" {
+		l.Bin(bin)
+	}
 
 	defer l.Cleanup() // Membersihkan temporary user-data-dir agar disk tidak penuh
 
@@ -390,3 +396,51 @@ func extractCleanText(htmlStr string) string {
 	s = reLines.ReplaceAllString(s, "\n\n")
 	return strings.TrimSpace(s)
 }
+
+func findLocalBrowserBinary() string {
+	var candidates []string
+
+	if runtime.GOOS == "windows" {
+		candidates = []string{
+			`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+			`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+			`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+			`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+			`C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`,
+		}
+		if localApp := os.Getenv("LOCALAPPDATA"); localApp != "" {
+			candidates = append(candidates,
+				filepath.Join(localApp, `Microsoft\Edge\Application\msedge.exe`),
+				filepath.Join(localApp, `Google\Chrome\Application\chrome.exe`),
+				filepath.Join(localApp, `BraveSoftware\Brave-Browser\Application\brave.exe`),
+			)
+		}
+	} else {
+		candidates = []string{
+			"google-chrome",
+			"google-chrome-stable",
+			"chromium-browser",
+			"chromium",
+			"microsoft-edge",
+			"brave-browser",
+			"/usr/bin/google-chrome",
+			"/usr/bin/chromium",
+			"/usr/bin/chromium-browser",
+		}
+	}
+
+	for _, p := range candidates {
+		if runtime.GOOS == "windows" {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		} else {
+			if path, err := exec.LookPath(p); err == nil {
+				return path
+			}
+		}
+	}
+
+	return ""
+}
+

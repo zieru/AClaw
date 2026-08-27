@@ -22,6 +22,31 @@ func (m *Manager) SaveFact(scope, scopeID, key, content, category string) error 
 	return m.db.AddMemoryItem(scope, scopeID, key, content, category)
 }
 
+// UpsertFact saves or updates a learned fact or profile item (prevents duplicate keys)
+func (m *Manager) UpsertFact(scope, scopeID, key, content, category string) error {
+	return m.db.UpsertMemoryItem(scope, scopeID, key, content, category)
+}
+
+// ListMemories returns all memory items for a specific scope and scope ID
+func (m *Manager) ListMemories(scope, scopeID string) ([]storage.MemoryRecord, error) {
+	return m.db.ListMemoryItems(scope, scopeID)
+}
+
+// SearchMemories searches memory items by keyword/query
+func (m *Manager) SearchMemories(scope, scopeID, query string) ([]storage.MemoryRecord, error) {
+	return m.db.SearchMemoryItems(scope, scopeID, query)
+}
+
+// DeleteMemoryItem deletes a memory item by its ID
+func (m *Manager) DeleteMemoryItem(id string) error {
+	return m.db.DeleteMemoryItem(id)
+}
+
+// DeleteMemoryByKey deletes a memory item by its key
+func (m *Manager) DeleteMemoryByKey(scope, scopeID, key string) error {
+	return m.db.DeleteMemoryByKey(scope, scopeID, key)
+}
+
 // GetContextMemory retrieves formatted memory context for system prompt injection
 func (m *Manager) GetContextMemory(channelID, userID string) (string, error) {
 	var sb strings.Builder
