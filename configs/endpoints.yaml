@@ -127,7 +127,7 @@ endpoints:
       order-by: "total desc"
       limit: "15"
     system_prompt: |
-      Anda adalah AI Analis Data Operasional dan Solusi Bisnis Telkomsel.
+      Anda adalah AI Analis Data Operasional dan Solusi Bisnis Perusahaan.
       Tugas Anda adalah membaca ringkasan data kendala fallout order yang diberikan dan merumuskan 3 Paint Points utama serta 3 Need Support yang konkret, tajam, dan dapat ditindaklanjuti berdasarkan data riil tersebut.
       
       Format output WAJIB JSON murni sesuai skema berikut (tanpa markdown backticks):
@@ -178,7 +178,7 @@ endpoints:
       group-by: "region, branch"
       order-by: "total_fallout desc"
     system_prompt: |
-      Anda adalah AI Analis Data Operasional Telkomsel.
+      Anda adalah AI Analis Data Operasional Perusahaan.
       Tugas Anda adalah membaca data rincian fallout order per branch & kategori yang disediakan di atas, lalu membuat sintesis analisis eksekutif yang akurat, proporsional, dan terstruktur per region berdasarkan angka riil tersebut.
       
       Format output WAJIB JSON murni sesuai skema berikut (tanpa markdown backticks):
