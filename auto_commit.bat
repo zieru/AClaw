@@ -19,9 +19,9 @@ echo.
 echo [2/4] Melakukan commit...
 git commit -m "!commit_msg!"
 
-:: 3. Mengambil versi semver tertinggi dari remote GitHub & lokal
+:: 3. Mengambil versi semver tertinggi dari remote GitHub dan lokal
 echo.
-echo [3/4] Mengambil versi tag terakhir dari GitHub & lokal...
+echo [3/4] Mengambil versi tag terakhir dari GitHub dan lokal...
 set CURRENT_TAG=
 set NEW_TAG=
 

@@ -16,7 +16,6 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
-	"github.com/go-rod/stealth"
 )
 
 // BrowserAutomationTool provides complete browser automation via Chrome DevTools Protocol (go-rod)
@@ -156,14 +155,18 @@ func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]int
 	}
 
 	timeoutDur := time.Duration(waitSeconds+15) * time.Second
-	page, err := stealth.Page(browser)
+	page, err := browser.Page(proto.TargetCreateTarget{URL: ""})
 	if err != nil {
-		page, err = browser.Page(proto.TargetCreateTarget{URL: ""})
-		if err != nil {
-			return "", fmt.Errorf("gagal membuat tab browser: %w", err)
-		}
+		return "", fmt.Errorf("gagal membuat tab browser: %w", err)
 	}
 	defer page.Close()
+
+	// Masking webdriver tanpa merusak / memalsukan User-Agent dan OS asli
+	_, _ = page.EvalOnNewDocument(`
+		try {
+			Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+		} catch(e) {}
+	`)
 
 	page = page.Timeout(timeoutDur)
 
@@ -233,15 +236,15 @@ func ensureDockerChrome(ctx context.Context) (string, error) {
 	}
 
 	// 3. Inspeksi status container goassistant-chrome
-	checkCtx, checkCancel := context.WithTimeout(ctx, 3*time.Second)
+	checkCtx, checkCancel := context.WithTimeout(ctx, 4*time.Second)
 	defer checkCancel()
 
-	out, _ := exec.CommandContext(checkCtx, "docker", "ps", "-a", "--filter", "name=goassistant-chrome", "--format", "{{.Status}}").Output()
-	status := strings.TrimSpace(string(out))
+	out, _ := exec.CommandContext(checkCtx, "docker", "ps", "-a", "--filter", "name=goassistant-chrome", "--format", "{{.Names}}#{{.Status}}").Output()
+	rawStatus := strings.TrimSpace(string(out))
 
-	if status == "" {
-		// Container belum ada -> buat dan jalankan container secara otomatis
-		runCtx, runCancel := context.WithTimeout(ctx, 15*time.Second)
+	if !strings.Contains(rawStatus, "goassistant-chrome") {
+		// Container belum ada -> buat dan jalankan container secara otomatis (timeout lebih panjang untuk pull image)
+		runCtx, runCancel := context.WithTimeout(ctx, 45*time.Second)
 		defer runCancel()
 
 		runCmd := exec.CommandContext(runCtx, "docker", "run", "-d",
@@ -258,9 +261,9 @@ func ensureDockerChrome(ctx context.Context) (string, error) {
 		if err := runCmd.Run(); err != nil {
 			return "", fmt.Errorf("gagal meluncurkan docker container zenika/alpine-chrome: %w", err)
 		}
-	} else if !strings.HasPrefix(status, "Up") {
+	} else if !strings.Contains(rawStatus, "Up") {
 		// Container sudah ada namun mati -> start container
-		startCtx, startCancel := context.WithTimeout(ctx, 5*time.Second)
+		startCtx, startCancel := context.WithTimeout(ctx, 6*time.Second)
 		defer startCancel()
 		_ = exec.CommandContext(startCtx, "docker", "start", "goassistant-chrome").Run()
 	}
