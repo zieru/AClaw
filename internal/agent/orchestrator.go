@@ -45,17 +45,17 @@ func NewOrchestrator(
 }
 
 type UserRequest struct {
-	ChannelType     string
-	ChannelID       string
-	ChannelName     string
-	ChatID          string
-	UserID          string
-	UserName        string
-	UserPrompt      string
-	AttachedFileMB  float64
-	PreferredRole   string
-	PreferredProv   string
-	OnProgress      func(status string)
+	ChannelType    string
+	ChannelID      string
+	ChannelName    string
+	ChatID         string
+	UserID         string
+	UserName       string
+	UserPrompt     string
+	AttachedFileMB float64
+	PreferredRole  string
+	PreferredProv  string
+	OnProgress     func(status string)
 }
 
 type MediaAttachment struct {
@@ -301,7 +301,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 
 				// Fresh 2-minute context if original ctx was timed out
 				retryCtx, cancelRetry := context.WithTimeout(context.Background(),
-				time.Duration(config.Get().Timeouts.RetrySeconds)*time.Second)
+					time.Duration(config.Get().Timeouts.RetrySeconds)*time.Second)
 				resp, err = o.providerManager.GenerateWithFallback(retryCtx, req.PreferredProv, retryChatReq)
 				cancelRetry()
 			}
@@ -337,6 +337,9 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		totalCostUSD += resp.CostUSD
 		lastModel = resp.Model
 		lastProviderName = resp.ProviderName
+		if resp.Thinking != "" {
+			finalThinking = resp.Thinking
+		}
 
 		if len(resp.ToolCalls) == 0 {
 			// No more tool calls; final response reached
@@ -348,14 +351,18 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 
 			// If the model produced empty text response (e.g. only thinking or finished tools without text),
 			// attempt an auto-continue prompt to prompt the model for its final text answer
-			if strings.TrimSpace(finalContent) == "" && turn < maxTurns-1 {
+			if strings.TrimSpace(finalContent) == "" && strings.TrimSpace(finalThinking) == "" && turn < maxTurns-1 {
+				assistantContent := resp.Content
+				if assistantContent == "" {
+					assistantContent = "..."
+				}
 				messages = append(messages, provider.ChatMessage{
 					Role:    provider.RoleAssistant,
-					Content: resp.Content,
+					Content: assistantContent,
 				})
 				messages = append(messages, provider.ChatMessage{
 					Role:    provider.RoleUser,
-					Content: "Lanjutkan dan berikan jawaban teks akhirmu berdasarkan analisis atau pemikiran di atas.",
+					Content: "Lanjutkan dan berikan jawaban teks akhirmu berdasarkan analisis atau pemikiran di atas secara lengkap dan jelas.",
 				})
 				if req.OnProgress != nil {
 					req.OnProgress("✍️ <i>Menyusun respon akhir...</i>")
@@ -412,7 +419,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		synthMsgs := append([]provider.ChatMessage{}, messages...)
 		synthMsgs = append(synthMsgs, provider.ChatMessage{
 			Role:    provider.RoleUser,
-			Content: "Berdasarkan seluruh hasil dan data yang telah diperoleh dari eksekusi tool di atas, berikan kesimpulan analisis lengkap, terstruktur, dan jawaban akhirmu sekarang secara jelas.",
+			Content: "Berdasarkan seluruh hasil dan data yang telah diperoleh dari eksekusi tool di atas, berikan kesimpulan analisis lengkap, terstruktur, dan jawaban akhirmu sekarang secara jelas dalam format teks.",
 		})
 
 		synthCompressedMsgs, synthSaverReport := tokensaver.CompressMessages(synthMsgs, policy.TokenSaverMode, policy.MaxTokens*4)
@@ -429,8 +436,12 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		}
 
 		synthResp, synthErr := o.providerManager.GenerateWithFallback(ctx, req.PreferredProv, synthReq)
-		if synthErr == nil && synthResp != nil && strings.TrimSpace(synthResp.Content) != "" {
-			finalContent = synthResp.Content
+		if synthErr == nil && synthResp != nil {
+			if strings.TrimSpace(synthResp.Content) != "" {
+				finalContent = synthResp.Content
+			} else if strings.TrimSpace(synthResp.Thinking) != "" {
+				finalContent = synthResp.Thinking
+			}
 			if synthResp.Thinking != "" {
 				finalThinking = synthResp.Thinking
 			}
@@ -502,7 +513,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 				thinkPreview = thinkPreview[:500] + "..."
 			}
 			finalText = "💭 <i>" + thinkPreview + "</i>\n\n" + finalText
-		// "hidden" — don't show thinking
+			// "hidden" — don't show thinking
 		}
 	}
 
@@ -658,4 +669,3 @@ func FormatUserFriendlyError(err error) string {
 		return "❌ **Maaf, terjadi kendala teknis pada layanan AI.**\nSilakan coba lagi beberapa saat lagi atau gunakan `/reset` untuk memulai percakapan baru."
 	}
 }
-

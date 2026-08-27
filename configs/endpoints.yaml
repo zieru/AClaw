@@ -128,23 +128,80 @@ endpoints:
       limit: "15"
     system_prompt: |
       Anda adalah AI Analis Data Operasional dan Solusi Bisnis Telkomsel.
-      Tugas Anda adalah membaca ringkasan data kendala fallout order dan mensintesis 3 Paint Points utama serta 3 Need Support yang konkret dan tajam.
+      Tugas Anda adalah membaca ringkasan data kendala fallout order yang diberikan dan merumuskan 3 Paint Points utama serta 3 Need Support yang konkret, tajam, dan dapat ditindaklanjuti berdasarkan data riil tersebut.
       
-      Format output WAJIB JSON murni persis seperti ini:
+      Format output WAJIB JSON murni sesuai skema berikut (tanpa markdown backticks):
       {
         "paint_points": [
-          "Ketidaksinkronan status order antara DSC dan UFO...",
-          "Order stuck karena membutuhkan proses pelurusan data...",
-          "Keterangan status Fallout masih menggunakan istilah teknis..."
+          "Uraian permasalahan/akar kendala 1 berdasarkan data...",
+          "Uraian permasalahan/akar kendala 2 berdasarkan data...",
+          "Uraian permasalahan/akar kendala 3 berdasarkan data..."
         ],
         "need_support": [
-          "Sinkronisasi status order DSC dan UFO...",
-          "Simplifikasi proses pelurusan data untuk order Fallout/Stuck...",
-          "Enhancement informasi status Fallout..."
+          "Rekomendasi tindakan/dukungan konkret 1...",
+          "Rekomendasi tindakan/dukungan konkret 2...",
+          "Rekomendasi tindakan/dukungan konkret 3..."
         ]
       }
-    prompt: |
-      Berdasarkan data fallout reasons teratas yang diberikan dari sistem query engine g3a, formulasikan 3 Paint Points dan 3 Need Support yang tajam, profesional, dan actionable.
+
+  # ----------------------------------------------------------------------------
+  # 6. Fallout Branch & Category Breakdown (Pecah Kategori per Branch)
+  # Endpoint: GET /api/fallout/branch-breakdown
+  # ----------------------------------------------------------------------------
+  - path: "/api/fallout/branch-breakdown"
+    method: "GET"
+    binary: "g3a"
+    command: "funneling"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: "region, branch, count(1) filter (where fallout_reason like '%WFM%' or fallout_reason like '%SISTEM%') as wfm_sistem, count(1) filter (where fallout_reason like '%UIM%' or fallout_reason like '%ACTIVATION%') as uim_activation, count(1) filter (where fallout_reason like '%API%' or fallout_reason like '%GATEWAY%') as api, count(1) filter (where fallout_reason like '%PELANGGAN%' or fallout_reason like '%RNA%') as pelanggan, count(1) filter (where fallout_reason like '%TEKNIK%' or fallout_reason like '%ODP%') as teknik, count(1) filter (where mapping_kategori in ('PENDING','FALLOUT')) as total_fallout"
+      where: "mapping_kategori in ('PENDING','FALLOUT') and periode in (6,7,8)"
+      group-by: "region, branch"
+      order-by: "total_fallout desc"
+
+  # ----------------------------------------------------------------------------
+  # 7. AI Executive Regional Insight per Branch (Built-in Global LLM)
+  # Endpoint: GET /api/fallout/ai-branch-insights
+  # ----------------------------------------------------------------------------
+  - path: "/api/fallout/ai-branch-insights"
+    method: "GET"
+    type: "llm"
+    timeout_seconds: 45
+    binary: "g3a"
+    command: "funneling"
+    defaults:
+      output: "json"
+      select: "region, branch, count(1) filter (where fallout_reason like '%WFM%' or fallout_reason like '%SISTEM%') as wfm_sistem, count(1) filter (where fallout_reason like '%UIM%' or fallout_reason like '%ACTIVATION%') as uim_activation, count(1) filter (where fallout_reason like '%API%' or fallout_reason like '%GATEWAY%') as api, count(1) filter (where fallout_reason like '%PELANGGAN%' or fallout_reason like '%RNA%') as pelanggan, count(1) filter (where fallout_reason like '%TEKNIK%' or fallout_reason like '%ODP%') as teknik, count(1) filter (where mapping_kategori in ('PENDING','FALLOUT')) as total_fallout"
+      where: "mapping_kategori in ('PENDING','FALLOUT') and periode in (6,7,8)"
+      group-by: "region, branch"
+      order-by: "total_fallout desc"
+    system_prompt: |
+      Anda adalah AI Analis Data Operasional Telkomsel.
+      Tugas Anda adalah membaca data rincian fallout order per branch & kategori yang disediakan di atas, lalu membuat sintesis analisis eksekutif yang akurat, proporsional, dan terstruktur per region berdasarkan angka riil tersebut.
+      
+      Format output WAJIB JSON murni sesuai skema berikut (tanpa markdown backticks):
+      {
+        "title": "Analisa Fallout per Region dan Branch",
+        "regional_breakdown": [
+          {
+            "region": "Nama Region",
+            "total": 0,
+            "percentage": "0%",
+            "highlight": "Karakteristik atau temuan utama di region ini",
+            "branches": [
+              "NAMA_BRANCH: Jumlah dan rincian kategori kendala terbesar...",
+              "NAMA_BRANCH: Jumlah dan rincian kategori kendala terbesar..."
+            ]
+          }
+        ],
+        "key_takeaways": [
+          "Poin kesimpulan strategis dan fokus perbaikan 1...",
+          "Poin kesimpulan strategis dan fokus perbaikan 2...",
+          "Poin kesimpulan strategis dan fokus perbaikan 3..."
+        ]
+      }
 
   # ============================================================================
   # ============================================================================

@@ -611,6 +611,11 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 			UserID:      senderID,
 			UserName:    senderName,
 			UserPrompt:  cleanText,
+			OnProgress: func(status string) {
+				if a.client != nil && a.client.IsConnected() {
+					_ = a.client.SendChatPresence(context.Background(), chatJID, waTypes.ChatPresenceComposing, waTypes.ChatPresenceMediaText)
+				}
+			},
 		})
 
 		if err != nil {
