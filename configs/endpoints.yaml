@@ -360,6 +360,85 @@ endpoints:
       group-by: 'territory, regional'
       order-by: 'total_visit desc'
 
+  # ----------------------------------------------------------------------------
+  # 10. Performance Daily Matrix per GraPARI & Territory (1 Row per GraPARI)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/performance-daily"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: 'territory, "Nama Grapari" as grapari, regional, sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 1) as "1", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 2) as "2", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 3) as "3", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 4) as "4", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 5) as "5", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 6) as "6", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 7) as "7", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 8) as "8", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 9) as "9", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 10) as "10", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 11) as "11", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 12) as "12", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 13) as "13", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 14) as "14", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 15) as "15", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 16) as "16", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 17) as "17", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 18) as "18", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 19) as "19", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 20) as "20", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 21) as "21", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 22) as "22", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 23) as "23", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 24) as "24", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 25) as "25", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 26) as "26", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 27) as "27", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 28) as "28", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 29) as "29", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 30) as "30", sum(total) filter (where cast(strftime(cast("Trx Date" as date), ''%d'') as integer) = 31) as "31", sum(total) as total'
+      group-by: 'territory, "Nama Grapari", regional'
+      order-by: 'territory asc, "Nama Grapari" asc'
+
+  # ----------------------------------------------------------------------------
+  # 11. Service Type Summary (Fixed vs Mobile by Regional)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/performance-service-summary"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: 'case when lower("Service") like ''indihome%'' then ''Fixed'' else ''Mobile'' end as service_type, regional, sum(total) as total, round(avg(epoch(average_waiting)) / 60.0, 2) as avg_waiting_minutes, round(avg(epoch(average_serving)) / 60.0, 2) as avg_serving_minutes'
+      group-by: 'case when lower("Service") like ''indihome%'' then ''Fixed'' else ''Mobile'' end, regional'
+      order-by: 'service_type asc, regional asc'
+
+  # ----------------------------------------------------------------------------
+  # 12. Service Distribution Detail (Fixed vs Mobile by Specific Service)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/performance-service-detail"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: 'case when lower("Service") like ''indihome%'' then ''Fixed'' else ''Mobile'' end as service_type, "Service" as service_name, sum(total) as total, round(avg(epoch(average_waiting)) / 60.0, 2) as avg_waiting_minutes, round(avg(epoch(average_serving)) / 60.0, 2) as avg_serving_minutes'
+      group-by: 'case when lower("Service") like ''indihome%'' then ''Fixed'' else ''Mobile'' end, "Service"'
+      order-by: 'total desc'
+
+  # ----------------------------------------------------------------------------
+  # 13. BISMOD Performance Summary (TOMO vs MOMO by Regional)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/performance-bismod-summary"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: '"BISMOD" as bismod, regional, sum(total) as total, round(avg(epoch(average_waiting)) / 60.0, 2) as avg_waiting_minutes, round(avg(epoch(average_serving)) / 60.0, 2) as avg_serving_minutes'
+      group-by: '"BISMOD", regional'
+      order-by: 'bismod asc, regional asc'
+
+  # ----------------------------------------------------------------------------
+  # 14. Mitra Performance Detail (Mitra Distribution & SLA)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/performance-mitra-detail"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: '"BISMOD" as bismod, coalesce("Mitra", ''Lainnya'') as nama_mitra, regional, sum(total) as total, round(avg(epoch(average_waiting)) / 60.0, 2) as avg_waiting_minutes, round(avg(epoch(average_serving)) / 60.0, 2) as avg_serving_minutes'
+      group-by: '"BISMOD", coalesce("Mitra", ''Lainnya''), regional'
+      order-by: 'total desc'
+
+
+
+
+
 
 
 
