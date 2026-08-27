@@ -168,6 +168,13 @@ func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]int
 		} catch(e) {}
 	`)
 
+	if ua, err := page.Eval("() => navigator.userAgent"); err == nil && ua != nil {
+		cleanUA := strings.ReplaceAll(ua.Value.Str(), "HeadlessChrome/", "Chrome/")
+		_ = proto.EmulationSetUserAgentOverride{
+			UserAgent: cleanUA,
+		}.Call(page)
+	}
+
 	page = page.Timeout(timeoutDur)
 
 	switch action {
