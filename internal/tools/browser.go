@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,7 +28,7 @@ func (b *BrowserAutomationTool) Name() string {
 }
 
 func (b *BrowserAutomationTool) Description() string {
-	return "Browser otomatis (Chrome/Edge/Chromium) berbasis Chrome DevTools Protocol (CDP) untuk mengakses dan berinteraksi dengan website modern berbasis JavaScript (React, Vue, SPA). AI dapat membuka URL, membaca konten yang dirender JS, mengklik tombol, mengisi form input, mengeksekusi script JavaScript, atau mengambil screenshot gambar web."
+	return "Browser otomatis (Docker Zenika Alpine Chrome / Chrome / Edge) berbasis Chrome DevTools Protocol (CDP) untuk mengakses dan berinteraksi dengan website modern berbasis JavaScript (React, Vue, SPA). AI dapat membuka URL, membaca konten yang dirender JS, mengklik tombol, mengisi form input, mengeksekusi script JavaScript, atau mengambil screenshot gambar web."
 }
 
 func (b *BrowserAutomationTool) Parameters() ParametersSchema {
@@ -94,41 +95,65 @@ func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]int
 	inputText, _ := args["text"].(string)
 	customJS, _ := args["script"].(string)
 
-	// Inisialisasi launcher dengan proteksi memory leak dan anti-zombie process
-	l := launcher.New().
-		Headless(true).
-		NoSandbox(true).
-		Leakless(true). // Mengaktifkan leakless supervisor untuk membunuh child process jika crash
-		Set("disable-gpu").
-		Set("disable-dev-shm-usage").
-		Set("disable-software-rasterizer").
-		Set("renderer-process-limit", "2").          // Batasi proses render child
-		Set("js-flags", "--max-old-space-size=256"). // Batasi heap V8 JS max 256MB
-		Set("disable-extensions").
-		Set("disable-background-networking").
-		Set("disable-sync").
-		Set("mute-audio").
-		Set("no-first-run").
-		Set("no-default-browser-check")
+	var browser *rod.Browser
+	var cleanupFunc func()
 
-	// Prioritaskan binary browser modern yang terpasang di host OS
-	if bin := findLocalBrowserBinary(); bin != "" {
-		l.Bin(bin)
+	// 1. Coba hubungkan ke Docker Zenika Alpine Chrome (Auto-Provisioning Sandbox)
+	if dockerURL, dockerErr := ensureDockerChrome(ctx); dockerErr == nil && dockerURL != "" {
+		bInst := rod.New().ControlURL(dockerURL).Context(ctx)
+		if errConn := bInst.Connect(); errConn == nil {
+			browser = bInst
+			cleanupFunc = func() {
+				_ = browser.Close()
+			}
+		}
 	}
 
-	defer l.Cleanup() // Membersihkan temporary user-data-dir agar disk tidak penuh
+	// 2. Fallback otomatis ke Browser Lokal Host jika Docker tidak aktif / tidak tersedia
+	if browser == nil {
+		l := launcher.New().
+			Headless(true).
+			NoSandbox(true).
+			Leakless(true). // Mengaktifkan leakless supervisor untuk membunuh child process jika crash
+			Set("disable-gpu").
+			Set("disable-dev-shm-usage").
+			Set("disable-software-rasterizer").
+			Set("renderer-process-limit", "2").          // Batasi proses render child
+			Set("js-flags", "--max-old-space-size=256"). // Batasi heap V8 JS max 256MB
+			Set("disable-extensions").
+			Set("disable-background-networking").
+			Set("disable-sync").
+			Set("mute-audio").
+			Set("no-first-run").
+			Set("no-default-browser-check")
 
-	controlURL, err := l.Launch()
-	if err != nil {
-		return "", fmt.Errorf("gagal menjalankan browser CDP: %w", err)
-	}
-	defer l.Kill() // Memastikan proses browser benar-benar mati saat eksekusi selesai
+		if bin := findLocalBrowserBinary(); bin != "" {
+			l.Bin(bin)
+		}
 
-	browser := rod.New().ControlURL(controlURL).Context(ctx)
-	if err := browser.Connect(); err != nil {
-		return "", fmt.Errorf("gagal terhubung ke browser CDP: %w", err)
+		controlURL, errLaunch := l.Launch()
+		if errLaunch != nil {
+			return "", fmt.Errorf("gagal menjalankan browser: %w", errLaunch)
+		}
+
+		bInst := rod.New().ControlURL(controlURL).Context(ctx)
+		if errConn := bInst.Connect(); errConn != nil {
+			l.Kill()
+			l.Cleanup()
+			return "", fmt.Errorf("gagal terhubung ke browser: %w", errConn)
+		}
+
+		browser = bInst
+		cleanupFunc = func() {
+			_ = browser.Close()
+			l.Kill()
+			l.Cleanup()
+		}
 	}
-	defer browser.Close()
+
+	if cleanupFunc != nil {
+		defer cleanupFunc()
+	}
 
 	timeoutDur := time.Duration(waitSeconds+15) * time.Second
 	page, err := stealth.Page(browser)
@@ -188,6 +213,70 @@ func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]int
 		}
 		return rodOpenAndInspect(page, targetURL, waitSeconds)
 	}
+}
+
+// ensureDockerChrome memeriksa apakah container Docker zenika/alpine-chrome aktif, atau otomatis menyalakannya
+func ensureDockerChrome(ctx context.Context) (string, error) {
+	client := &http.Client{Timeout: 1 * time.Second}
+
+	// 1. Cek jika port CDP 9222 sudah siap & aktif
+	if resp, err := client.Get("http://127.0.0.1:9222/json/version"); err == nil && resp.StatusCode == 200 {
+		_ = resp.Body.Close()
+		if u, err := launcher.ResolveURL("http://127.0.0.1:9222"); err == nil && u != "" {
+			return u, nil
+		}
+	}
+
+	// 2. Cek apakah CLI docker terinstall di sistem host
+	if _, err := exec.LookPath("docker"); err != nil {
+		return "", fmt.Errorf("docker CLI tidak ditemukan di host: %w", err)
+	}
+
+	// 3. Inspeksi status container goassistant-chrome
+	checkCtx, checkCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer checkCancel()
+
+	out, _ := exec.CommandContext(checkCtx, "docker", "ps", "-a", "--filter", "name=goassistant-chrome", "--format", "{{.Status}}").Output()
+	status := strings.TrimSpace(string(out))
+
+	if status == "" {
+		// Container belum ada -> buat dan jalankan container secara otomatis
+		runCtx, runCancel := context.WithTimeout(ctx, 15*time.Second)
+		defer runCancel()
+
+		runCmd := exec.CommandContext(runCtx, "docker", "run", "-d",
+			"--name", "goassistant-chrome",
+			"-p", "127.0.0.1:9222:9222",
+			"--restart=unless-stopped",
+			"--shm-size=256m",
+			"--memory=512m",
+			"zenika/alpine-chrome",
+			"--no-sandbox",
+			"--remote-debugging-address=0.0.0.0",
+			"--remote-debugging-port=9222",
+		)
+		if err := runCmd.Run(); err != nil {
+			return "", fmt.Errorf("gagal meluncurkan docker container zenika/alpine-chrome: %w", err)
+		}
+	} else if !strings.HasPrefix(status, "Up") {
+		// Container sudah ada namun mati -> start container
+		startCtx, startCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer startCancel()
+		_ = exec.CommandContext(startCtx, "docker", "start", "goassistant-chrome").Run()
+	}
+
+	// 4. Polling hingga endpoint CDP merespon (max 6 detik)
+	for i := 0; i < 12; i++ {
+		time.Sleep(500 * time.Millisecond)
+		if resp, err := client.Get("http://127.0.0.1:9222/json/version"); err == nil && resp.StatusCode == 200 {
+			_ = resp.Body.Close()
+			if u, err := launcher.ResolveURL("http://127.0.0.1:9222"); err == nil && u != "" {
+				return u, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("timeout menunggu Docker Chrome CDP siap di 127.0.0.1:9222")
 }
 
 func rodOpenAndInspect(page *rod.Page, targetURL string, waitSeconds int) (string, error) {
@@ -380,14 +469,6 @@ func cleanupOldScreenshots(dir string, maxAge time.Duration) {
 	}
 }
 
-var (
-	reScript = regexp.MustCompile(`(?is)<script.*?</script>`)
-	reStyle  = regexp.MustCompile(`(?is)<style.*?</style>`)
-	reTags   = regexp.MustCompile(`<[^>]+>`)
-	reSpaces = regexp.MustCompile(`[ \t]+`)
-	reLines  = regexp.MustCompile(`\n\s*\n+`)
-)
-
 func extractCleanText(htmlStr string) string {
 	s := reScript.ReplaceAllString(htmlStr, " ")
 	s = reStyle.ReplaceAllString(s, " ")
@@ -444,3 +525,10 @@ func findLocalBrowserBinary() string {
 	return ""
 }
 
+var (
+	reScript = regexp.MustCompile(`(?is)<script.*?</script>`)
+	reStyle  = regexp.MustCompile(`(?is)<style.*?</style>`)
+	reTags   = regexp.MustCompile(`<[^>]+>`)
+	reSpaces = regexp.MustCompile(`[ \t]+`)
+	reLines  = regexp.MustCompile(`\n\s*\n+`)
+)
