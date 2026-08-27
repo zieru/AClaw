@@ -161,20 +161,6 @@ func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]int
 	}
 	defer page.Close()
 
-	// Masking webdriver tanpa merusak / memalsukan User-Agent dan OS asli
-	_, _ = page.EvalOnNewDocument(`
-		try {
-			Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-		} catch(e) {}
-	`)
-
-	if ua, err := page.Eval("() => navigator.userAgent"); err == nil && ua != nil {
-		cleanUA := strings.ReplaceAll(ua.Value.Str(), "HeadlessChrome/", "Chrome/")
-		_ = proto.EmulationSetUserAgentOverride{
-			UserAgent: cleanUA,
-		}.Call(page)
-	}
-
 	page = page.Timeout(timeoutDur)
 
 	switch action {
