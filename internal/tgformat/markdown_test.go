@@ -49,3 +49,47 @@ Ada lagi yang bisa saya bantu? 😊`
 		t.Errorf("Expected header converted to bold, got:\n%s", result)
 	}
 }
+
+func TestMarkdownToTelegramHTML_Table(t *testing.T) {
+	input := `Estimasi Efisiensi Nyata:
+
+| Kondisi | Efisiensi Khas |
+|---------|---------------|
+| Buck converter murahan (no brand) | 80–88% |
+| Buck converter mid-range (XL4015, LM2596) | 88–93% |
+| Buck converter quality (TI, Murata, Mean Well) | 94–97% |`
+
+	result := MarkdownToTelegramHTML(input)
+
+	if !strings.Contains(result, "<pre>") || !strings.Contains(result, "</pre>") {
+		t.Errorf("Expected table wrapped in pre block, got:\n%s", result)
+	}
+	if !strings.Contains(result, "Kondisi") || !strings.Contains(result, "Efisiensi Khas") {
+		t.Errorf("Expected table headers inside result, got:\n%s", result)
+	}
+	if !strings.Contains(result, "+") || !strings.Contains(result, "|") {
+		t.Errorf("Expected ascii border characters, got:\n%s", result)
+	}
+}
+
+func TestMarkdownToTelegramHTML_LaTeX(t *testing.T) {
+	input := `(rumus Hukum Ohm: $\Delta V / \Delta I$) 
+1. Hitung Spesifikasi Jika Diseri (10 Keping):
+* Tegangan (Voltase): $5\text{V} \times 10 = \mathbf{50\text{ Volt}}$
+* Total Daya (Watt): $50\text{V} \times 0.2\text{A} = \mathbf{10\text{ Watt}}$`
+
+	result := MarkdownToTelegramHTML(input)
+
+	if !strings.Contains(result, "ΔV / ΔI") {
+		t.Errorf("Expected ΔV / ΔI, got:\n%s", result)
+	}
+	if !strings.Contains(result, "5V × 10 = <b>50 Volt</b>") {
+		t.Errorf("Expected converted math with bold, got:\n%s", result)
+	}
+	if !strings.Contains(result, "50V × 0.2A = <b>10 Watt</b>") {
+		t.Errorf("Expected converted power math, got:\n%s", result)
+	}
+	if strings.Contains(result, "$") || strings.Contains(result, `\text`) || strings.Contains(result, `\mathbf`) {
+		t.Errorf("Expected no remaining raw LaTeX notation, got:\n%s", result)
+	}
+}

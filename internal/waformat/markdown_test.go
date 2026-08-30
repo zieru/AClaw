@@ -102,3 +102,25 @@ func TestHTMLTagsToWhatsApp(t *testing.T) {
 		t.Errorf("Expected '`/reset`', got:\n%s", output)
 	}
 }
+
+func TestMarkdownToWhatsApp_LaTeX(t *testing.T) {
+	input := `(rumus Hukum Ohm: $\Delta V / \Delta I$) 
+1. Hitung Spesifikasi Jika Diseri (10 Keping):
+* Tegangan (Voltase): $5\text{V} \times 10 = \mathbf{50\text{ Volt}}$
+* Total Daya (Watt): $50\text{V} \times 0.2\text{A} = \mathbf{10\text{ Watt}}$`
+
+	output := MarkdownToWhatsApp(input)
+
+	if !strings.Contains(output, "ΔV / ΔI") {
+		t.Errorf("Expected ΔV / ΔI, got:\n%s", output)
+	}
+	if !strings.Contains(output, "5V × 10 = *50 Volt*") {
+		t.Errorf("Expected converted math with WhatsApp bold, got:\n%s", output)
+	}
+	if !strings.Contains(output, "50V × 0.2A = *10 Watt*") {
+		t.Errorf("Expected converted power math with WhatsApp bold, got:\n%s", output)
+	}
+	if strings.Contains(output, "$") || strings.Contains(output, `\text`) || strings.Contains(output, `\mathbf`) {
+		t.Errorf("Expected no remaining raw LaTeX notation, got:\n%s", output)
+	}
+}

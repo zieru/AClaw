@@ -66,6 +66,9 @@ func MarkdownToWhatsApp(md string) string {
 		return fmt.Sprintf("___WA_INLINE_CODE_%d___", idx)
 	})
 
+	// 3b. Clean and convert LaTeX Math notation to readable Unicode
+	text = CleanLaTeXMath(text)
+
 	// 4. Convert HTML Formatting Tags (<b>, <i>, <s>, <br>)
 	text = htmlBoldRegex.ReplaceAllString(text, `*$1*`)
 	text = htmlItalicRegex.ReplaceAllString(text, `_$1_`)
