@@ -223,6 +223,21 @@ func (ui *AuditUI) HandleViewLogByID(c tele.Context, logID string) error {
 	sb.WriteString(fmt.Sprintf("• Provider: <b>%s</b> (%s)\n", html.EscapeString(logRecord.Provider), html.EscapeString(logRecord.Model)))
 	sb.WriteString(fmt.Sprintf("• User: <code>%s</code> | Channel: <code>%s</code> (%s)\n", html.EscapeString(logRecord.UserName), html.EscapeString(logRecord.ChannelID), html.EscapeString(logRecord.ChannelType)))
 	sb.WriteString(fmt.Sprintf("• Latensi: <code>%d ms</code> | Token: <code>%d</code> (Cost: <code>$%.6f</code>)\n", logRecord.LatencyMs, logRecord.TotalTokens, logRecord.CostUSD))
+	if logRecord.ThinkingTokens > 0 {
+		sb.WriteString(fmt.Sprintf("• Thinking Tokens: <code>%d</code>\n", logRecord.ThinkingTokens))
+	}
+	if logRecord.TokensSaved > 0 {
+		sb.WriteString(fmt.Sprintf("• Tokens Saved: <code>%d</code>\n", logRecord.TokensSaved))
+	}
+	if logRecord.NumberOfTries > 1 {
+		sb.WriteString(fmt.Sprintf("• Jumlah Percobaan: <code>%d kali</code>\n", logRecord.NumberOfTries))
+	}
+	if logRecord.ProxyUsed != "" {
+		sb.WriteString(fmt.Sprintf("• Proxy Used: <code>%s</code>\n", html.EscapeString(logRecord.ProxyUsed)))
+	}
+	if logRecord.ToolsCalled != "" && logRecord.ToolsCalled != "[]" {
+		sb.WriteString(fmt.Sprintf("• Tools Called: <code>%s</code>\n", html.EscapeString(logRecord.ToolsCalled)))
+	}
 
 	if logRecord.ErrorMessage != "" {
 		sb.WriteString("⚠️ <b>ERROR / EXCEPTION:</b>\n")
@@ -294,9 +309,10 @@ func (ui *AuditUI) HandleExportLogs(c tele.Context) error {
 
 	// Write CSV Header
 	_ = w.Write([]string{
-		"ID", "Timestamp", "ChannelType", "ChannelID", "UserID", "UserName",
-		"Provider", "Model", "PromptTokens", "CompletionTokens", "TotalTokens",
-		"CostUSD", "LatencyMs", "Status", "ErrorMessage", "ClientRequest", "ProviderResponse",
+		"ID", "Timestamp", "ChannelType", "ChannelID", "ChatID", "UserID", "UserName",
+		"Provider", "Model", "PromptTokens", "CompletionTokens", "ThinkingTokens", "TotalTokens",
+		"TokensSaved", "NumberOfTries", "CostUSD", "LatencyMs", "ProxyUsed", "ToolsCalled",
+		"Status", "ErrorMessage", "ClientRequest", "RawRequest", "SystemPrompt", "ProviderResponse",
 	})
 
 	for _, l := range logs {
@@ -305,18 +321,26 @@ func (ui *AuditUI) HandleExportLogs(c tele.Context) error {
 			l.Timestamp.Format("2006-01-02 15:04:05"),
 			l.ChannelType,
 			l.ChannelID,
+			l.ChatID,
 			l.UserID,
 			l.UserName,
 			l.Provider,
 			l.Model,
 			fmt.Sprintf("%d", l.PromptTokens),
 			fmt.Sprintf("%d", l.CompletionTokens),
+			fmt.Sprintf("%d", l.ThinkingTokens),
 			fmt.Sprintf("%d", l.TotalTokens),
+			fmt.Sprintf("%d", l.TokensSaved),
+			fmt.Sprintf("%d", l.NumberOfTries),
 			fmt.Sprintf("%.6f", l.CostUSD),
 			fmt.Sprintf("%d", l.LatencyMs),
+			l.ProxyUsed,
+			l.ToolsCalled,
 			l.Status,
 			l.ErrorMessage,
 			l.ClientRequest,
+			l.FullRequestPayload, // Raw Request
+			l.SystemPrompt,
 			l.ProviderResponse,
 		})
 	}

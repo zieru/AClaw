@@ -83,6 +83,7 @@ type ChatResponse struct {
 	CacheCreationTokens int // Tokens written to provider prompt cache
 	CostUSD             float64
 	Latency             time.Duration
+	Tries               int // Number of provider attempts before success
 	Model               string
 	ProviderName        string
 }
@@ -311,6 +312,7 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 			targetStart := time.Now()
 			resp, err := p.GenerateChat(ctx, targetReq)
 			if err == nil && resp != nil {
+				resp.Tries = idx + 1
 				if idx > 0 {
 					log.Printf("[Combo:%s] Berhasil fallback ke target #%d [%s/%s] (latensi: %dms)", combo.Name, idx+1, target.ProviderID, target.Model, time.Since(targetStart).Milliseconds())
 				}
@@ -397,6 +399,7 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 		pStart := time.Now()
 		resp, err := p.GenerateChat(ctx, req)
 		if err == nil && resp != nil {
+			resp.Tries = idx + 1
 			if idx > 0 {
 				log.Printf("[Fallback] Berhasil fallback ke provider #%d [%s] (latensi: %dms)", idx+1, p.Name(), time.Since(pStart).Milliseconds())
 			}

@@ -54,6 +54,8 @@ func Open(dbPath string) (*DB, error) {
 	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN provider_response TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN tokens_saved INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN proxy_used TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN number_of_tries INTEGER NOT NULL DEFAULT 1")
+	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN thinking_tokens INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN footer_mode TEXT NOT NULL DEFAULT 'off'")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN token_saver_mode TEXT NOT NULL DEFAULT 'auto'")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN proxy_pool_enabled INTEGER NOT NULL DEFAULT 1")
@@ -234,8 +236,10 @@ type AuditLogRecord struct {
 	Model              string    `json:"model"`
 	PromptTokens       int       `json:"prompt_tokens"`
 	CompletionTokens   int       `json:"completion_tokens"`
+	ThinkingTokens     int       `json:"thinking_tokens"`
 	TotalTokens        int       `json:"total_tokens"`
 	TokensSaved        int       `json:"tokens_saved"`
+	NumberOfTries      int       `json:"number_of_tries"`
 	ProxyUsed          string    `json:"proxy_used"`
 	LatencyMs          int       `json:"latency_ms"`
 	CostUSD            float64   `json:"cost_usd"`
@@ -1423,11 +1427,15 @@ func (d *DB) InsertAuditLog(l *AuditLogRecord) error {
 		l.ID = uuid.New().String()
 	}
 
+	if l.NumberOfTries <= 0 {
+		l.NumberOfTries = 1
+	}
+
 	query := `
-	INSERT INTO audit_logs (id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, total_tokens, tokens_saved, proxy_used, latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message)
-	VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO audit_logs (id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, thinking_tokens, total_tokens, tokens_saved, number_of_tries, proxy_used, latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message)
+	VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
-	_, err := d.db.Exec(query, l.ID, l.ChannelType, l.ChannelID, l.ChatID, l.UserID, l.UserName, l.Provider, l.Model, l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.TokensSaved, l.ProxyUsed, l.LatencyMs, l.CostUSD, l.ToolsCalled, l.ClientRequest, l.SystemPrompt, l.FullRequestPayload, l.ProviderResponse, l.Status, l.ErrorMessage)
+	_, err := d.db.Exec(query, l.ID, l.ChannelType, l.ChannelID, l.ChatID, l.UserID, l.UserName, l.Provider, l.Model, l.PromptTokens, l.CompletionTokens, l.ThinkingTokens, l.TotalTokens, l.TokensSaved, l.NumberOfTries, l.ProxyUsed, l.LatencyMs, l.CostUSD, l.ToolsCalled, l.ClientRequest, l.SystemPrompt, l.FullRequestPayload, l.ProviderResponse, l.Status, l.ErrorMessage)
 	d.mu.Unlock()
 
 	if err == nil {
@@ -1534,7 +1542,7 @@ func (d *DB) GetRecentAuditLogs(limit int) ([]AuditLogRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	query := "SELECT id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, total_tokens, COALESCE(tokens_saved, 0), COALESCE(proxy_used, ''), latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message FROM audit_logs ORDER BY timestamp DESC LIMIT ?"
+	query := "SELECT id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, COALESCE(thinking_tokens, 0), total_tokens, COALESCE(tokens_saved, 0), COALESCE(number_of_tries, 1), COALESCE(proxy_used, ''), latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message FROM audit_logs ORDER BY timestamp DESC LIMIT ?"
 	rows, err := d.db.Query(query, limit)
 	if err != nil {
 		return nil, err
@@ -1544,7 +1552,7 @@ func (d *DB) GetRecentAuditLogs(limit int) ([]AuditLogRecord, error) {
 	var logs []AuditLogRecord
 	for rows.Next() {
 		var l AuditLogRecord
-		if err := rows.Scan(&l.ID, &l.Timestamp, &l.ChannelType, &l.ChannelID, &l.ChatID, &l.UserID, &l.UserName, &l.Provider, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.TokensSaved, &l.ProxyUsed, &l.LatencyMs, &l.CostUSD, &l.ToolsCalled, &l.ClientRequest, &l.SystemPrompt, &l.FullRequestPayload, &l.ProviderResponse, &l.Status, &l.ErrorMessage); err != nil {
+		if err := rows.Scan(&l.ID, &l.Timestamp, &l.ChannelType, &l.ChannelID, &l.ChatID, &l.UserID, &l.UserName, &l.Provider, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.ThinkingTokens, &l.TotalTokens, &l.TokensSaved, &l.NumberOfTries, &l.ProxyUsed, &l.LatencyMs, &l.CostUSD, &l.ToolsCalled, &l.ClientRequest, &l.SystemPrompt, &l.FullRequestPayload, &l.ProviderResponse, &l.Status, &l.ErrorMessage); err != nil {
 			return nil, err
 		}
 		logs = append(logs, l)
@@ -1556,11 +1564,11 @@ func (d *DB) GetAuditLogByID(id string) (*AuditLogRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	query := "SELECT id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, total_tokens, COALESCE(tokens_saved, 0), COALESCE(proxy_used, ''), latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message FROM audit_logs WHERE id = ?"
+	query := "SELECT id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, COALESCE(thinking_tokens, 0), total_tokens, COALESCE(tokens_saved, 0), COALESCE(number_of_tries, 1), COALESCE(proxy_used, ''), latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message FROM audit_logs WHERE id = ?"
 	row := d.db.QueryRow(query, id)
 
 	var l AuditLogRecord
-	if err := row.Scan(&l.ID, &l.Timestamp, &l.ChannelType, &l.ChannelID, &l.ChatID, &l.UserID, &l.UserName, &l.Provider, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.TokensSaved, &l.ProxyUsed, &l.LatencyMs, &l.CostUSD, &l.ToolsCalled, &l.ClientRequest, &l.SystemPrompt, &l.FullRequestPayload, &l.ProviderResponse, &l.Status, &l.ErrorMessage); err != nil {
+	if err := row.Scan(&l.ID, &l.Timestamp, &l.ChannelType, &l.ChannelID, &l.ChatID, &l.UserID, &l.UserName, &l.Provider, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.ThinkingTokens, &l.TotalTokens, &l.TokensSaved, &l.NumberOfTries, &l.ProxyUsed, &l.LatencyMs, &l.CostUSD, &l.ToolsCalled, &l.ClientRequest, &l.SystemPrompt, &l.FullRequestPayload, &l.ProviderResponse, &l.Status, &l.ErrorMessage); err != nil {
 		return nil, err
 	}
 	return &l, nil

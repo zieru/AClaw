@@ -56,6 +56,7 @@ type UserRequest struct {
 	PreferredRole  string
 	PreferredProv  string
 	OnProgress     func(status string)
+	OnStreamChunk  func(chunk provider.StreamChunk)
 }
 
 type MediaAttachment struct {
@@ -215,6 +216,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	var totalThinkingTokens int
 	var totalTokensUsed int
 	var totalTokensSaved int
+	var totalTries int
 	var totalCostUSD float64
 	var lastModel string
 	var lastProviderName string
@@ -263,6 +265,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 			MaxTokens:       policy.MaxTokens,
 			ThinkingEnabled: policy.ThinkingEnabled,
 			OnProgress:      req.OnProgress,
+			Stream:          req.OnStreamChunk != nil,
+			StreamCallback:  req.OnStreamChunk,
 		}
 
 		resp, err := o.providerManager.GenerateWithFallback(ctx, req.PreferredProv, chatReq)
@@ -321,6 +325,9 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 			}
 
 			if err != nil {
+				if totalTries <= 0 {
+					totalTries = 1
+				}
 				// Log failure to audit
 				fullPayloadJSON, _ := json.Marshal(compressedMsgs)
 				_ = o.db.InsertAuditLog(&storage.AuditLogRecord{
@@ -332,6 +339,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 					Provider:           req.PreferredProv,
 					Model:              policy.ModelOverride,
 					TokensSaved:        totalTokensSaved,
+					ThinkingTokens:     totalThinkingTokens,
+					NumberOfTries:      totalTries,
 					LatencyMs:          int(time.Since(start).Milliseconds()),
 					ClientRequest:      req.UserPrompt,
 					SystemPrompt:       sysPrompt,
@@ -340,6 +349,14 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 					ErrorMessage:       err.Error(),
 				})
 				return nil, err
+			}
+		}
+
+		if resp != nil {
+			if resp.Tries > 0 {
+				totalTries += resp.Tries
+			} else {
+				totalTries++
 			}
 		}
 
@@ -488,6 +505,10 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	fullPayloadJSON, _ := json.Marshal(messages)
 	toolsJSON, _ := json.Marshal(allToolsCalled)
 	latency := time.Since(start)
+	if totalTries <= 0 {
+		totalTries = 1
+	}
+
 	_ = o.db.InsertAuditLog(&storage.AuditLogRecord{
 		ChannelType:        req.ChannelType,
 		ChannelID:          req.ChannelID,
@@ -498,8 +519,10 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		Model:              lastModel,
 		PromptTokens:       totalPromptTokens,
 		CompletionTokens:   totalCompletionTokens,
+		ThinkingTokens:     totalThinkingTokens,
 		TotalTokens:        totalTokensUsed,
 		TokensSaved:        totalTokensSaved,
+		NumberOfTries:      totalTries,
 		LatencyMs:          int(latency.Milliseconds()),
 		CostUSD:            totalCostUSD,
 		ToolsCalled:        string(toolsJSON),
@@ -519,12 +542,23 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	if finalThinking != "" && policy.ThinkingEnabled && cleanText != strings.TrimSpace(finalThinking) {
 		switch strings.ToLower(policy.ThinkingDisplay) {
 		case "full":
-			finalText = "💭 <b>Proses Berpikir:</b>\n<blockquote>" + strings.TrimSpace(finalThinking) + "</blockquote>\n\n" + finalText
+			if req.ChannelType == "whatsapp" {
+				// For WhatsApp, default to a clean summary / first 64 chars to avoid message bloating
+				thinkPreview := strings.TrimSpace(finalThinking)
+				thinkPreview = strings.ReplaceAll(thinkPreview, "\n", " ")
+				if len(thinkPreview) > 64 {
+					thinkPreview = thinkPreview[:64] + "..."
+				}
+				finalText = "💭 <i>" + thinkPreview + "</i>\n\n" + finalText
+			} else {
+				finalText = "💭 <b>Proses Berpikir:</b>\n<blockquote>" + strings.TrimSpace(finalThinking) + "</blockquote>\n\n" + finalText
+			}
 		case "summary":
-			// Truncate thinking to first 500 chars
+			// Truncate thinking to single-line preview (64 chars)
 			thinkPreview := strings.TrimSpace(finalThinking)
-			if len(thinkPreview) > 500 {
-				thinkPreview = thinkPreview[:500] + "..."
+			thinkPreview = strings.ReplaceAll(thinkPreview, "\n", " ")
+			if len(thinkPreview) > 64 {
+				thinkPreview = thinkPreview[:64] + "..."
 			}
 			finalText = "💭 <i>" + thinkPreview + "</i>\n\n" + finalText
 			// "hidden" — don't show thinking

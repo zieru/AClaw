@@ -435,6 +435,169 @@ endpoints:
       group-by: '"BISMOD", coalesce("Mitra", ''Lainnya''), regional'
       order-by: 'total desc'
 
+  # ============================================================================
+  # ============================================================================
+  # PSB Halo Performance Dashboard Endpoints (DuckDB Engine g3a)
+  # Dataset: /home/zieru/Onedrive/antreaja/psbhalo_parquet
+  # ============================================================================
+
+  # ----------------------------------------------------------------------------
+  # 15. PSB Halo Performance Total (Area Sumatera Aggregate)
+  # ----------------------------------------------------------------------------
+  - path: "/api/psbhalo/performance-total"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/psbhalo_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      where: "upper(region) like 'SUMBA%'"
+      select: 'sum(total_msisdn) as total_msisdn, sum(total_msisdn_unik) as total_msisdn_unik, sum(total_msisdn_accountnumber_unik) as total_account_unik'
+
+  # ----------------------------------------------------------------------------
+  # 16. PSB Halo Performance per Regional
+  # ----------------------------------------------------------------------------
+  - path: "/api/psbhalo/performance-regional"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/psbhalo_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      where: "upper(region) like 'SUMBA%'"
+      select: 'region as regional, sum(total_msisdn) as total_msisdn, sum(total_msisdn_unik) as total_msisdn_unik, sum(total_msisdn_accountnumber_unik) as total_account_unik'
+      group-by: 'region'
+      order-by: 'region asc'
+
+  # ----------------------------------------------------------------------------
+  # 17. PSB Halo Performance per Territory
+  # ----------------------------------------------------------------------------
+  - path: "/api/psbhalo/performance-territory"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/psbhalo_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      where: "upper(region) like 'SUMBA%'"
+      select: 'upper(territory_ctp) as territory, region as regional, sum(total_msisdn) as total_msisdn, sum(total_msisdn_unik) as total_msisdn_unik, sum(total_msisdn_accountnumber_unik) as total_account_unik'
+      group-by: 'upper(territory_ctp), region'
+      order-by: 'total_msisdn desc'
+
+  # ----------------------------------------------------------------------------
+  # 18. PSB Halo Performance Daily Matrix per GraPARI & Territory (1 Row per GraPARI)
+  # ----------------------------------------------------------------------------
+  - path: "/api/psbhalo/performance-daily"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/psbhalo_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      where: "upper(region) like 'SUMBA%'"
+      select: 'upper(territory_ctp) as territory, grapari, region as regional, sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 1) as "1", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 2) as "2", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 3) as "3", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 4) as "4", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 5) as "5", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 6) as "6", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 7) as "7", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 8) as "8", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 9) as "9", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 10) as "10", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 11) as "11", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 12) as "12", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 13) as "13", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 14) as "14", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 15) as "15", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 16) as "16", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 17) as "17", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 18) as "18", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 19) as "19", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 20) as "20", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 21) as "21", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 22) as "22", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 23) as "23", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 24) as "24", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 25) as "25", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 26) as "26", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 27) as "27", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 28) as "28", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 29) as "29", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 30) as "30", sum(total_msisdn) filter (where cast(strftime(cast(activation_date as date), ''%d'') as integer) = 31) as "31", sum(total_msisdn) as total'
+      group-by: 'upper(territory_ctp), grapari, region'
+      order-by: 'upper(territory_ctp) asc, grapari asc'
+
+  # ----------------------------------------------------------------------------
+  # 19. PSB Halo Package / Offer Summary (By Regional)
+  # ----------------------------------------------------------------------------
+  - path: "/api/psbhalo/performance-package-summary"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/psbhalo_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      where: "upper(region) like 'SUMBA%'"
+      select: 'coalesce(new_offer, ''Lainnya'') as package_name, region as regional, sum(total_msisdn) as total, sum(total_msisdn_unik) as total_unik'
+      group-by: 'coalesce(new_offer, ''Lainnya''), region'
+      order-by: 'total desc'
+
+  # ----------------------------------------------------------------------------
+  # 20. PSB Halo Package / Offer Detail (By Price & Activation Type)
+  # ----------------------------------------------------------------------------
+  - path: "/api/psbhalo/performance-package-detail"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/psbhalo_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      where: "upper(region) like 'SUMBA%'"
+      select: 'coalesce(new_offer, ''Lainnya'') as package_name, coalesce(mf_price, ''-'') as price, coalesce(activation_type, ''Direct'') as activation_type, sum(total_msisdn) as total, sum(total_msisdn_unik) as total_unik'
+      group-by: 'coalesce(new_offer, ''Lainnya''), coalesce(mf_price, ''-''), coalesce(activation_type, ''Direct'')'
+      order-by: 'total desc'
+
+  # ----------------------------------------------------------------------------
+  # 21. PSB Halo BISMOD Performance Summary (TOMO vs MOMO by Regional)
+  # ----------------------------------------------------------------------------
+  - path: "/api/psbhalo/performance-bismod-summary"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/psbhalo_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      where: "upper(region) like 'SUMBA%'"
+      select: '"BISMOD" as bismod, region as regional, sum(total_msisdn) as total, sum(total_msisdn_unik) as total_unik'
+      group-by: '"BISMOD", region'
+      order-by: 'bismod asc, regional asc'
+
+  # ----------------------------------------------------------------------------
+  # 22. PSB Halo Mitra Performance Detail (Mitra Pengelola Distribution)
+  # ----------------------------------------------------------------------------
+  - path: "/api/psbhalo/performance-mitra-detail"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/psbhalo_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      where: "upper(region) like 'SUMBA%'"
+      select: '"BISMOD" as bismod, coalesce("Mitra Pengelola", ''Lainnya'') as nama_mitra, region as regional, sum(total_msisdn) as total, sum(total_msisdn_unik) as total_unik'
+      group-by: '"BISMOD", coalesce("Mitra Pengelola", ''Lainnya''), region'
+      order-by: 'total desc'
+
+  # ----------------------------------------------------------------------------
+  # 23. PSB Halo Tren Harian & MoM
+  # ----------------------------------------------------------------------------
+  - path: "/api/psbhalo/trend"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/psbhalo_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      where: "upper(region) like 'SUMBA%'"
+      select: 'strftime(cast(activation_date as date), ''%Y-%m-%d'') as activation_date, sum(total_msisdn) as total'
+      group-by: 'strftime(cast(activation_date as date), ''%Y-%m-%d'')'
+      order-by: 'strftime(cast(activation_date as date), ''%Y-%m-%d'') asc'
+
+  - path: "/api/psbhalo/mom"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/psbhalo_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      where: "upper(region) like 'SUMBA%'"
+      select: 'strftime(cast(activation_date as date), ''%Y-%m'') as periode, sum(total_msisdn) as total_msisdn, sum(total_msisdn_unik) as total_msisdn_unik, sum(total_msisdn_accountnumber_unik) as total_account_unik'
+      group-by: 'strftime(cast(activation_date as date), ''%Y-%m'')'
+      order-by: 'strftime(cast(activation_date as date), ''%Y-%m'') asc'
+      limit: '24'
+
+
 
 
 

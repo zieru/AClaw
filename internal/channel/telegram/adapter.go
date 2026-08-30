@@ -13,6 +13,7 @@ import (
 
 	"goassistant/internal/agent"
 	"goassistant/internal/config"
+	"goassistant/internal/provider"
 	"goassistant/internal/storage"
 	"goassistant/internal/tgformat"
 	tele "gopkg.in/telebot.v3"
@@ -137,7 +138,7 @@ func (a *BotAdapter) registerHandlers() {
 		cancelMenu.Inline(cancelMenu.Row(cancelBtn))
 
 		thinkingMsg, _ := a.bot.Reply(msg, "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
-		stopUpdater, onProgressStatus := createProgressiveThinkingManager(a.bot, thinkingMsg, "🤔 <i>Sedang berpikir...</i>")
+		stopUpdater, onProgressStatus, onStreamChunk := createProgressiveThinkingManager(a.bot, thinkingMsg, "🤔 <i>Sedang berpikir...</i>")
 		defer stopUpdater()
 
 		ctx, cancel := context.WithTimeout(context.Background(),
@@ -159,6 +160,9 @@ func (a *BotAdapter) registerHandlers() {
 			AttachedFileMB: 0,
 			OnProgress: func(status string) {
 				onProgressStatus(status)
+			},
+			OnStreamChunk: func(chunk provider.StreamChunk) {
+				onStreamChunk(chunk)
 			},
 		})
 
@@ -204,7 +208,7 @@ func (a *BotAdapter) registerHandlers() {
 		cancelMenu.Inline(cancelMenu.Row(cancelBtn))
 
 		thinkingMsg, _ := a.bot.Reply(c.Message(), "📄 <i>Menganalisis dokumen & berpikir...</i>", tele.ModeHTML, cancelMenu)
-		stopUpdater, onProgressStatus := createProgressiveThinkingManager(a.bot, thinkingMsg, "📄 <i>Menganalisis dokumen & berpikir...</i>")
+		stopUpdater, onProgressStatus, onStreamChunk := createProgressiveThinkingManager(a.bot, thinkingMsg, "📄 <i>Menganalisis dokumen & berpikir...</i>")
 		defer stopUpdater()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -225,6 +229,9 @@ func (a *BotAdapter) registerHandlers() {
 			AttachedFileMB: fileMB,
 			OnProgress: func(status string) {
 				onProgressStatus(status)
+			},
+			OnStreamChunk: func(chunk provider.StreamChunk) {
+				onStreamChunk(chunk)
 			},
 		})
 
@@ -252,10 +259,10 @@ func (a *BotAdapter) registerHandlers() {
 	})
 }
 
-// createProgressiveThinkingManager runs a periodic ticker that updates thinking text dynamically
-func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, initialPrefix string) (stopFunc func(), updateStatus func(string)) {
+// createProgressiveThinkingManager runs a periodic ticker that updates thinking and streaming text dynamically
+func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, initialPrefix string) (stopFunc func(), updateStatus func(string), onChunk func(chunk provider.StreamChunk)) {
 	if targetMsg == nil {
-		return func() {}, func(string) {}
+		return func() {}, func(string) {}, func(provider.StreamChunk) {}
 	}
 
 	cancelMenu := &tele.ReplyMarkup{}
@@ -263,7 +270,10 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 	cancelMenu.Inline(cancelMenu.Row(cancelBtn))
 
 	var mu sync.Mutex
+	var thinkingBuf strings.Builder
+	var contentBuf strings.Builder
 	customStatus := ""
+	lastSentText := ""
 	stopped := false
 	doneChan := make(chan struct{})
 	startTime := time.Now()
@@ -274,6 +284,17 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 		mu.Unlock()
 		if targetMsg != nil {
 			_, _ = bot.Edit(targetMsg, status, tele.ModeHTML, cancelMenu)
+		}
+	}
+
+	onChunk = func(chunk provider.StreamChunk) {
+		mu.Lock()
+		defer mu.Unlock()
+		if chunk.Thinking != "" {
+			thinkingBuf.WriteString(chunk.Thinking)
+		}
+		if chunk.Content != "" {
+			contentBuf.WriteString(chunk.Content)
 		}
 	}
 
@@ -303,9 +324,42 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 					return
 				}
 				elapsedSec := int(time.Since(startTime).Seconds())
+				curThinking := strings.TrimSpace(thinkingBuf.String())
+				curContent := strings.TrimSpace(contentBuf.String())
+				status := customStatus
+
 				var text string
-				if customStatus != "" {
-					text = fmt.Sprintf("%s <i>(%dd)</i>", customStatus, elapsedSec)
+				if curThinking != "" || curContent != "" {
+					// Live streaming preview mode
+					if curContent == "" && curThinking != "" {
+						// Only thinking so far
+						previewThink := curThinking
+						if len(previewThink) > 3500 {
+							previewThink = previewThink[len(previewThink)-3500:]
+						}
+						text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote>%s ▌</blockquote>", html.EscapeString(previewThink))
+					} else if curThinking != "" && curContent != "" {
+						// Thinking + content streaming
+						previewThink := curThinking
+						if len(previewThink) > 1500 {
+							previewThink = previewThink[:1500] + "..."
+						}
+						previewContent := curContent
+						if len(previewContent) > 2000 {
+							previewContent = previewContent[len(previewContent)-2000:]
+						}
+						formattedContent := tgformat.MarkdownToTelegramHTML(previewContent)
+						text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote>%s</blockquote>\n\n%s ▌", html.EscapeString(previewThink), formattedContent)
+					} else {
+						// Only content
+						previewContent := curContent
+						if len(previewContent) > 3800 {
+							previewContent = previewContent[len(previewContent)-3800:]
+						}
+						text = tgformat.MarkdownToTelegramHTML(previewContent) + " ▌"
+					}
+				} else if status != "" {
+					text = fmt.Sprintf("%s <i>(%dd)</i>", status, elapsedSec)
 				} else {
 					switch {
 					case elapsedSec < 6:
@@ -320,6 +374,12 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 						text = fmt.Sprintf("🔄 <i>Sedang menyelesaikan proses generasi respon... (%dd)</i>", elapsedSec)
 					}
 				}
+
+				if text == lastSentText {
+					mu.Unlock()
+					continue
+				}
+				lastSentText = text
 				mu.Unlock()
 
 				if targetMsg != nil {
@@ -329,7 +389,7 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 		}
 	}()
 
-	return stopFunc, updateStatus
+	return stopFunc, updateStatus, onChunk
 }
 
 func (a *BotAdapter) handleNew(c tele.Context) error {

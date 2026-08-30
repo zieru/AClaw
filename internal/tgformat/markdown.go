@@ -25,6 +25,7 @@ func MarkdownToTelegramHTML(md string) string {
 
 	var codeBlocks []string
 	var inlineCodes []string
+	var validTags []string
 
 	// 1. Extract and protect fenced code blocks
 	text := codeBlockRegex.ReplaceAllStringFunc(md, func(match string) string {
@@ -62,6 +63,14 @@ func MarkdownToTelegramHTML(md string) string {
 		return fmt.Sprintf("___TG_INLINE_CODE_%d___", idx)
 	})
 
+	// 2b. Extract and protect pre-existing valid Telegram HTML tags (like <blockquote>, <b>, <i>, etc.)
+	validTagRegex := regexp.MustCompile(`(?i)</?(?:b|i|s|u|blockquote|expandable-blockquote|tg-spoiler|a(?:\s+href="[^"]*")?)\s*/?>`)
+	text = validTagRegex.ReplaceAllStringFunc(text, func(match string) string {
+		idx := len(validTags)
+		validTags = append(validTags, match)
+		return fmt.Sprintf("___TG_TAG_%d___", idx)
+	})
+
 	// 3. Escape general HTML characters (&, <, >) in remaining text
 	text = html.EscapeString(text)
 
@@ -83,13 +92,19 @@ func MarkdownToTelegramHTML(md string) string {
 	// 9. Convert Italic: *text* -> <i>text</i> or _text_ -> <i>text</i>
 	text = replaceItalic(text)
 
-	// 10. Restore Inline Codes
+	// 10. Restore Valid Pre-existing Tags
+	for i, tag := range validTags {
+		placeholder := fmt.Sprintf("___TG_TAG_%d___", i)
+		text = strings.ReplaceAll(text, placeholder, tag)
+	}
+
+	// 11. Restore Inline Codes
 	for i, code := range inlineCodes {
 		placeholder := fmt.Sprintf("___TG_INLINE_CODE_%d___", i)
 		text = strings.ReplaceAll(text, placeholder, code)
 	}
 
-	// 11. Restore Code Blocks
+	// 12. Restore Code Blocks
 	for i, block := range codeBlocks {
 		placeholder := fmt.Sprintf("___TG_CODE_BLOCK_%d___", i)
 		text = strings.ReplaceAll(text, placeholder, block)
