@@ -58,11 +58,15 @@ func (a *AdminBot) handleDirectChat(c tele.Context, msg string) error {
 		}
 
 		friendlyErr := agent.FormatUserFriendlyError(err)
+		errMenu := &tele.ReplyMarkup{}
+		retryBtn := errMenu.Data("🔄 Coba Lagi", "retry_admin_task")
+		errMenu.Inline(errMenu.Row(retryBtn))
+
 		if thinkingMsg != nil {
-			_, _ = a.bot.Edit(thinkingMsg, friendlyErr, tele.ModeHTML)
+			_, _ = a.bot.Edit(thinkingMsg, friendlyErr, tele.ModeHTML, errMenu)
 			return nil
 		}
-		return c.Reply(friendlyErr, tele.ModeHTML)
+		return c.Reply(friendlyErr, tele.ModeHTML, errMenu)
 	}
 
 	return sendOrEditSplitMessage(c, thinkingMsg, resp.Text, resp.MediaFiles...)
@@ -205,14 +209,7 @@ func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stop
 				if customStatus != "" {
 					text = fmt.Sprintf("%s <i>(%dd)</i>", customStatus, elapsedSec)
 				} else {
-					switch {
-					case elapsedSec < 6:
-						text = fmt.Sprintf("⚡ <i>Masih menganalisis pertanyaan & konteks... (%dd)</i>", elapsedSec)
-					case elapsedSec < 22:
-						text = fmt.Sprintf("🔍 <i>Sedang memproses instruksi secara mendalam... (%dd)</i>", elapsedSec)
-					default:
-						text = fmt.Sprintf("⏳ <i>Hampir selesai, memvalidasi & menyusun format output... (%dd)</i>", elapsedSec)
-					}
+					text = fmt.Sprintf("💭 <i>Sedang berpikir... (%dd)</i>", elapsedSec)
 				}
 				mu.Unlock()
 

@@ -88,6 +88,15 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		return a.handleStop(c)
 	}
 
+	if strings.HasPrefix(data, "retry_admin_task") {
+		_ = c.Respond(&tele.CallbackResponse{Text: "🔄 Mencoba ulang..."})
+		lastPrompt := a.orchestrator.GetLastPrompt("admin", fmt.Sprintf("%d", c.Chat().ID), fmt.Sprintf("%d", c.Sender().ID))
+		if lastPrompt == "" {
+			return c.Send("⚠️ Tidak ada pesan sebelumnya yang dapat dicoba lagi.")
+		}
+		return a.handleDirectChat(c, lastPrompt)
+	}
+
 	// Model Switcher Callbacks
 	if data == "mod_main" || data == "mod_refresh" {
 		return c.EditOrSend(a.modelUI.RenderModelDashboard(c), a.modelUI.ModelMenuKeyboard(c.Sender().ID), tele.ModeHTML)

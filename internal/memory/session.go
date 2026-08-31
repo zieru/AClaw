@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"goassistant/internal/provider"
 	"goassistant/internal/storage"
@@ -10,11 +11,44 @@ import (
 
 // SessionManager manages conversation messages per session
 type SessionManager struct {
-	db *storage.DB
+	db          *storage.DB
+	lastPrompts sync.Map // key: "channelID:chatID:userID" -> prompt string
 }
 
 func NewSessionManager(db *storage.DB) *SessionManager {
 	return &SessionManager{db: db}
+}
+
+// SetLastPrompt stores the latest user prompt for quick retry
+func (sm *SessionManager) SetLastPrompt(channelID, chatID, userID, prompt string) {
+	if prompt == "" {
+		return
+	}
+	key := fmt.Sprintf("%s:%s:%s", channelID, chatID, userID)
+	sm.lastPrompts.Store(key, prompt)
+}
+
+// GetLastPrompt retrieves the last user prompt from memory or recent messages
+func (sm *SessionManager) GetLastPrompt(channelID, chatID, userID string) string {
+	key := fmt.Sprintf("%s:%s:%s", channelID, chatID, userID)
+	if val, ok := sm.lastPrompts.Load(key); ok {
+		if p, ok := val.(string); ok && p != "" {
+			return p
+		}
+	}
+	// Fallback: check last user message in DB session
+	session, err := sm.db.GetOrCreateSession(channelID, chatID, userID)
+	if err == nil && session != nil {
+		msgs, err := sm.db.GetRecentMessages(session.ID, 5)
+		if err == nil {
+			for i := len(msgs) - 1; i >= 0; i-- {
+				if msgs[i].Role == "user" && msgs[i].Content != "" {
+					return msgs[i].Content
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // GetOrCreate gets an existing session or creates a new one

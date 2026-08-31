@@ -488,11 +488,24 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 		return
 	}
 
+	if lowerText == "/retry" || lowerText == "!retry" || lowerText == "retry" || lowerText == "coba lagi" {
+		lastPrompt := a.orchestrator.GetLastPrompt(a.channelID, chatID, senderID)
+		if strings.TrimSpace(lastPrompt) == "" {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ *Tidak ada pesan sebelumnya yang dapat dicoba lagi.*\nSilakan kirimkan pertanyaan atau instruksi baru Anda.")
+			}()
+			return
+		}
+		cleanText = lastPrompt
+		log.Printf("🔄 [Channel-WA] Menjalankan retry untuk pesan sebelumnya dari %s: '%s'", senderID, cleanText)
+	}
+
 	if lowerText == "/help" || lowerText == "!help" {
 		go func() {
 			helpText := "👋 *PANDUAN ASISTEN AI (WHATSAPP)*\n\n" +
 				"Silakan kirimkan pertanyaan atau perintah langsung di chat ini.\n\n" +
 				"📌 *Daftar Perintah:*\n" +
+				"• */retry* - Coba lagi permintaan atau pesan terakhir\n" +
 				"• */new* - Mulai sesi baru & reset riwayat percakapan\n" +
 				"• */stop* - Batalkan/hentikan proses respon AI\n" +
 				"• */status* - Cek status sesi & kebijakan limit\n" +
@@ -546,6 +559,7 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 				"• Mode: `%s`\n"+
 				"• Total Hemat: `%d tokens` (`%.1f%%` efisiensi)\n\n"+
 				"💡 *Perintah Cepat:*\n"+
+				"• */retry* - Coba lagi permintaan terakhir yang gagal\n"+
 				"• */new* - Reset sesi & mulai percakapan baru\n"+
 				"• */stop* - Batalkan proses respon yang sedang berjalan\n"+
 				"• */help* - Buka panduan bantuan",

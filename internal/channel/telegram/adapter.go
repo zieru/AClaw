@@ -62,6 +62,7 @@ func (a *BotAdapter) Start(ctx context.Context) error {
 
 	// Register Bot Commands for Telegram autocomplete
 	commands := []tele.Command{
+		{Text: "retry", Description: "Coba lagi pesan/pertanyaan terakhir"},
 		{Text: "new", Description: "Mulai sesi percakapan baru (reset konteks)"},
 		{Text: "reset", Description: "Reset riwayat percakapan"},
 		{Text: "stop", Description: "Hentikan respon AI yang sedang diproses"},
@@ -97,6 +98,7 @@ func (a *BotAdapter) registerHandlers() {
 	a.bot.Handle("/new", a.handleNew)
 	a.bot.Handle("/reset", a.handleNew)
 	a.bot.Handle("/clear", a.handleNew)
+	a.bot.Handle("/retry", a.handleRetry)
 	a.bot.Handle("/stop", a.handleStop)
 	a.bot.Handle("/cancel", a.handleStop)
 	a.bot.Handle(tele.OnCallback, func(c tele.Context) error {
@@ -107,6 +109,14 @@ func (a *BotAdapter) registerHandlers() {
 		if strings.HasPrefix(data, "cancel_task") {
 			_ = c.Respond(&tele.CallbackResponse{Text: "Membatalkan proses AI..."})
 			return a.handleStop(c)
+		}
+		if strings.HasPrefix(data, "retry_task") {
+			_ = c.Respond(&tele.CallbackResponse{Text: "🔄 Mencoba ulang..."})
+			return a.handleRetry(c)
+		}
+		if strings.HasPrefix(data, "reset_session") {
+			_ = c.Respond(&tele.CallbackResponse{Text: "✨ Mereset sesi percakapan..."})
+			return a.handleNew(c)
 		}
 		return nil
 	})
@@ -132,61 +142,7 @@ func (a *BotAdapter) registerHandlers() {
 			return nil
 		}
 
-		_ = c.Notify(tele.Typing)
-		cancelMenu := &tele.ReplyMarkup{}
-		cancelBtn := cancelMenu.Data("🛑 Batalkan", "cancel_task")
-		cancelMenu.Inline(cancelMenu.Row(cancelBtn))
-
-		thinkingMsg, _ := a.bot.Reply(msg, "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
-		stopUpdater, onProgressStatus, onStreamChunk := createProgressiveThinkingManager(a.bot, thinkingMsg, "🤔 <i>Sedang berpikir...</i>")
-		defer stopUpdater()
-
-		ctx, cancel := context.WithTimeout(context.Background(),
-			time.Duration(config.Get().Timeouts.HandlerSeconds)*time.Second)
-		a.activeTasks.Store(c.Chat().ID, cancel)
-		defer func() {
-			a.activeTasks.Delete(c.Chat().ID)
-			cancel()
-		}()
-
-		resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{
-			ChannelType:    "telegram",
-			ChannelID:      a.channelID,
-			ChannelName:    a.name,
-			ChatID:         strconv.FormatInt(c.Chat().ID, 10),
-			UserID:         strconv.FormatInt(c.Sender().ID, 10),
-			UserName:       c.Sender().Username,
-			UserPrompt:     userPrompt,
-			AttachedFileMB: 0,
-			OnProgress: func(status string) {
-				onProgressStatus(status)
-			},
-			OnStreamChunk: func(chunk provider.StreamChunk) {
-				onStreamChunk(chunk)
-			},
-		})
-
-		stopUpdater()
-
-		if err != nil {
-			if ctx.Err() == context.Canceled {
-				text := "🛑 <b>PROSES DIBATALKAN</b>\n\nRespon AI berhasil dihentikan atas permintaan pengguna."
-				if thinkingMsg != nil {
-					_, _ = a.bot.Edit(thinkingMsg, text, tele.ModeHTML)
-					return nil
-				}
-				return c.Reply(text, tele.ModeHTML)
-			}
-
-			friendlyErr := agent.FormatUserFriendlyError(err)
-			if thinkingMsg != nil {
-				_, _ = a.bot.Edit(thinkingMsg, friendlyErr, tele.ModeHTML)
-				return nil
-			}
-			return c.Reply(friendlyErr, tele.ModeHTML)
-		}
-
-		return sendOrEditResponse(c, thinkingMsg, resp.Text, resp.MediaFiles)
+		return a.executePrompt(c, msg, userPrompt, 0)
 	})
 
 	// Document / File handler
@@ -202,61 +158,98 @@ func (a *BotAdapter) registerHandlers() {
 			caption = fmt.Sprintf("Analisis dokumen terlampir: %s", doc.FileName)
 		}
 
-		_ = c.Notify(tele.Typing)
-		cancelMenu := &tele.ReplyMarkup{}
-		cancelBtn := cancelMenu.Data("🛑 Batalkan", "cancel_task")
-		cancelMenu.Inline(cancelMenu.Row(cancelBtn))
+		return a.executePrompt(c, c.Message(), caption, fileMB)
+	})
+}
 
-		thinkingMsg, _ := a.bot.Reply(c.Message(), "📄 <i>Menganalisis dokumen & berpikir...</i>", tele.ModeHTML, cancelMenu)
-		stopUpdater, onProgressStatus, onStreamChunk := createProgressiveThinkingManager(a.bot, thinkingMsg, "📄 <i>Menganalisis dokumen & berpikir...</i>")
-		defer stopUpdater()
+func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPrompt string, fileMB float64) error {
+	_ = c.Notify(tele.Typing)
+	cancelMenu := &tele.ReplyMarkup{}
+	cancelBtn := cancelMenu.Data("🛑 Batalkan", "cancel_task")
+	cancelMenu.Inline(cancelMenu.Row(cancelBtn))
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		a.activeTasks.Store(c.Chat().ID, cancel)
-		defer func() {
-			a.activeTasks.Delete(c.Chat().ID)
-			cancel()
-		}()
+	var thinkingMsg *tele.Message
+	if replyTo != nil {
+		thinkingMsg, _ = a.bot.Reply(replyTo, "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
+	} else if c.Message() != nil {
+		thinkingMsg, _ = a.bot.Reply(c.Message(), "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
+	} else {
+		thinkingMsg, _ = a.bot.Send(c.Chat(), "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
+	}
 
-		resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{
-			ChannelType:    "telegram",
-			ChannelID:      a.channelID,
-			ChannelName:    a.name,
-			ChatID:         strconv.FormatInt(c.Chat().ID, 10),
-			UserID:         strconv.FormatInt(c.Sender().ID, 10),
-			UserName:       c.Sender().Username,
-			UserPrompt:     caption,
-			AttachedFileMB: fileMB,
-			OnProgress: func(status string) {
-				onProgressStatus(status)
-			},
-			OnStreamChunk: func(chunk provider.StreamChunk) {
-				onStreamChunk(chunk)
-			},
-		})
+	stopUpdater, onProgressStatus, onStreamChunk := createProgressiveThinkingManager(a.bot, thinkingMsg, "🤔 <i>Sedang berpikir...</i>")
+	defer stopUpdater()
 
-		stopUpdater()
+	timeoutSec := config.Get().Timeouts.HandlerSeconds
+	if timeoutSec <= 0 {
+		timeoutSec = 120
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	a.activeTasks.Store(c.Chat().ID, cancel)
+	defer func() {
+		a.activeTasks.Delete(c.Chat().ID)
+		cancel()
+	}()
 
-		if err != nil {
-			if ctx.Err() == context.Canceled {
-				text := "🛑 <b>PROSES DIBATALKAN</b>\n\nRespon AI berhasil dihentikan atas permintaan pengguna."
-				if thinkingMsg != nil {
-					_, _ = a.bot.Edit(thinkingMsg, text, tele.ModeHTML)
-					return nil
-				}
-				return c.Reply(text, tele.ModeHTML)
-			}
+	resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{
+		ChannelType:    "telegram",
+		ChannelID:      a.channelID,
+		ChannelName:    a.name,
+		ChatID:         strconv.FormatInt(c.Chat().ID, 10),
+		UserID:         strconv.FormatInt(c.Sender().ID, 10),
+		UserName:       c.Sender().Username,
+		UserPrompt:     userPrompt,
+		AttachedFileMB: fileMB,
+		OnProgress: func(status string) {
+			onProgressStatus(status)
+		},
+		OnStreamChunk: func(chunk provider.StreamChunk) {
+			onStreamChunk(chunk)
+		},
+	})
 
-			friendlyErr := agent.FormatUserFriendlyError(err)
+	stopUpdater()
+
+	if err != nil {
+		if ctx.Err() == context.Canceled {
+			text := "🛑 <b>PROSES DIBATALKAN</b>\n\nRespon AI berhasil dihentikan atas permintaan pengguna."
 			if thinkingMsg != nil {
-				_, _ = a.bot.Edit(thinkingMsg, friendlyErr, tele.ModeHTML)
+				_, _ = a.bot.Edit(thinkingMsg, text, tele.ModeHTML)
 				return nil
 			}
-			return c.Reply(friendlyErr, tele.ModeHTML)
+			return c.Reply(text, tele.ModeHTML)
 		}
 
-		return sendOrEditResponse(c, thinkingMsg, resp.Text, resp.MediaFiles)
-	})
+		friendlyErr := agent.FormatUserFriendlyError(err)
+		errMenu := &tele.ReplyMarkup{}
+		retryBtn := errMenu.Data("🔄 Coba Lagi", "retry_task")
+		newBtn := errMenu.Data("✨ Reset Sesi", "reset_session")
+		errMenu.Inline(errMenu.Row(retryBtn, newBtn))
+
+		if thinkingMsg != nil {
+			_, _ = a.bot.Edit(thinkingMsg, friendlyErr, tele.ModeHTML, errMenu)
+			return nil
+		}
+		return c.Reply(friendlyErr, tele.ModeHTML, errMenu)
+	}
+
+	return sendOrEditResponse(c, thinkingMsg, resp.Text, resp.MediaFiles)
+}
+
+func (a *BotAdapter) handleRetry(c tele.Context) error {
+	chatID := strconv.FormatInt(c.Chat().ID, 10)
+	userID := strconv.FormatInt(c.Sender().ID, 10)
+	lastPrompt := a.orchestrator.GetLastPrompt(a.channelID, chatID, userID)
+	if strings.TrimSpace(lastPrompt) == "" {
+		text := "⚠️ <b>Tidak ada pesan sebelumnya yang dapat dicoba lagi.</b>\nSilakan kirimkan pertanyaan atau pesan baru Anda."
+		if c.Callback() != nil && c.Message() != nil {
+			_, _ = a.bot.Edit(c.Message(), text, tele.ModeHTML)
+			return nil
+		}
+		return c.Send(text, tele.ModeHTML)
+	}
+
+	return a.executePrompt(c, c.Message(), lastPrompt, 0)
 }
 
 // createProgressiveThinkingManager runs a periodic ticker that updates thinking and streaming text dynamically
@@ -361,18 +354,7 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 				} else if status != "" {
 					text = fmt.Sprintf("%s <i>(%dd)</i>", status, elapsedSec)
 				} else {
-					switch {
-					case elapsedSec < 6:
-						text = fmt.Sprintf("⚡ <i>Masih menganalisis pertanyaan & konteks... (%dd)</i>", elapsedSec)
-					case elapsedSec < 13:
-						text = fmt.Sprintf("🧠 <i>Masih berpikir & merumuskan jawaban... (%dd)</i>", elapsedSec)
-					case elapsedSec < 22:
-						text = fmt.Sprintf("🔍 <i>Sedang memproses instruksi secara mendalam... (%dd)</i>", elapsedSec)
-					case elapsedSec < 35:
-						text = fmt.Sprintf("⏳ <i>Hampir selesai, memvalidasi & merapikan jawaban... (%dd)</i>", elapsedSec)
-					default:
-						text = fmt.Sprintf("🔄 <i>Sedang menyelesaikan proses generasi respon... (%dd)</i>", elapsedSec)
-					}
+					text = fmt.Sprintf("💭 <i>Sedang berpikir... (%dd)</i>", elapsedSec)
 				}
 
 				if text == lastSentText {
@@ -444,6 +426,7 @@ func (a *BotAdapter) handleStatus(c tele.Context) error {
 	}
 	sb.WriteString(fmt.Sprintf("• Mode Penghemat Token: <code>%s</code>\n\n", html.EscapeString(policy.TokenSaverMode)))
 	sb.WriteString("💡 <b>Perintah Konteks:</b>\n")
+	sb.WriteString("• <code>/retry</code> - Coba lagi respon yang gagal atau terhenti\n")
 	sb.WriteString("• <code>/new</code> - Mulai percakapan baru & bersihkan konteks\n")
 	sb.WriteString("• <code>/stop</code> - Hentikan generasi jawaban yang sedang berjalan")
 
@@ -454,6 +437,7 @@ func (a *BotAdapter) handleHelp(c tele.Context) error {
 	text := "👋 <b>HALO! SAYA ASISTEN AI GOASSISTANT</b>\n\n" +
 		"Silakan kirimkan pertanyaan atau permintaan Anda langsung di chat ini.\n\n" +
 		"📌 <b>Daftar Perintah:</b>\n" +
+		"• <code>/retry</code> - Coba lagi permintaan atau pesan terakhir\n" +
 		"• <code>/new</code> - Mulai sesi baru & reset riwayat percakapan\n" +
 		"• <code>/stop</code> - Batalkan atau hentikan proses respon AI\n" +
 		"• <code>/status</code> - Cek status percakapan dan konfigurasi sesi\n" +

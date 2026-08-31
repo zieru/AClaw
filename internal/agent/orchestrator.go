@@ -81,9 +81,22 @@ type AgentResponse struct {
 	ModelUsed        string
 }
 
+// GetLastPrompt retrieves the last user prompt from session manager
+func (o *Orchestrator) GetLastPrompt(channelID, chatID, userID string) string {
+	if o.sessionManager != nil {
+		return o.sessionManager.GetLastPrompt(channelID, chatID, userID)
+	}
+	return ""
+}
+
 // ProcessMessage handles the complete pipeline of governance, context building, tool execution, and logging
 func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*AgentResponse, error) {
 	start := time.Now()
+
+	// Track last user prompt for quick retry
+	if o.sessionManager != nil && strings.TrimSpace(req.UserPrompt) != "" {
+		o.sessionManager.SetLastPrompt(req.ChannelID, req.ChatID, req.UserID, req.UserPrompt)
+	}
 
 	// Enrich context with request metadata for tools
 	if req.UserID != "" {
@@ -321,6 +334,20 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 				retryCtx, cancelRetry := context.WithTimeout(context.Background(),
 					time.Duration(config.Get().Timeouts.RetrySeconds)*time.Second)
 				resp, err = o.providerManager.GenerateWithFallback(retryCtx, req.PreferredProv, retryChatReq)
+				cancelRetry()
+			} else if ctx.Err() == nil {
+				// Auto-retry once for transient provider/network glitches before failing
+				if req.OnProgress != nil {
+					req.OnProgress("🔄 <i>Kendala koneksi/server sementara, mencoba ulang otomatis...</i>")
+				}
+				select {
+				case <-time.After(1200 * time.Millisecond):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				retryCtx, cancelRetry := context.WithTimeout(context.Background(),
+					time.Duration(config.Get().Timeouts.RetrySeconds)*time.Second)
+				resp, err = o.providerManager.GenerateWithFallback(retryCtx, req.PreferredProv, chatReq)
 				cancelRetry()
 			}
 
@@ -704,16 +731,16 @@ func FormatUserFriendlyError(err error) string {
 	case strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "canceled"):
 		return "🛑 **Proses Dibatalkan**\nEksekusi permintaan atau proses telah dihentikan oleh pengguna."
 	case strings.Contains(errStr, "context deadline exceeded") || strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline"):
-		return "⏳ **Waktu Tunggu Habis (Timeout)**\nServer AI membutuhkan waktu terlalu lama untuk memproses (beban server tinggi atau konteks terlalu panjang). Riwayat percakapan telah disederhanakan secara otomatis. Silakan coba kirim ulang pertanyaan Anda, atau gunakan `/reset` jika kendala berlanjut."
+		return "⏳ **Waktu Tunggu Habis (Timeout)**\nServer AI membutuhkan waktu terlalu lama untuk memproses (beban server tinggi atau konteks terlalu panjang). Riwayat percakapan telah disederhanakan secara otomatis. Silakan coba kirim ulang pertanyaan Anda (gunakan `/retry`), atau gunakan `/reset` jika kendala berlanjut."
 	case strings.Contains(errStr, "context_length_exceeded") || strings.Contains(errStr, "maximum context length") || strings.Contains(errStr, "token limit"):
-		return "📏 **Batas Konteks Terlampaui**\nRiwayat percakapan melebihi kapasitas memori model AI. Riwayat telah dibersihkan otomatis. Silakan kirim ulang pertanyaan Anda."
+		return "📏 **Batas Konteks Terlampaui**\nRiwayat percakapan melebihi kapasitas memori model AI. Riwayat telah dibersihkan otomatis. Silakan kirim ulang pertanyaan Anda atau gunakan `/retry`."
 	case strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "429") || strings.Contains(errStr, "quota"):
-		return "⚠️ **Batas Kuota / Rate Limit**\nLayanan AI sedang mencapai batas frekuensi panggilan atau kuota provider telah habis. Silakan coba beberapa saat lagi atau hubungi admin."
+		return "⚠️ **Batas Kuota / Rate Limit**\nLayanan AI sedang mencapai batas frekuensi panggilan atau kuota provider telah habis. Silakan coba beberapa saat lagi dengan `/retry` atau hubungi admin."
 	case strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no such host") || strings.Contains(errStr, "dial tcp"):
-		return "🔌 **Koneksi Terputus**\nGagal terhubung ke endpoint server AI. Mohon periksa koneksi jaringan atau coba beberapa saat lagi."
+		return "🔌 **Koneksi Terputus**\nGagal terhubung ke endpoint server AI. Mohon periksa koneksi jaringan atau coba beberapa saat lagi dengan `/retry`."
 	case strings.Contains(errStr, "seluruh target gagal"):
-		return "❌ **Layanan AI Sedang Gangguan**\nTarget provider/model AI saat ini tidak dapat merespons. Silakan coba lagi nanti atau hubungi admin."
+		return "❌ **Layanan AI Sedang Gangguan**\nTarget provider/model AI saat ini tidak dapat merespons. Silakan coba lagi dengan `/retry` atau hubungi admin."
 	default:
-		return "❌ **Maaf, terjadi kendala teknis pada layanan AI.**\nSilakan coba lagi beberapa saat lagi atau gunakan `/reset` untuk memulai percakapan baru."
+		return "❌ **Maaf, terjadi kendala teknis pada layanan AI.**\nSilakan coba lagi beberapa saat lagi (bisa gunakan `/retry`) atau gunakan `/reset` untuk memulai percakapan baru."
 	}
 }
