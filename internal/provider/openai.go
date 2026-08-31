@@ -144,12 +144,16 @@ type openAIRespBody struct {
 			Role             string           `json:"role"`
 			Content          string           `json:"content"`
 			ReasoningContent string           `json:"reasoning_content,omitempty"`
+			Reasoning        string           `json:"reasoning,omitempty"`
+			Thought          string           `json:"thought,omitempty"`
 			ToolCalls        []openAIToolCall `json:"tool_calls"`
 		} `json:"message"`
 		Delta struct {
 			Role             string           `json:"role"`
 			Content          string           `json:"content"`
 			ReasoningContent string           `json:"reasoning_content,omitempty"`
+			Reasoning        string           `json:"reasoning,omitempty"`
+			Thought          string           `json:"thought,omitempty"`
 			ToolCalls        []openAIToolCall `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
@@ -655,10 +659,18 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 						}
 					}
 
-					if delta.ReasoningContent != "" {
-						thinkingBuilder.WriteString(delta.ReasoningContent)
+					thinkText := delta.ReasoningContent
+					if thinkText == "" {
+						thinkText = delta.Reasoning
+					}
+					if thinkText == "" {
+						thinkText = delta.Thought
+					}
+
+					if thinkText != "" {
+						thinkingBuilder.WriteString(thinkText)
 						if req.StreamCallback != nil {
-							req.StreamCallback(StreamChunk{Thinking: delta.ReasoningContent})
+							req.StreamCallback(StreamChunk{Thinking: thinkText})
 						}
 					}
 

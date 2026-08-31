@@ -310,7 +310,7 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 			targetReq.Model = target.Model
 
 			targetStart := time.Now()
-			resp, err := p.GenerateChat(ctx, targetReq)
+			resp, err := executeProviderCall(ctx, p, targetReq)
 			if err == nil && resp != nil {
 				resp.Tries = idx + 1
 				if idx > 0 {
@@ -397,7 +397,7 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 		}
 
 		pStart := time.Now()
-		resp, err := p.GenerateChat(ctx, req)
+		resp, err := executeProviderCall(ctx, p, req)
 		if err == nil && resp != nil {
 			resp.Tries = idx + 1
 			if idx > 0 {
@@ -414,4 +414,13 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 		return nil, fmt.Errorf("provider AI gagal dieksekusi (%d/%d): %s", len(executionErrors), len(executionList), strings.Join(executionErrors, " | "))
 	}
 	return nil, fmt.Errorf("semua provider AI gagal dieksekusi")
+}
+
+func executeProviderCall(ctx context.Context, p Provider, req ChatRequest) (*ChatResponse, error) {
+	if req.Stream && req.StreamCallback != nil {
+		if sp, ok := p.(StreamingProvider); ok {
+			return sp.GenerateChatStream(ctx, req)
+		}
+	}
+	return p.GenerateChat(ctx, req)
 }
