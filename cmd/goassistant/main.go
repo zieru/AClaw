@@ -84,10 +84,40 @@ func main() {
 	promptBld := agent.NewPromptBuilder(mdLoader)
 
 	// Initialize Proxy Pool (Built-in 9Router Engine)
-	proxyPool := proxy.NewPool(db, cfg.ProxyPool.Enabled, cfg.ProxyPool.Strategy)
+	initialPoolEnabled := cfg.ProxyPool.Enabled
+	if globPol, err := db.GetPolicy("global", "system"); err == nil && globPol != nil {
+		initialPoolEnabled = globPol.ProxyPoolEnabled
+	}
+	proxyPool := proxy.NewPool(db, initialPoolEnabled, cfg.ProxyPool.Strategy)
 	for _, rawProxy := range cfg.ProxyPool.InitialProxies {
 		_, _ = proxyPool.AddNode(rawProxy, "")
 	}
+
+	// Initialize Webshare.io Proxy Pool Provider if configured
+	if cfg.Webshare.APIKey != "" {
+		wsClient := proxy.NewWebshareClient(cfg.Webshare.APIKey)
+		group := cfg.Webshare.GroupName
+		if group == "" {
+			group = "webshare"
+		}
+		if cfg.Webshare.AutoSync {
+			interval := time.Duration(cfg.Webshare.SyncIntervalMinutes) * time.Minute
+			wsClient.StartAutoSync(context.Background(), proxyPool, interval, group, cfg.Webshare.Protocol, cfg.Webshare.Mode, cfg.Webshare.Countries)
+			log.Printf("🌐 [Webshare.io] Background auto-sync proxy pool diaktifkan (Setiap %v, Group: '%s')", interval, group)
+		} else {
+			// One-time initial sync in background on startup
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+				defer cancel()
+				if count, err := wsClient.SyncToPool(ctx, proxyPool, group, cfg.Webshare.Protocol, cfg.Webshare.Mode, cfg.Webshare.Countries, false); err != nil {
+					log.Printf("⚠️ [Webshare.io] Gagal sinkronisasi awal proxy pool: %v", err)
+				} else {
+					log.Printf("🌐 [Webshare.io] Sinkronisasi awal berhasil: %d proxy diimpor ke group '%s'", count, group)
+				}
+			}()
+		}
+	}
+
 	provMgr.SetDefaultHTTPClient(proxyPool.NewHTTPClient(
 		time.Duration(config.Get().Timeouts.APICallSeconds) * time.Second))
 	log.Printf("🌐 9Router Proxy Pool diinisialisasi (Strategi: %s, Status: %v)", cfg.ProxyPool.Strategy, cfg.ProxyPool.Enabled)

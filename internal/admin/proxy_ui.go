@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"goassistant/internal/config"
 	"goassistant/internal/proxy"
 	"goassistant/internal/storage"
 
@@ -47,6 +48,8 @@ func (h *ProxyUIHandler) HandleListProxies(c tele.Context) error {
 	if len(nodes) == 0 {
 		sb.WriteString("<i>Belum ada proxy upstream terdaftar. Koneksi menggunakan direct internet.</i>\n\n")
 		sb.WriteString("💡 <b>Perintah Manajemen Proxy:</b>\n")
+		sb.WriteString("• <code>/syncwebshare [api_token]</code> - Tarik proxy otomatis dari Webshare.io API\n")
+		sb.WriteString("• <code>/webshare</code> - Lihat profil & kuota akun Webshare.io\n")
 		sb.WriteString("• <code>/addproxies &lt;group&gt; &lt;paste 50+ proxies...&gt;</code> - Impor batch proxy massal\n")
 		sb.WriteString("• <code>/addproxy &lt;url&gt; [group] [label]</code> - Tambah 1 proxy\n")
 		sb.WriteString("• <code>/proxygroups</code> - Lihat & kelola group proxy\n")
@@ -370,6 +373,13 @@ func (h *ProxyUIHandler) HandleToggleProxy(c tele.Context) error {
 	newState := !h.proxyPool.IsEnabled()
 	h.proxyPool.SetEnabled(newState)
 
+	if h.db != nil {
+		if pol, err := h.db.GetPolicy("global", "system"); err == nil && pol != nil {
+			pol.ProxyPoolEnabled = newState
+			_ = h.db.SavePolicy(pol)
+		}
+	}
+
 	stateStr := "diaktifkan 🟢"
 	if !newState {
 		stateStr = "dinonaktifkan 🔴 (Direct Connection)"
@@ -395,15 +405,134 @@ func (h *ProxyUIHandler) HandleSetStrategy(c tele.Context) error {
 	}
 }
 
+// HandleSyncWebshare synchronizes proxies directly from Webshare.io API
+func (h *ProxyUIHandler) HandleSyncWebshare(c tele.Context) error {
+	args := c.Args()
+	cfg := config.Get()
+
+	apiKey := ""
+	group := "webshare"
+	mode := "direct"
+	protocol := "http"
+	var countries []string
+
+	if cfg != nil {
+		if cfg.Webshare.APIKey != "" {
+			apiKey = cfg.Webshare.APIKey
+		}
+		if cfg.Webshare.GroupName != "" {
+			group = cfg.Webshare.GroupName
+		}
+		if cfg.Webshare.Mode != "" {
+			mode = cfg.Webshare.Mode
+		}
+		if cfg.Webshare.Protocol != "" {
+			protocol = cfg.Webshare.Protocol
+		}
+		countries = cfg.Webshare.Countries
+	}
+
+	// Override from arguments if provided: /syncwebshare [api_key] [group_name] [mode]
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		apiKey = strings.TrimSpace(args[0])
+	}
+	if len(args) > 1 && strings.TrimSpace(args[1]) != "" {
+		group = strings.TrimSpace(args[1])
+	}
+	if len(args) > 2 && strings.TrimSpace(args[2]) != "" {
+		mode = strings.ToLower(strings.TrimSpace(args[2]))
+	}
+
+	if apiKey == "" {
+		text := "⚠️ <b>API Token Webshare.io belum ditemukan!</b>\n\n" +
+			"Gunakan salah satu cara berikut:\n" +
+			"1. Jalankan dengan token langsung:\n" +
+			"   <code>/syncwebshare &lt;your_webshare_api_token&gt; [group_name] [mode]</code>\n\n" +
+			"2. Masukkan token di <code>configs/default_config.yaml</code> pada section <code>webshare.api_key</code>\n" +
+			"3. Atau set environment variable <code>WEBSHARE_API_KEY</code>\n\n" +
+			"💡 <i>Dapatkan API Token Webshare Anda di https://dashboard.webshare.io/user/token</i>"
+		return c.Reply(text, tele.ModeHTML)
+	}
+
+	_ = c.Reply("🔄 <i>Menghubungi Webshare.io API (https://apidocs.webshare.io/)...</i>", tele.ModeHTML)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	wsClient := proxy.NewWebshareClient(apiKey)
+	count, err := wsClient.SyncToPool(ctx, h.proxyPool, group, protocol, mode, countries, true)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal sinkronisasi proxy dari Webshare: %v", html.EscapeString(err.Error())), tele.ModeHTML)
+	}
+
+	sb := strings.Builder{}
+	sb.WriteString("✅ <b>SINKRONISASI WEBSHARE BERHASIL!</b> 🌐\n\n")
+	sb.WriteString(fmt.Sprintf("• Total Proxy Diimpor: <b>%d node</b>\n", count))
+	sb.WriteString(fmt.Sprintf("• Group Target: <code>%s</code>\n", html.EscapeString(group)))
+	sb.WriteString(fmt.Sprintf("• Mode: <code>%s</code> | Protokol: <code>%s</code>\n\n", mode, strings.ToUpper(protocol)))
+	sb.WriteString(fmt.Sprintf("💡 <i>Ketik <code>/testgroup %s</code> untuk memeriksa latensi koneksi proxy Webshare.</i>\n", html.EscapeString(group)))
+	sb.WriteString(fmt.Sprintf("💡 <i>Ketik <code>/setproviderproxy &lt;provider_id&gt; %s</code> untuk menghubungkan ke model AI.</i>", html.EscapeString(group)))
+
+	return c.Reply(sb.String(), h.ProxyMenuKeyboard(), tele.ModeHTML)
+}
+
+// HandleWebshareInfo displays account and subscription details from Webshare.io
+func (h *ProxyUIHandler) HandleWebshareInfo(c tele.Context) error {
+	cfg := config.Get()
+	apiKey := ""
+	if cfg != nil && cfg.Webshare.APIKey != "" {
+		apiKey = cfg.Webshare.APIKey
+	}
+	if len(c.Args()) > 0 {
+		apiKey = strings.TrimSpace(c.Args()[0])
+	}
+
+	if apiKey == "" {
+		return c.Reply("⚠️ API Token Webshare belum diset. Gunakan <code>/webshare &lt;api_token&gt;</code> atau set di config.", tele.ModeHTML)
+	}
+
+	_ = c.Reply("🔄 <i>Mengambil data akun dari Webshare.io API...</i>", tele.ModeHTML)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	wsClient := proxy.NewWebshareClient(apiKey)
+	prof, err := wsClient.GetProfile(ctx)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal mengambil profil Webshare: %v", html.EscapeString(err.Error())), tele.ModeHTML)
+	}
+
+	group := "webshare"
+	if cfg != nil && cfg.Webshare.GroupName != "" {
+		group = cfg.Webshare.GroupName
+	}
+	activeNodes := h.proxyPool.ListNodesByGroup(group)
+
+	sb := strings.Builder{}
+	sb.WriteString("🌐 <b>INFORMASI AKUN WEBSHARE.IO</b>\n\n")
+	sb.WriteString(fmt.Sprintf("• Email Akun: <code>%s</code>\n", html.EscapeString(prof.Email)))
+	sb.WriteString(fmt.Sprintf("• Status Berlangganan: <b>%s</b>\n", map[bool]string{true: "🟢 Aktif", false: "⚪ Free / Inactive"}[prof.Subscribed]))
+	sb.WriteString(fmt.Sprintf("• Total Kuota Proxy: <b>%d proxy</b>\n", prof.ProxyCount))
+	sb.WriteString(fmt.Sprintf("• Node di Database GoAssistant: <b>%d terdaftar</b> (Group: <code>%s</code>)\n\n", len(activeNodes), html.EscapeString(group)))
+	sb.WriteString("💡 <b>Aksi Cepat:</b>\n")
+	sb.WriteString(fmt.Sprintf("• Sinkronisasi Ulang: <code>/syncwebshare</code>\n"))
+	sb.WriteString(fmt.Sprintf("• Uji Koneksi: <code>/testgroup %s</code>\n", html.EscapeString(group)))
+
+	return c.Reply(sb.String(), h.ProxyMenuKeyboard(), tele.ModeHTML)
+}
+
 func (h *ProxyUIHandler) ProxyMenuKeyboard() *tele.ReplyMarkup {
 	menu := &tele.ReplyMarkup{}
 	btnTest := menu.Data("⚡ Test Semua Proxy", "btn_test_proxies")
 	btnGroups := menu.Data("📁 Kelola Group Proxy", "btn_proxy_groups")
+	btnSyncWS := menu.Data("🌐 Sync Webshare.io", "btn_sync_webshare")
+	btnWSInfo := menu.Data("ℹ️ Akun Webshare", "btn_webshare_info")
 	btnToggle := menu.Data("🔘 Toggle Proxy Pool", "btn_toggle_proxy")
 	btnBack := menu.Data("⬅️ Kembali ke Menu Utama", "menu_main")
 
 	menu.Inline(
 		menu.Row(btnTest, btnGroups),
+		menu.Row(btnSyncWS, btnWSInfo),
 		menu.Row(btnToggle, btnBack),
 	)
 	return menu

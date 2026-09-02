@@ -189,6 +189,9 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle("/proxy", a.proxyUI.HandleListProxies)
 	a.bot.Handle("/proxygroups", a.proxyUI.HandleListGroups)
 	a.bot.Handle("/groups", a.proxyUI.HandleListGroups)
+	a.bot.Handle("/syncwebshare", a.proxyUI.HandleSyncWebshare)
+	a.bot.Handle("/websharesync", a.proxyUI.HandleSyncWebshare)
+	a.bot.Handle("/webshare", a.proxyUI.HandleWebshareInfo)
 	a.bot.Handle("/addproxies", a.proxyUI.HandleAddProxies)
 	a.bot.Handle("/addproxy", a.proxyUI.HandleAddProxy)
 	a.bot.Handle("/delproxy", a.proxyUI.HandleDeleteProxy)
@@ -201,6 +204,8 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle("/proxystrategy", a.proxyUI.HandleSetStrategy)
 	a.bot.Handle(&tele.Btn{Unique: "btn_test_proxies"}, a.proxyUI.HandleTestProxies)
 	a.bot.Handle(&tele.Btn{Unique: "btn_proxy_groups"}, a.proxyUI.HandleListGroups)
+	a.bot.Handle(&tele.Btn{Unique: "btn_sync_webshare"}, a.proxyUI.HandleSyncWebshare)
+	a.bot.Handle(&tele.Btn{Unique: "btn_webshare_info"}, a.proxyUI.HandleWebshareInfo)
 	a.bot.Handle(&tele.Btn{Unique: "btn_toggle_proxy"}, a.proxyUI.HandleToggleProxy)
 
 	// Token Saver Commands & Callbacks

@@ -83,6 +83,16 @@ type AppConfig struct {
 		SearchDepth string `yaml:"search_depth"`
 		MaxResults  int    `yaml:"max_results"`
 	} `yaml:"tavily"`
+
+	Webshare struct {
+		APIKey              string   `yaml:"api_key"`
+		Mode                string   `yaml:"mode"` // direct or backbone
+		Protocol            string   `yaml:"protocol"` // http or socks5
+		Countries           []string `yaml:"countries"`
+		AutoSync            bool     `yaml:"auto_sync"`
+		SyncIntervalMinutes int      `yaml:"sync_interval_minutes"`
+		GroupName           string   `yaml:"group_name"`
+	} `yaml:"webshare"`
 }
 
 var (
@@ -139,6 +149,12 @@ func Load(configPath string) (*AppConfig, error) {
 		cfg.Tavily.SearchDepth = "basic"
 		cfg.Tavily.MaxResults = 5
 
+		cfg.Webshare.Mode = "direct"
+		cfg.Webshare.Protocol = "http"
+		cfg.Webshare.GroupName = "webshare"
+		cfg.Webshare.SyncIntervalMinutes = 60
+		cfg.Webshare.AutoSync = false
+
 		if configPath != "" {
 			if _, statErr := os.Stat(configPath); statErr != nil {
 				err = fmt.Errorf("file config %s tidak ditemukan: %w", configPath, statErr)
@@ -157,6 +173,9 @@ func Load(configPath string) (*AppConfig, error) {
 
 		if envTavily := os.Getenv("TAVILY_API_KEY"); envTavily != "" {
 			cfg.Tavily.APIKey = envTavily
+		}
+		if envWebshare := os.Getenv("WEBSHARE_API_KEY"); envWebshare != "" {
+			cfg.Webshare.APIKey = envWebshare
 		}
 
 		// Ensure directories exist

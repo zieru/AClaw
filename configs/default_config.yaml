@@ -63,3 +63,14 @@ tavily:
   api_key: ""                 # Masukkan API Key Tavily (tvly-...) atau set via env TAVILY_API_KEY
   search_depth: "basic"       # basic atau advanced
   max_results: 5              # Jumlah hasil pencarian maksimal
+
+# Webshare.io Proxy Pool Provider (https://apidocs.webshare.io/)
+webshare:
+  api_key: ""                 # Masukkan API Token Webshare (atau set env WEBSHARE_API_KEY)
+  mode: "direct"              # "direct" atau "backbone" (backbone untuk rotating/residential)
+  protocol: "http"            # "http" atau "socks5"
+  countries: []               # Filter negara, contoh: ["US", "SG"] atau kosongkan untuk semua
+  auto_sync: false            # Otomatis sinkronisasi proxy saat daemon berjalan
+  sync_interval_minutes: 60   # Interval pembaruan otomatis (menit)
+  group_name: "webshare"      # Nama grup proxy di database
+
