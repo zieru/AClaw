@@ -16,6 +16,7 @@ import (
 	"goassistant/internal/provider"
 	"goassistant/internal/storage"
 	"goassistant/internal/tgformat"
+	"goassistant/internal/tools"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -66,6 +67,7 @@ func (a *BotAdapter) Start(ctx context.Context) error {
 		{Text: "new", Description: "Mulai sesi percakapan baru (reset konteks)"},
 		{Text: "reset", Description: "Reset riwayat percakapan"},
 		{Text: "stop", Description: "Hentikan respon AI yang sedang diproses"},
+		{Text: "clearsudo", Description: "Hapus sesi password sudo dari memori"},
 		{Text: "status", Description: "Cek status bot & sesi percakapan"},
 		{Text: "help", Description: "Bantuan & panduan penggunaan bot"},
 	}
@@ -98,6 +100,7 @@ func (a *BotAdapter) registerHandlers() {
 	a.bot.Handle("/new", a.handleNew)
 	a.bot.Handle("/reset", a.handleNew)
 	a.bot.Handle("/clear", a.handleNew)
+	a.bot.Handle("/clearsudo", a.handleClearSudo)
 	a.bot.Handle("/retry", a.handleRetry)
 	a.bot.Handle("/stop", a.handleStop)
 	a.bot.Handle("/cancel", a.handleStop)
@@ -386,10 +389,19 @@ func (a *BotAdapter) handleNew(c tele.Context) error {
 		_ = a.db.ClearSessionMessages(session.ID)
 	}
 
+	tools.ClearSudoSession(strconv.FormatInt(c.Chat().ID, 10))
+	tools.ClearSudoSession(strconv.FormatInt(c.Sender().ID, 10))
+
 	text := "✨ <b>SESI BARU DIMULAI</b>\n\n" +
 		"Konteks percakapan dan riwayat pesan Anda telah direset.\n" +
 		"Silakan ajukan pertanyaan atau perintah baru!"
 	return c.Send(text, tele.ModeHTML)
+}
+
+func (a *BotAdapter) handleClearSudo(c tele.Context) error {
+	tools.ClearSudoSession(strconv.FormatInt(c.Chat().ID, 10))
+	tools.ClearSudoSession(strconv.FormatInt(c.Sender().ID, 10))
+	return c.Send("🔒 <b>Sesi Sudo Dibersihkan</b>\n\nPassword sudo yang tersimpan di memori telah dihapus.", tele.ModeHTML)
 }
 
 func (a *BotAdapter) handleStop(c tele.Context) error {
