@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -18,18 +19,16 @@ func TestBuildGeminiContents(t *testing.T) {
 			Role: RoleAssistant,
 			ToolCalls: []ToolCall{
 				{
-					ID:   "call_1",
-					Name: "get_weather",
-					Arguments: map[string]interface{}{
-						"location": "Jakarta",
-					},
+					ID:               "call_1",
+					Name:             "get_weather",
+					Arguments:        map[string]interface{}{"location": "Jakarta"},
+					ThoughtSignature: "real_sig_12345",
 				},
 				{
-					ID:   "call_2",
-					Name: "get_time",
-					Arguments: map[string]interface{}{
-						"timezone": "WIB",
-					},
+					ID:        "call_2",
+					Name:      "get_time",
+					Arguments: map[string]interface{}{"timezone": "WIB"},
+					// ThoughtSignature intentionally empty to test fallback
 				},
 			},
 		},
@@ -74,6 +73,16 @@ func TestBuildGeminiContents(t *testing.T) {
 		t.Errorf("turn 1 parts: expected 2 functionCall parts, got %d", len(contents[1].Parts))
 	}
 
+	// Verify ThoughtSignature preservation on Turn 1 Part 0
+	if contents[1].Parts[0].ThoughtSignature != "real_sig_12345" {
+		t.Errorf("turn 1 part 0: expected real_sig_12345, got '%s'", contents[1].Parts[0].ThoughtSignature)
+	}
+
+	// Verify ThoughtSignature fallback on Turn 1 Part 1
+	if contents[1].Parts[1].ThoughtSignature != "skip_thought_signature_validator" {
+		t.Errorf("turn 1 part 1: expected skip_thought_signature_validator fallback, got '%s'", contents[1].Parts[1].ThoughtSignature)
+	}
+
 	// Crucial test: Turn 2 must be role "user", NEVER "function"
 	if contents[2].Role != "user" {
 		t.Errorf("turn 2 role: expected 'user', got '%s'", contents[2].Role)
@@ -112,5 +121,27 @@ func TestBuildGeminiContents(t *testing.T) {
 	}
 	if part2.FunctionResponse.Response["output"] != "21:00 WIB" {
 		t.Errorf("part 2 response: expected output '21:00 WIB', got %v", part2.FunctionResponse.Response)
+	}
+}
+
+func TestGeminiPartThoughtSignatureUnmarshal(t *testing.T) {
+	// Test snake_case thought_signature
+	jsonSnake := `{"functionCall":{"name":"bash_exec","args":{}},"thought_signature":"sig_snake_123"}`
+	var pSnake geminiPart
+	if err := json.Unmarshal([]byte(jsonSnake), &pSnake); err != nil {
+		t.Fatalf("failed to unmarshal snake_case: %v", err)
+	}
+	if pSnake.ThoughtSignature != "sig_snake_123" {
+		t.Errorf("expected sig_snake_123, got '%s'", pSnake.ThoughtSignature)
+	}
+
+	// Test camelCase thoughtSignature
+	jsonCamel := `{"functionCall":{"name":"bash_exec","args":{}},"thoughtSignature":"sig_camel_456"}`
+	var pCamel geminiPart
+	if err := json.Unmarshal([]byte(jsonCamel), &pCamel); err != nil {
+		t.Fatalf("failed to unmarshal camelCase: %v", err)
+	}
+	if pCamel.ThoughtSignature != "sig_camel_456" {
+		t.Errorf("expected sig_camel_456, got '%s'", pCamel.ThoughtSignature)
 	}
 }

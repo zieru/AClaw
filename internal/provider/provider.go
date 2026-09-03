@@ -32,9 +32,10 @@ const (
 
 // ToolCall represents a function call request by the model
 type ToolCall struct {
-	ID        string                 `json:"id"`
-	Name      string                 `json:"name"`
-	Arguments map[string]interface{} `json:"arguments"`
+	ID               string                 `json:"id"`
+	Name             string                 `json:"name"`
+	Arguments        map[string]interface{} `json:"arguments"`
+	ThoughtSignature string                 `json:"thought_signature,omitempty"`
 }
 
 // ChatMessage represents a single message in the LLM conversation

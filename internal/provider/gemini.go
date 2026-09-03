@@ -59,10 +59,28 @@ func (p *GeminiProvider) SetHTTPClient(client interface{}) {
 }
 
 type geminiPart struct {
-	Text             string                 `json:"text,omitempty"`
-	Thought          string                 `json:"thought,omitempty"`
-	FunctionCall     *geminiFunctionCall    `json:"functionCall,omitempty"`
-	FunctionResponse *geminiFunctionResp    `json:"functionResponse,omitempty"`
+	Text             string              `json:"text,omitempty"`
+	Thought          string              `json:"thought,omitempty"`
+	FunctionCall     *geminiFunctionCall `json:"functionCall,omitempty"`
+	FunctionResponse *geminiFunctionResp `json:"functionResponse,omitempty"`
+	ThoughtSignature string              `json:"thought_signature,omitempty"`
+}
+
+func (p *geminiPart) UnmarshalJSON(data []byte) error {
+	type Alias geminiPart
+	aux := struct {
+		*Alias
+		CamelThoughtSig string `json:"thoughtSignature"`
+	}{
+		Alias: (*Alias)(p),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if p.ThoughtSignature == "" && aux.CamelThoughtSig != "" {
+		p.ThoughtSignature = aux.CamelThoughtSig
+	}
+	return nil
 }
 
 type geminiFunctionCall struct {
@@ -298,9 +316,10 @@ func (p *GeminiProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		}
 		if part.FunctionCall != nil {
 			toolCalls = append(toolCalls, ToolCall{
-				ID:        fmt.Sprintf("call_%d_%d", time.Now().Unix(), i),
-				Name:      part.FunctionCall.Name,
-				Arguments: part.FunctionCall.Args,
+				ID:               fmt.Sprintf("call_%d_%d", time.Now().Unix(), i),
+				Name:             part.FunctionCall.Name,
+				Arguments:        part.FunctionCall.Args,
+				ThoughtSignature: part.ThoughtSignature,
 			})
 		}
 	}
@@ -519,9 +538,10 @@ func (p *GeminiProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 						}
 						if part.FunctionCall != nil {
 							toolCalls = append(toolCalls, ToolCall{
-								ID:   fmt.Sprintf("call_%d_%d", time.Now().Unix(), len(toolCalls)),
-								Name: part.FunctionCall.Name,
-								Arguments: part.FunctionCall.Args,
+								ID:               fmt.Sprintf("call_%d_%d", time.Now().Unix(), len(toolCalls)),
+								Name:             part.FunctionCall.Name,
+								Arguments:        part.FunctionCall.Args,
+								ThoughtSignature: part.ThoughtSignature,
 							})
 						}
 					}
@@ -606,11 +626,16 @@ func buildGeminiContents(messages []ChatMessage) ([]geminiContent, *geminiConten
 				parts = append(parts, geminiPart{Text: m.Content})
 			}
 			for _, tc := range m.ToolCalls {
+				sig := tc.ThoughtSignature
+				if sig == "" {
+					sig = "skip_thought_signature_validator"
+				}
 				parts = append(parts, geminiPart{
 					FunctionCall: &geminiFunctionCall{
 						Name: tc.Name,
 						Args: tc.Arguments,
 					},
+					ThoughtSignature: sig,
 				})
 			}
 		}
