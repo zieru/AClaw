@@ -137,68 +137,8 @@ func (p *GeminiProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		model = p.defaultModel
 	}
 
-	var contents []geminiContent
-	var systemContent *geminiContent
-
-	for _, m := range req.Messages {
-		if m.Role == RoleSystem {
-			systemContent = &geminiContent{
-				Parts: []geminiPart{{Text: m.Content}},
-			}
-			continue
-		}
-
-		role := "user"
-		if m.Role == RoleAssistant {
-			role = "model"
-		}
-
-		var parts []geminiPart
-		if m.Content != "" {
-			parts = append(parts, geminiPart{Text: m.Content})
-		}
-
-		for _, tc := range m.ToolCalls {
-			parts = append(parts, geminiPart{
-				FunctionCall: &geminiFunctionCall{
-					Name: tc.Name,
-					Args: tc.Arguments,
-				},
-			})
-		}
-
-		if m.Role == RoleTool {
-			role = "function"
-			parts = append(parts, geminiPart{
-				FunctionResponse: &geminiFunctionResp{
-					Name: m.Name,
-					Response: map[string]interface{}{
-						"output": m.Content,
-					},
-				},
-			})
-		}
-
-		if len(parts) > 0 {
-			contents = append(contents, geminiContent{
-				Role:  role,
-				Parts: parts,
-			})
-		}
-	}
-
-	var toolsList []geminiTool
-	if len(req.Tools) > 0 {
-		var decls []geminiFunctionDeclaration
-		for _, t := range req.Tools {
-			decls = append(decls, geminiFunctionDeclaration{
-				Name:        t.Name(),
-				Description: t.Description(),
-				Parameters:  t.Parameters(),
-			})
-		}
-		toolsList = append(toolsList, geminiTool{FunctionDeclarations: decls})
-	}
+	contents, systemContent := buildGeminiContents(req.Messages)
+	toolsList := buildGeminiTools(req.Tools)
 
 	payload := geminiReqBody{
 		Contents:          contents,
@@ -405,46 +345,8 @@ func (p *GeminiProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		model = p.defaultModel
 	}
 
-	var contents []geminiContent
-	var systemContent *geminiContent
-
-	for _, m := range req.Messages {
-		if m.Role == RoleSystem {
-			systemContent = &geminiContent{Parts: []geminiPart{{Text: m.Content}}}
-			continue
-		}
-		role := "user"
-		if m.Role == RoleAssistant {
-			role = "model"
-		}
-		var parts []geminiPart
-		if m.Content != "" {
-			parts = append(parts, geminiPart{Text: m.Content})
-		}
-		for _, tc := range m.ToolCalls {
-			parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{Name: tc.Name, Args: tc.Arguments}})
-		}
-		if m.Role == RoleTool {
-			role = "function"
-			parts = append(parts, geminiPart{FunctionResponse: &geminiFunctionResp{
-				Name: m.Name, Response: map[string]interface{}{"output": m.Content},
-			}})
-		}
-		if len(parts) > 0 {
-			contents = append(contents, geminiContent{Role: role, Parts: parts})
-		}
-	}
-
-	var toolsList []geminiTool
-	if len(req.Tools) > 0 {
-		var decls []geminiFunctionDeclaration
-		for _, t := range req.Tools {
-			decls = append(decls, geminiFunctionDeclaration{
-				Name: t.Name(), Description: t.Description(), Parameters: t.Parameters(),
-			})
-		}
-		toolsList = append(toolsList, geminiTool{FunctionDeclarations: decls})
-	}
+	contents, systemContent := buildGeminiContents(req.Messages)
+	toolsList := buildGeminiTools(req.Tools)
 
 	payload := geminiReqBody{Contents: contents, Tools: toolsList, SystemInstruction: systemContent}
 	if req.Temperature > 0 || req.MaxTokens > 0 || req.ThinkingEnabled {
@@ -665,3 +567,92 @@ func (p *GeminiProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 
 // Ensure GeminiProvider implements StreamingProvider
 var _ StreamingProvider = (*GeminiProvider)(nil)
+
+func buildGeminiContents(messages []ChatMessage) ([]geminiContent, *geminiContent) {
+	var contents []geminiContent
+	var systemParts []geminiPart
+
+	for _, m := range messages {
+		if m.Role == RoleSystem {
+			if m.Content != "" {
+				systemParts = append(systemParts, geminiPart{Text: m.Content})
+			}
+			continue
+		}
+
+		role := "user"
+		if m.Role == RoleAssistant {
+			role = "model"
+		}
+
+		var parts []geminiPart
+
+		if m.Role == RoleTool {
+			role = "user"
+			var respMap map[string]interface{}
+			if err := json.Unmarshal([]byte(m.Content), &respMap); err != nil {
+				respMap = map[string]interface{}{
+					"output": m.Content,
+				}
+			}
+			parts = append(parts, geminiPart{
+				FunctionResponse: &geminiFunctionResp{
+					Name:     m.Name,
+					Response: respMap,
+				},
+			})
+		} else {
+			if m.Content != "" {
+				parts = append(parts, geminiPart{Text: m.Content})
+			}
+			for _, tc := range m.ToolCalls {
+				parts = append(parts, geminiPart{
+					FunctionCall: &geminiFunctionCall{
+						Name: tc.Name,
+						Args: tc.Arguments,
+					},
+				})
+			}
+		}
+
+		if len(parts) > 0 {
+			if len(contents) == 0 && role == "model" {
+				contents = append(contents, geminiContent{
+					Role:  "user",
+					Parts: []geminiPart{{Text: "(start)"}},
+				})
+			}
+
+			if len(contents) > 0 && contents[len(contents)-1].Role == role {
+				contents[len(contents)-1].Parts = append(contents[len(contents)-1].Parts, parts...)
+			} else {
+				contents = append(contents, geminiContent{
+					Role:  role,
+					Parts: parts,
+				})
+			}
+		}
+	}
+
+	var systemContent *geminiContent
+	if len(systemParts) > 0 {
+		systemContent = &geminiContent{Parts: systemParts}
+	}
+
+	return contents, systemContent
+}
+
+func buildGeminiTools(toolsList []tools.Tool) []geminiTool {
+	if len(toolsList) == 0 {
+		return nil
+	}
+	var decls []geminiFunctionDeclaration
+	for _, t := range toolsList {
+		decls = append(decls, geminiFunctionDeclaration{
+			Name:        t.Name(),
+			Description: t.Description(),
+			Parameters:  t.Parameters(),
+		})
+	}
+	return []geminiTool{{FunctionDeclarations: decls}}
+}
