@@ -11,15 +11,18 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
 )
 
-// BrowserAutomationTool provides complete browser automation via Chrome DevTools Protocol (go-rod)
-// capable of rendering dynamic JS, clicking, typing, executing JS, and taking screenshots.
+// BrowserAutomationTool provides complete browser automation inspired by browser-use
+// via Chrome DevTools Protocol (go-rod) with numeric element indexing (Set-of-Marks),
+// robust React/Vue event handling, and deterministic action execution.
 type BrowserAutomationTool struct{}
 
 func (b *BrowserAutomationTool) Name() string {
@@ -27,7 +30,7 @@ func (b *BrowserAutomationTool) Name() string {
 }
 
 func (b *BrowserAutomationTool) Description() string {
-	return "Browser otomatis (Docker Zenika Alpine Chrome / Chrome / Edge) berbasis Chrome DevTools Protocol (CDP) untuk mengakses dan berinteraksi dengan website modern berbasis JavaScript (React, Vue, SPA). AI dapat membuka URL, membaca konten yang dirender JS, mengklik tombol, mengisi form input, mengeksekusi script JavaScript, atau mengambil screenshot gambar web."
+	return "Browser otomatis (Chrome/Edge/Docker Zenika) berbasis arsitektur browser-use & Chrome DevTools Protocol (CDP). Mampu merender website modern berbasis JavaScript (React, Vue, SPA). AI dapat membuka URL, membaca teks bersih, melihat elemen interaktif berindeks numerik [0..N], mengklik elemen via index, mengisi form input via index dengan dukungan event React, menekan tombol keyboard (Enter/Escape/Tab), scroll, atau mengambil screenshot berlabel Set-of-Marks (SoM)."
 }
 
 func (b *BrowserAutomationTool) Parameters() ParametersSchema {
@@ -36,20 +39,45 @@ func (b *BrowserAutomationTool) Parameters() ParametersSchema {
 		Properties: map[string]ParameterProperty{
 			"action": {
 				Type:        "string",
-				Description: "Aksi browser yang ingin dilakukan: 'open' (buka URL dan baca teks + elemen interaktif), 'click' (klik tombol/elemen), 'type' (ketik ke input form), 'eval_js' (eksekusi JavaScript di halaman), 'screenshot' (ambil tangkapan layar .png), 'scroll' (scroll halaman ke bawah). Default: open.",
-				Enum:        []string{"open", "click", "type", "eval_js", "screenshot", "scroll"},
+				Description: "Aksi browser yang ingin dilakukan: 'open' (buka URL dan bangun pohon DOM interaktif berindeks [0..N]), 'click' (klik elemen berdasarkan nomor index atau selector), 'type' (isi teks ke form input berdasarkan nomor index atau selector), 'press_key' (tekan tombol keyboard seperti Enter/Escape/Tab), 'scroll' (scroll halaman ke bawah/atas atau ke elemen index tertentu), 'screenshot' (ambil tangkapan layar .png dengan opsi Set-of-Marks berlabel angka), 'eval_js' (eksekusi JavaScript di halaman). Default: open.",
+				Enum:        []string{"open", "click", "type", "press_key", "scroll", "screenshot", "eval_js"},
 			},
 			"url": {
 				Type:        "string",
-				Description: "URL halaman web yang ingin dikunjungi (wajib untuk aksi 'open', 'screenshot', dsb).",
+				Description: "URL halaman web yang ingin dikunjungi (wajib untuk aksi 'open', opsional untuk aksi interaksi lanjutan jika tab aktif sudah berada di halaman web).",
+			},
+			"index": {
+				Type:        "integer",
+				Description: "Nomor index elemen interaktif target dari pohon DOM hasil 'open' atau interaksi sebelumnya (contoh: 0, 1, 2). Sangat direkomendasikan dibanding selector biasa karena memiliki akurasi 100% dan bebas halusinasi.",
 			},
 			"selector": {
 				Type:        "string",
-				Description: "CSS selector elemen target untuk aksi 'click' atau 'type' (contoh: '#search-box', 'button.submit', 'input[name=\"q\"]').",
+				Description: "Fallback jika tidak menggunakan index: Target elemen untuk aksi 'click' atau 'type'. Bisa berupa teks tombol/label tampilan, CSS selector, atau XPath.",
 			},
 			"text": {
 				Type:        "string",
 				Description: "Teks yang ingin dimasukkan ke dalam form input untuk aksi 'type'.",
+			},
+			"clear": {
+				Type:        "boolean",
+				Description: "Hapus teks yang sudah ada di dalam input sebelum mengetikkan teks baru pada aksi 'type' (default: true).",
+			},
+			"press_enter": {
+				Type:        "boolean",
+				Description: "Otomatis tekan tombol Enter setelah mengetikkan teks pada aksi 'type' (default: false, sangat berguna untuk search bar).",
+			},
+			"key": {
+				Type:        "string",
+				Description: "Nama tombol keyboard untuk aksi 'press_key' (contoh: 'Enter', 'Escape', 'Tab', 'Backspace', 'ArrowDown', 'ArrowUp').",
+			},
+			"direction": {
+				Type:        "string",
+				Description: "Arah scroll untuk aksi 'scroll': 'down' (default) atau 'up'.",
+				Enum:        []string{"down", "up"},
+			},
+			"som": {
+				Type:        "boolean",
+				Description: "Tampilkan badge Set-of-Marks (SoM: kotak highlight & nomor index berwarna di atas elemen) pada aksi 'screenshot' (default: true).",
 			},
 			"script": {
 				Type:        "string",
@@ -60,8 +88,124 @@ func (b *BrowserAutomationTool) Parameters() ParametersSchema {
 				Description: "Durasi tunggu render JavaScript dalam detik (1 - 10 detik). Default: 3.",
 			},
 		},
-		Required: []string{"url"},
+		Required: []string{"action"},
 	}
+}
+
+type browserSession struct {
+	mu         sync.Mutex
+	browser    *rod.Browser
+	launcher   *launcher.Launcher
+	page       *rod.Page
+	currentURL string
+	lastUsed   time.Time
+}
+
+var globalBrowserSession = &browserSession{}
+
+func (s *browserSession) GetPage(ctx context.Context, targetURL string, waitSeconds int, forceReload bool) (*rod.Page, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.lastUsed = time.Now()
+
+	// 1. Inisialisasi browser jika belum ada
+	if s.browser == nil {
+		if dockerURL, dockerErr := ensureDockerChrome(ctx); dockerErr == nil && dockerURL != "" {
+			bInst := rod.New().ControlURL(dockerURL).Context(context.Background())
+			if errConn := bInst.Connect(); errConn == nil {
+				s.browser = bInst
+			}
+		}
+
+		if s.browser == nil {
+			l := launcher.New().
+				Headless(true).
+				NoSandbox(true).
+				Leakless(true).
+				Set("disable-gpu").
+				Set("disable-dev-shm-usage").
+				Set("disable-software-rasterizer").
+				Set("renderer-process-limit", "2").
+				Set("js-flags", "--max-old-space-size=256").
+				Set("disable-extensions").
+				Set("disable-background-networking").
+				Set("disable-sync").
+				Set("mute-audio").
+				Set("no-first-run").
+				Set("no-default-browser-check")
+
+			if bin := findLocalBrowserBinary(); bin != "" {
+				l.Bin(bin)
+			}
+
+			controlURL, errLaunch := l.Launch()
+			if errLaunch != nil {
+				return nil, fmt.Errorf("gagal menjalankan browser: %w", errLaunch)
+			}
+			s.launcher = l
+
+			bInst := rod.New().ControlURL(controlURL).Context(context.Background())
+			if errConn := bInst.Connect(); errConn != nil {
+				l.Kill()
+				l.Cleanup()
+				s.launcher = nil
+				return nil, fmt.Errorf("gagal terhubung ke browser: %w", errConn)
+			}
+			s.browser = bInst
+		}
+	}
+
+	// 2. Cek apakah page masih responsif
+	if s.page != nil {
+		_, errCheck := s.page.Eval("() => 1")
+		if errCheck != nil {
+			_ = s.page.Close()
+			s.page = nil
+			s.currentURL = ""
+		}
+	}
+
+	// Buat page baru jika belum ada
+	if s.page == nil {
+		p, err := s.browser.Page(proto.TargetCreateTarget{URL: ""})
+		if err != nil {
+			return nil, fmt.Errorf("gagal membuat tab browser: %w", err)
+		}
+		// Viewport desktop standar 1280x800 agar web modern/SPA tidak collapse ke mobile burger
+		_ = p.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
+			Width:             1280,
+			Height:            800,
+			DeviceScaleFactor: 1,
+			Mobile:            false,
+		})
+		s.page = p
+		s.currentURL = ""
+	}
+
+	timeoutDur := time.Duration(waitSeconds+15) * time.Second
+	pTimeout := s.page.Timeout(timeoutDur)
+
+	// 3. Smart Navigation
+	needNavigate := false
+	if targetURL != "" {
+		if s.currentURL == "" || forceReload {
+			needNavigate = true
+		} else if !strings.EqualFold(s.currentURL, targetURL) {
+			needNavigate = true
+		}
+	}
+
+	if needNavigate {
+		if err := pTimeout.Navigate(targetURL); err != nil {
+			return nil, fmt.Errorf("gagal membuka URL %s: %w", targetURL, err)
+		}
+		_ = pTimeout.WaitLoad()
+		time.Sleep(time.Duration(waitSeconds) * time.Second)
+		s.currentURL = targetURL
+	}
+
+	return pTimeout, nil
 }
 
 func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]interface{}) (res string, err error) {
@@ -96,122 +240,86 @@ func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]int
 		}
 	}
 
+	// Parsing parameter index (browser-use pattern)
+	var indexPtr *int
+	if idxVal, ok := args["index"]; ok && idxVal != nil {
+		switch v := idxVal.(type) {
+		case float64:
+			i := int(v)
+			indexPtr = &i
+		case int:
+			indexPtr = &v
+		}
+	}
+
 	selector, _ := args["selector"].(string)
 	inputText, _ := args["text"].(string)
 	customJS, _ := args["script"].(string)
+	keyName, _ := args["key"].(string)
+	direction, _ := args["direction"].(string)
 
-	var browser *rod.Browser
-	var cleanupFunc func()
-
-	// 1. Coba hubungkan ke Docker Zenika Alpine Chrome (Auto-Provisioning Sandbox)
-	if dockerURL, dockerErr := ensureDockerChrome(ctx); dockerErr == nil && dockerURL != "" {
-		bInst := rod.New().ControlURL(dockerURL).Context(ctx)
-		if errConn := bInst.Connect(); errConn == nil {
-			browser = bInst
-			cleanupFunc = func() {
-				_ = browser.Close()
-			}
-		}
+	clear := true
+	if clr, ok := args["clear"].(bool); ok {
+		clear = clr
 	}
 
-	// 2. Fallback otomatis ke Browser Lokal Host jika Docker tidak aktif / tidak tersedia
-	if browser == nil {
-		l := launcher.New().
-			Headless(true).
-			NoSandbox(true).
-			Leakless(true). // Mengaktifkan leakless supervisor untuk membunuh child process jika crash
-			Set("disable-gpu").
-			Set("disable-dev-shm-usage").
-			Set("disable-software-rasterizer").
-			Set("renderer-process-limit", "2").          // Batasi proses render child
-			Set("js-flags", "--max-old-space-size=256"). // Batasi heap V8 JS max 256MB
-			Set("disable-extensions").
-			Set("disable-background-networking").
-			Set("disable-sync").
-			Set("mute-audio").
-			Set("no-first-run").
-			Set("no-default-browser-check")
-
-		if bin := findLocalBrowserBinary(); bin != "" {
-			l.Bin(bin)
-		}
-
-		controlURL, errLaunch := l.Launch()
-		if errLaunch != nil {
-			return "", fmt.Errorf("gagal menjalankan browser: %w", errLaunch)
-		}
-
-		bInst := rod.New().ControlURL(controlURL).Context(ctx)
-		if errConn := bInst.Connect(); errConn != nil {
-			l.Kill()
-			l.Cleanup()
-			return "", fmt.Errorf("gagal terhubung ke browser: %w", errConn)
-		}
-
-		browser = bInst
-		cleanupFunc = func() {
-			_ = browser.Close()
-			l.Kill()
-			l.Cleanup()
-		}
+	pressEnter := false
+	if pe, ok := args["press_enter"].(bool); ok {
+		pressEnter = pe
 	}
 
-	if cleanupFunc != nil {
-		defer cleanupFunc()
+	withSoM := true
+	if somVal, ok := args["som"].(bool); ok {
+		withSoM = somVal
 	}
 
-	timeoutDur := time.Duration(waitSeconds+15) * time.Second
-	page, err := browser.Page(proto.TargetCreateTarget{URL: ""})
+	// Untuk aksi 'open', lakukan navigasi atau reload jika diminta URL baru.
+	// Untuk aksi interaksi, gunakan tab aktif jika URL sama atau kosong
+	forceReload := (action == "open")
+
+	page, err := globalBrowserSession.GetPage(ctx, targetURL, waitSeconds, forceReload)
 	if err != nil {
-		return "", fmt.Errorf("gagal membuat tab browser: %w", err)
+		return "", err
 	}
-	defer page.Close()
 
-	page = page.Timeout(timeoutDur)
+	activeURL := targetURL
+	if activeURL == "" {
+		if info, errInfo := page.Info(); errInfo == nil && info != nil {
+			activeURL = info.URL
+		}
+	}
 
 	switch action {
 	case "screenshot":
-		if targetURL == "" {
-			return "", fmt.Errorf("parameter 'url' wajib diisi untuk aksi screenshot")
-		}
-		return rodTakeScreenshot(page, targetURL, waitSeconds)
+		return rodTakeScreenshot(page, activeURL, withSoM, waitSeconds)
 
 	case "click":
-		if targetURL == "" {
-			return "", fmt.Errorf("parameter 'url' wajib diisi")
+		if indexPtr == nil && strings.TrimSpace(selector) == "" {
+			return "", fmt.Errorf("parameter 'index' (nomor elemen, contoh: 0, 1, 2) atau 'selector' wajib diisi untuk aksi click")
 		}
-		if selector == "" {
-			return "", fmt.Errorf("parameter 'selector' wajib diisi untuk aksi click (contoh: '#btn-submit' atau 'button')")
-		}
-		return rodClickElement(page, targetURL, selector, waitSeconds)
+		return rodClickElement(page, indexPtr, selector, waitSeconds)
 
 	case "type":
-		if targetURL == "" {
-			return "", fmt.Errorf("parameter 'url' wajib diisi")
+		if indexPtr == nil && strings.TrimSpace(selector) == "" {
+			return "", fmt.Errorf("parameter 'index' (nomor elemen input, contoh: 0, 1, 2) atau 'selector' wajib diisi untuk aksi type")
 		}
-		if selector == "" {
-			return "", fmt.Errorf("parameter 'selector' wajib diisi untuk aksi type")
-		}
-		return rodTypeInput(page, targetURL, selector, inputText, waitSeconds)
+		return rodTypeInput(page, indexPtr, selector, inputText, clear, pressEnter, waitSeconds)
+
+	case "press_key":
+		return rodPressKey(page, keyName, waitSeconds)
+
+	case "scroll":
+		return rodScroll(page, indexPtr, direction, waitSeconds)
 
 	case "eval_js":
-		if targetURL == "" {
-			return "", fmt.Errorf("parameter 'url' wajib diisi")
-		}
 		if strings.TrimSpace(customJS) == "" {
 			return "", fmt.Errorf("parameter 'script' wajib diisi untuk aksi eval_js")
 		}
-		return rodEvalJS(page, targetURL, customJS, waitSeconds)
-
-	case "scroll":
-		if targetURL == "" {
-			return "", fmt.Errorf("parameter 'url' wajib diisi")
-		}
-		return rodScroll(page, targetURL, waitSeconds)
+		return rodEvalJS(page, activeURL, customJS, waitSeconds)
 
 	default: // "open"
 		if targetURL == "" {
-			return "", fmt.Errorf("parameter 'url' wajib diisi")
+			return "", fmt.Errorf("parameter 'url' wajib diisi untuk aksi open")
 		}
 		res, err := rodOpenAndInspect(page, targetURL, waitSeconds)
 		if err == nil && strings.TrimSpace(res) != "" {
@@ -246,7 +354,7 @@ func ensureDockerChrome(ctx context.Context) (string, error) {
 	rawStatus := strings.TrimSpace(string(out))
 
 	if !strings.Contains(rawStatus, "goassistant-chrome") {
-		// Container belum ada -> buat dan jalankan container secara otomatis (timeout lebih panjang untuk pull image)
+		// Container belum ada -> buat dan jalankan container secara otomatis
 		runCtx, runCancel := context.WithTimeout(ctx, 45*time.Second)
 		defer runCancel()
 
@@ -285,160 +393,537 @@ func ensureDockerChrome(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("timeout menunggu Docker Chrome CDP siap di 127.0.0.1:9222")
 }
 
-func rodOpenAndInspect(page *rod.Page, targetURL string, waitSeconds int) (string, error) {
-	if err := page.Navigate(targetURL); err != nil {
-		return "", fmt.Errorf("gagal membuka URL %s: %w", targetURL, err)
+// buildDomTreeScript menginjeksi engine DOM parsing ala browser-use untuk mendeteksi
+// seluruh elemen interaktif visible, memberi data-ga-index, dan menyimpannya di window.__ga_elements
+const buildDomTreeScript = `() => {
+	window.__ga_elements = [];
+	document.querySelectorAll('[data-ga-index]').forEach(el => el.removeAttribute('data-ga-index'));
+
+	function isVisible(el) {
+		if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+		const rect = el.getBoundingClientRect();
+		if (rect.width < 3 || rect.height < 3) return false;
+		const style = window.getComputedStyle(el);
+		if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) < 0.05) return false;
+		const vw = window.innerWidth || document.documentElement.clientWidth;
+		const vh = window.innerHeight || document.documentElement.clientHeight;
+		if (rect.bottom < -200 || rect.top > vh + 800 || rect.right < -200 || rect.left > vw + 200) return false;
+		return true;
 	}
 
-	_ = page.WaitLoad()
-	time.Sleep(time.Duration(waitSeconds) * time.Second)
+	function isInteractive(el) {
+		if (!isVisible(el)) return false;
+		const tag = el.tagName.toLowerCase();
+		if (['button', 'select', 'textarea', 'option'].includes(tag)) return true;
+		if (tag === 'input') {
+			const type = (el.type || 'text').toLowerCase();
+			return type !== 'hidden';
+		}
+		if (tag === 'a' && (el.hasAttribute('href') || el.hasAttribute('onclick') || el.getAttribute('role') === 'button')) return true;
 
+		const role = (el.getAttribute('role') || '').toLowerCase();
+		const interactiveRoles = ['button', 'link', 'checkbox', 'radio', 'combobox', 'menuitem', 'tab', 'switch', 'searchbox', 'option'];
+		if (interactiveRoles.includes(role)) return true;
+
+		if (el.hasAttribute('onclick') || el.hasAttribute('jsaction')) return true;
+		if (el.hasAttribute('contenteditable') && el.getAttribute('contenteditable') !== 'false') return true;
+		if (el.getAttribute('tabindex') === '0') return true;
+		if (el.hasAttribute('aria-haspopup') || el.hasAttribute('aria-expanded')) return true;
+
+		const style = window.getComputedStyle(el);
+		if (style.cursor === 'pointer') {
+			if (el.children.length === 1 && isInteractive(el.children[0])) return false;
+			return true;
+		}
+		return false;
+	}
+
+	const all = Array.from(document.querySelectorAll('*'));
+	const interactiveList = [];
+	let idx = 0;
+
+	for (const el of all) {
+		if (interactiveList.length >= 60) break;
+		if (!isInteractive(el)) continue;
+
+		if (el.children.length === 1 && isInteractive(el.children[0])) continue;
+
+		el.setAttribute('data-ga-index', String(idx));
+		window.__ga_elements[idx] = el;
+
+		const tag = el.tagName.toLowerCase();
+		const role = el.getAttribute('role') || '';
+		const type = el.getAttribute('type') || '';
+		const placeholder = el.getAttribute('placeholder') || '';
+		const ariaLabel = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('alt') || '';
+		const value = el.value !== undefined && tag === 'input' ? el.value : '';
+		const href = el.getAttribute('href') || '';
+		const checked = el.checked ? ' checked' : '';
+		const expanded = el.getAttribute('aria-expanded');
+
+		let text = (el.innerText || el.textContent || '').trim();
+		text = text.replace(/\s+/g, ' ').slice(0, 45);
+
+		let desc = '<' + tag;
+		if (type) desc += ' type="' + type + '"';
+		if (role) desc += ' role="' + role + '"';
+		if (placeholder) desc += ' placeholder="' + placeholder + '"';
+		if (ariaLabel) desc += ' aria-label="' + ariaLabel + '"';
+		if (value) desc += ' value="' + value.slice(0, 30) + '"';
+		if (href && href !== '#' && !href.startsWith('javascript:')) desc += ' href="' + href.slice(0, 35) + '"';
+		if (checked) desc += checked;
+		if (expanded !== null) desc += ' aria-expanded="' + expanded + '"';
+		desc += '>';
+		if (text && tag !== 'input') desc += ' ' + text + ' </' + tag + '>';
+
+		interactiveList.push({
+			index: idx,
+			desc: desc
+		});
+
+		idx++;
+	}
+
+	return interactiveList;
+}`
+
+type domElementInfo struct {
+	Index int    `json:"index"`
+	Desc  string `json:"desc"`
+}
+
+// buildIndexedDOM membangun snapshot elemen interaktif dan mengembalikan teks format ringkas untuk LLM
+func buildIndexedDOM(page *rod.Page) (string, error) {
+	res, err := page.Eval(buildDomTreeScript)
+	if err != nil || res == nil {
+		return "", err
+	}
+
+	var elements []domElementInfo
+	if errJSON := json.Unmarshal([]byte(res.Value.String()), &elements); errJSON != nil {
+		return "", errJSON
+	}
+
+	if len(elements) == 0 {
+		return "🔘 <i>(Tidak ditemukan elemen interaktif tambahan pada viewport aktif)</i>\n", nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🔘 <b>Elemen Interaktif Ditemukan (Gunakan parameter <code>index</code> untuk klik/type):</b>\n")
+	for _, el := range elements {
+		sb.WriteString(fmt.Sprintf("[%d] <code>%s</code>\n", el.Index, el.Desc))
+	}
+	return sb.String(), nil
+}
+
+func rodOpenAndInspect(page *rod.Page, targetURL string, waitSeconds int) (string, error) {
 	htmlContent, err := page.HTML()
 	if err != nil {
 		return "", fmt.Errorf("gagal membaca HTML dari halaman: %w", err)
 	}
 
 	cleanText := extractCleanText(htmlContent)
-	if len(cleanText) > 4500 {
-		cleanText = cleanText[:4500] + "\n...[konten dipotong untuk ringkasan]"
+	if len(cleanText) > 4000 {
+		cleanText = cleanText[:4000] + "\n...[konten dipotong untuk efisiensi token]"
 	}
+
+	indexedDOM, _ := buildIndexedDOM(page)
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🌐 <b>Browser Page: %s</b>\n\n", targetURL))
-	sb.WriteString(fmt.Sprintf("📄 <b>Konten Rendered (JS Aktif - CDP):</b>\n%s\n\n", cleanText))
-
-	// Inspeksi elemen-elemen interaktif
-	extractScript := `() => {
-		const interactive = [];
-		document.querySelectorAll('button, a[href], input, textarea, select').forEach((el, idx) => {
-			if (idx > 30) return;
-			const text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim();
-			const tag = el.tagName.toLowerCase();
-			let sel = el.id ? '#' + el.id : (el.name ? tag + '[name="' + el.name + '"]' : (el.className ? tag + '.' + el.className.trim().split(/\s+/).join('.') : tag));
-			if (text) {
-				interactive.push('[' + tag.toUpperCase() + '] "' + text.slice(0, 35) + '" (selector: ' + sel + ')');
-			}
-		});
-		return interactive.slice(0, 15);
-	}`
-
-	res, errEval := page.Eval(extractScript)
-	if errEval == nil && res != nil {
-		var elements []string
-		_ = json.Unmarshal([]byte(res.Value.String()), &elements)
-		if len(elements) > 0 {
-			sb.WriteString("🔘 <b>Elemen Interaktif Ditemukan (Bisa Diklik/Diisi):</b>\n")
-			for _, el := range elements {
-				sb.WriteString(fmt.Sprintf("• <code>%s</code>\n", el))
-			}
-		}
+	sb.WriteString(fmt.Sprintf("📄 <b>Konten Teks Terbaca:</b>\n%s\n\n", cleanText))
+	if indexedDOM != "" {
+		sb.WriteString(indexedDOM)
 	}
 
 	return sb.String(), nil
 }
 
-func rodClickElement(page *rod.Page, targetURL, selector string, waitSeconds int) (string, error) {
-	if err := page.Navigate(targetURL); err != nil {
-		return "", fmt.Errorf("gagal membuka URL %s: %w", targetURL, err)
+// findElement mencari elemen menggunakan Index (browser-use pattern), XPath, CSS, Teks tampilan, atau Regex
+func findElement(page *rod.Page, indexPtr *int, selector string) (*rod.Element, error) {
+	// 1. Prioritas Utama: Index Numerik (browser-use pattern)
+	if indexPtr != nil && *indexPtr >= 0 {
+		idx := *indexPtr
+		// Cek apakah data-ga-index ada di DOM
+		if el, err := page.Element(fmt.Sprintf(`[data-ga-index="%d"]`, idx)); err == nil && el != nil {
+			_ = el.ScrollIntoView()
+			return el, nil
+		}
+
+		// Fallback: Re-index DOM sekali lagi jika DOM sempat mengalami transisi/mutasi
+		_, _ = page.Eval(buildDomTreeScript)
+		if el, err := page.Element(fmt.Sprintf(`[data-ga-index="%d"]`, idx)); err == nil && el != nil {
+			_ = el.ScrollIntoView()
+			return el, nil
+		}
+
+		return nil, fmt.Errorf("elemen dengan index [%d] tidak ditemukan pada DOM aktif. Silakan panggil action 'open' untuk memperbarui pohon elemen", idx)
 	}
 
-	_ = page.WaitLoad()
+	// 2. Fallback: Selector atau Teks manual
+	target := strings.TrimSpace(selector)
+	if target == "" {
+		return nil, fmt.Errorf("parameter 'index' (angka) atau 'selector' wajib diisi")
+	}
+
+	// XPath
+	if strings.HasPrefix(target, "//") || strings.HasPrefix(target, "xpath:") {
+		xpath := strings.TrimPrefix(target, "xpath:")
+		if el, err := page.ElementX(xpath); err == nil && el != nil {
+			_ = el.ScrollIntoView()
+			return el, nil
+		}
+	}
+
+	// CSS selector
+	if el, err := page.Element(target); err == nil && el != nil {
+		_ = el.ScrollIntoView()
+		return el, nil
+	}
+
+	// Teks tampilan / Regex
+	textTags := "button, a, div, span, li, p, label, [role='button'], [role='combobox'], [role='option'], [role='menuitem'], [aria-haspopup]"
+	if el, err := page.ElementR(textTags, target); err == nil && el != nil {
+		_ = el.ScrollIntoView()
+		return el, nil
+	}
+
+	// Case-insensitive XPath
+	cleanTarget := strings.ToLower(target)
+	xpathText := fmt.Sprintf("//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '%s') or contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '%s') or contains(translate(@placeholder, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '%s')]", cleanTarget, cleanTarget, cleanTarget)
+	if el, err := page.ElementX(xpathText); err == nil && el != nil {
+		_ = el.ScrollIntoView()
+		return el, nil
+	}
+
+	return nil, fmt.Errorf("elemen tidak ditemukan dengan selector atau teks '%s'", target)
+}
+
+func rodClickElement(page *rod.Page, indexPtr *int, selector string, waitSeconds int) (string, error) {
+	el, err := findElement(page, indexPtr, selector)
+	if err != nil {
+		return "", err
+	}
+
+	targetLabel := selector
+	if indexPtr != nil {
+		targetLabel = fmt.Sprintf("index [%d]", *indexPtr)
+	}
+
+	// Scroll elemen ke tengah layar
+	_ = el.ScrollIntoView()
+
+	// 1. Coba klik fisik CDP native
+	clickErr := el.Click(proto.InputMouseButtonLeft, 1)
+	if clickErr != nil {
+		// 2. Fallback: React/Vue synthetic event & JS click dispatch
+		_, jsErr := el.Eval(`() => {
+			this.scrollIntoView({ behavior: 'instant', block: 'center' });
+			this.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+			this.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+			this.click();
+			this.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+		}`)
+		if jsErr != nil {
+			return "", fmt.Errorf("gagal mengklik %s: %w (js fallback error: %v)", targetLabel, clickErr, jsErr)
+		}
+	}
+
 	time.Sleep(time.Duration(waitSeconds) * time.Second)
 
-	el, err := page.Element(selector)
-	if err != nil {
-		return "", fmt.Errorf("elemen tidak ditemukan dengan selector '%s': %w", selector, err)
-	}
-
-	if err := el.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return "", fmt.Errorf("gagal mengklik elemen '%s': %w", selector, err)
-	}
-
-	time.Sleep(1 * time.Second)
 	pageTitle, _ := page.Eval("() => document.title")
-
 	titleStr := ""
 	if pageTitle != nil {
 		titleStr = pageTitle.Value.Str()
 	}
 
-	return fmt.Sprintf("✅ <b>Berhasil mengklik elemen:</b> <code>%s</code>\n• URL: <code>%s</code>\n• Judul Halaman Sekarang: <i>%s</i>", selector, targetURL, titleStr), nil
+	currentURL := ""
+	if info, errInfo := page.Info(); errInfo == nil && info != nil {
+		currentURL = info.URL
+	}
+
+	// Otomatis refresh pohon DOM setelah interaksi klik
+	updatedDOM, _ := buildIndexedDOM(page)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("✅ <b>Berhasil mengklik %s</b>\n", targetLabel))
+	if currentURL != "" {
+		sb.WriteString(fmt.Sprintf("• URL: <code>%s</code>\n", currentURL))
+	}
+	sb.WriteString(fmt.Sprintf("• Judul Halaman: <i>%s</i>\n\n", titleStr))
+	if updatedDOM != "" {
+		sb.WriteString(updatedDOM)
+	}
+
+	return sb.String(), nil
 }
 
-func rodTypeInput(page *rod.Page, targetURL, selector, inputText string, waitSeconds int) (string, error) {
-	if err := page.Navigate(targetURL); err != nil {
-		return "", fmt.Errorf("gagal membuka URL %s: %w", targetURL, err)
-	}
-
-	_ = page.WaitLoad()
-	time.Sleep(time.Duration(waitSeconds) * time.Second)
-
-	el, err := page.Element(selector)
+func rodTypeInput(page *rod.Page, indexPtr *int, selector, inputText string, clear bool, pressEnter bool, waitSeconds int) (string, error) {
+	el, err := findElement(page, indexPtr, selector)
 	if err != nil {
-		return "", fmt.Errorf("elemen input tidak ditemukan dengan selector '%s': %w", selector, err)
+		return "", err
 	}
 
-	if err := el.SelectAllText(); err == nil {
-		_ = el.Input(inputText)
-	} else {
-		if err := el.Input(inputText); err != nil {
-			return "", fmt.Errorf("gagal memasukkan teks ke input '%s': %w", selector, err)
+	targetLabel := selector
+	if indexPtr != nil {
+		targetLabel = fmt.Sprintf("index [%d]", *indexPtr)
+	}
+
+	_ = el.ScrollIntoView()
+	_ = el.Focus()
+
+	if clear {
+		_ = el.SelectAllText()
+		// Reset nilai dengan React prototype setter hack
+		_, _ = el.Eval(`() => {
+			const proto = window.HTMLInputElement.prototype;
+			const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+			if (desc && desc.set) {
+				desc.set.call(this, '');
+			} else {
+				this.value = '';
+			}
+			this.dispatchEvent(new Event('input', { bubbles: true }));
+			this.dispatchEvent(new Event('change', { bubbles: true }));
+		}`)
+	}
+
+	// Input teks via CDP
+	inputErr := el.Input(inputText)
+	if inputErr != nil {
+		// Fallback: React setter hack
+		setValScript := fmt.Sprintf(`() => {
+			const proto = window.HTMLInputElement.prototype;
+			const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+			if (desc && desc.set) {
+				desc.set.call(this, %q);
+			} else {
+				this.value = %q;
+			}
+			this.dispatchEvent(new Event('input', { bubbles: true }));
+			this.dispatchEvent(new Event('change', { bubbles: true }));
+		}`, inputText, inputText)
+		if _, jsErr := el.Eval(setValScript); jsErr != nil {
+			return "", fmt.Errorf("gagal memasukkan teks ke %s: %w", targetLabel, jsErr)
 		}
 	}
 
-	return fmt.Sprintf("✅ <b>Berhasil mengisi teks:</b> <i>\"%s\"</i> ke selector <code>%s</code>", inputText, selector), nil
+	// Tekan tombol Enter jika diminta
+	if pressEnter {
+		time.Sleep(150 * time.Millisecond)
+		_ = page.Keyboard.Press(input.Enter)
+		// Fallback JS Enter event
+		_, _ = el.Eval(`() => {
+			this.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+			this.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+			this.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+			if (this.form) {
+				if (this.form.requestSubmit) this.form.requestSubmit();
+				else this.form.submit();
+			}
+		}`)
+	}
+
+	time.Sleep(time.Duration(waitSeconds) * time.Second)
+
+	pageTitle, _ := page.Eval("() => document.title")
+	titleStr := ""
+	if pageTitle != nil {
+		titleStr = pageTitle.Value.Str()
+	}
+
+	currentURL := ""
+	if info, errInfo := page.Info(); errInfo == nil && info != nil {
+		currentURL = info.URL
+	}
+
+	updatedDOM, _ := buildIndexedDOM(page)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("✅ <b>Berhasil mengisi teks:</b> <i>\"%s\"</i> ke %s\n", inputText, targetLabel))
+	if pressEnter {
+		sb.WriteString("• Tombol Enter otomatis ditekan.\n")
+	}
+	if currentURL != "" {
+		sb.WriteString(fmt.Sprintf("• URL: <code>%s</code>\n", currentURL))
+	}
+	sb.WriteString(fmt.Sprintf("• Judul Halaman: <i>%s</i>\n\n", titleStr))
+	if updatedDOM != "" {
+		sb.WriteString(updatedDOM)
+	}
+
+	return sb.String(), nil
+}
+
+func mapKeyNameToRodKey(k string) (input.Key, bool) {
+	switch strings.ToLower(strings.TrimSpace(k)) {
+	case "enter", "return":
+		return input.Enter, true
+	case "escape", "esc":
+		return input.Escape, true
+	case "tab":
+		return input.Tab, true
+	case "backspace":
+		return input.Backspace, true
+	case "delete", "del":
+		return input.Delete, true
+	case "arrowdown", "down":
+		return input.ArrowDown, true
+	case "arrowup", "up":
+		return input.ArrowUp, true
+	case "arrowleft", "left":
+		return input.ArrowLeft, true
+	case "arrowright", "right":
+		return input.ArrowRight, true
+	case "space":
+		return input.Space, true
+	case "pageup":
+		return input.PageUp, true
+	case "pagedown":
+		return input.PageDown, true
+	case "home":
+		return input.Home, true
+	case "end":
+		return input.End, true
+	default:
+		return 0, false
+	}
+}
+
+func rodPressKey(page *rod.Page, keyName string, waitSeconds int) (string, error) {
+	keyName = strings.TrimSpace(keyName)
+	if keyName == "" {
+		return "", fmt.Errorf("parameter 'key' wajib diisi (contoh: 'Enter', 'Escape', 'Tab', 'Backspace', 'ArrowDown')")
+	}
+
+	if rodKey, ok := mapKeyNameToRodKey(keyName); ok {
+		_ = page.Keyboard.Press(rodKey)
+	}
+
+	script := fmt.Sprintf(`(k) => {
+		const target = document.activeElement || document.body;
+		const opts = { key: k, code: k, bubbles: true, cancelable: true };
+		target.dispatchEvent(new KeyboardEvent('keydown', opts));
+		target.dispatchEvent(new KeyboardEvent('keypress', opts));
+		target.dispatchEvent(new KeyboardEvent('keyup', opts));
+		return document.title;
+	}`)
+	_, _ = page.Eval(script, keyName)
+
+	time.Sleep(time.Duration(waitSeconds) * time.Second)
+	return fmt.Sprintf("⌨️ <b>Berhasil menekan tombol keyboard:</b> <code>%s</code>", keyName), nil
+}
+
+func rodScroll(page *rod.Page, indexPtr *int, direction string, waitSeconds int) (string, error) {
+	if indexPtr != nil && *indexPtr >= 0 {
+		el, err := findElement(page, indexPtr, "")
+		if err != nil {
+			return "", err
+		}
+		_ = el.ScrollIntoView()
+		time.Sleep(time.Duration(waitSeconds) * time.Second)
+
+		updatedDOM, _ := buildIndexedDOM(page)
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("📜 <b>Berhasil scroll ke elemen index [%d]</b>\n\n", *indexPtr))
+		if updatedDOM != "" {
+			sb.WriteString(updatedDOM)
+		}
+		return sb.String(), nil
+	}
+
+	deltaY := 600
+	dirLabel := "bawah"
+	if strings.EqualFold(direction, "up") {
+		deltaY = -600
+		dirLabel = "atas"
+	}
+
+	script := fmt.Sprintf(`() => { window.scrollBy(0, %d); }`, deltaY)
+	if _, err := page.Eval(script); err != nil {
+		return "", fmt.Errorf("gagal melakukan scroll: %w", err)
+	}
+
+	time.Sleep(time.Duration(waitSeconds) * time.Second)
+	updatedDOM, _ := buildIndexedDOM(page)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("📜 <b>Berhasil scroll ke %s</b>\n\n", dirLabel))
+	if updatedDOM != "" {
+		sb.WriteString(updatedDOM)
+	}
+
+	return sb.String(), nil
 }
 
 func rodEvalJS(page *rod.Page, targetURL, script string, waitSeconds int) (string, error) {
-	if err := page.Navigate(targetURL); err != nil {
-		return "", fmt.Errorf("gagal membuka URL %s: %w", targetURL, err)
-	}
+	safeWrapper := fmt.Sprintf(`() => {
+		try {
+			const fn = new Function(%q);
+			const res = fn();
+			if (res === undefined) return "(Eksekusi JS berhasil tanpa nilai kembali/undefined)";
+			if (typeof res === "object") return JSON.stringify(res, null, 2);
+			return String(res);
+		} catch (e) {
+			return "Error JS: " + e.message;
+		}
+	}`, script)
 
-	_ = page.WaitLoad()
-	time.Sleep(time.Duration(waitSeconds) * time.Second)
-
-	wrappedScript := fmt.Sprintf("() => { %s }", script)
-	res, err := page.Eval(wrappedScript)
+	res, err := page.Eval(safeWrapper)
 	if err != nil {
-		// Coba evaluasi script secara langsung jika mode closure gagal
 		res, err = page.Eval(script)
 		if err != nil {
 			return "", fmt.Errorf("eksekusi JavaScript gagal: %w", err)
 		}
 	}
 
+	time.Sleep(time.Duration(waitSeconds) * time.Second)
 	return fmt.Sprintf("⚡ <b>Hasil Eksekusi JavaScript:</b>\n<pre>%s</pre>", res.Value.String()), nil
 }
 
-func rodScroll(page *rod.Page, targetURL string, waitSeconds int) (string, error) {
-	if err := page.Navigate(targetURL); err != nil {
-		return "", fmt.Errorf("gagal membuka URL %s: %w", targetURL, err)
-	}
-
-	_ = page.WaitLoad()
-	time.Sleep(time.Duration(waitSeconds) * time.Second)
-
-	_, err := page.Eval("() => { window.scrollBy(0, window.innerHeight || 600); }")
-	if err != nil {
-		return "", fmt.Errorf("gagal melakukan scroll: %w", err)
-	}
-
-	return fmt.Sprintf("📜 <b>Berhasil scroll ke bawah pada:</b> <code>%s</code>", targetURL), nil
-}
-
-func rodTakeScreenshot(page *rod.Page, targetURL string, waitSeconds int) (string, error) {
-	if err := page.Navigate(targetURL); err != nil {
-		return "", fmt.Errorf("gagal membuka URL %s: %w", targetURL, err)
-	}
-
-	_ = page.WaitLoad()
-	time.Sleep(time.Duration(waitSeconds) * time.Second)
-
+func rodTakeScreenshot(page *rod.Page, targetURL string, withSoM bool, waitSeconds int) (string, error) {
 	screenshotDir := filepath.Join("data", "screenshots")
 	_ = os.MkdirAll(screenshotDir, 0755)
 
-	// Otomatis bersihkan file screenshot lama (> 24 jam) agar tidak terjadi akumulasi file zombie
 	cleanupOldScreenshots(screenshotDir, 24*time.Hour)
+
+	// Set-of-Marks visual overlay renderer ala browser-use
+	if withSoM {
+		drawScript := `() => {
+			const old = document.getElementById('__ga_som_container');
+			if (old) old.remove();
+
+			const container = document.createElement('div');
+			container.id = '__ga_som_container';
+			container.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;z-index:2147483647;font-family:sans-serif;';
+
+			const colors = ['#E53E3E', '#DD6B20', '#D69E2E', '#38A169', '#319795', '#3182CE', '#805AD5', '#D53F8C'];
+
+			(window.__ga_elements || []).forEach((el, idx) => {
+				if (!el || !el.isConnected) return;
+				const rect = el.getBoundingClientRect();
+				if (rect.width < 4 || rect.height < 4) return;
+				if (rect.bottom < 0 || rect.top > window.innerHeight || rect.right < 0 || rect.left > window.innerWidth) return;
+
+				const color = colors[idx % colors.length];
+
+				const box = document.createElement('div');
+				box.style.cssText = 'position:fixed;left:' + rect.left + 'px;top:' + rect.top + 'px;width:' + rect.width + 'px;height:' + rect.height + 'px;border:2px solid ' + color + ';box-sizing:border-box;pointer-events:none;';
+
+				const badge = document.createElement('div');
+				badge.innerText = String(idx);
+				badge.style.cssText = 'position:absolute;left:-2px;top:-18px;background:' + color + ';color:#fff;font-size:11px;font-weight:bold;padding:1px 4px;border-radius:2px;line-height:14px;box-shadow:0 1px 3px rgba(0,0,0,0.4);white-space:nowrap;pointer-events:none;';
+
+				box.appendChild(badge);
+				container.appendChild(box);
+			});
+
+			document.body.appendChild(container);
+			return true;
+		}`
+		_, _ = page.Eval(drawScript)
+		time.Sleep(300 * time.Millisecond)
+	}
 
 	outPath := filepath.Join(screenshotDir, fmt.Sprintf("screenshot_%d.png", time.Now().UnixNano()))
 	absOutPath, _ := filepath.Abs(outPath)
@@ -446,6 +931,12 @@ func rodTakeScreenshot(page *rod.Page, targetURL string, waitSeconds int) (strin
 	imgBytes, err := page.Screenshot(false, &proto.PageCaptureScreenshot{
 		Format: proto.PageCaptureScreenshotFormatPng,
 	})
+
+	// Bersihkan overlay SoM segera setelah capture
+	if withSoM {
+		_, _ = page.Eval("() => { const c = document.getElementById('__ga_som_container'); if (c) c.remove(); }")
+	}
+
 	if err != nil {
 		return "", fmt.Errorf("gagal mengambil screenshot: %w", err)
 	}
@@ -454,7 +945,12 @@ func rodTakeScreenshot(page *rod.Page, targetURL string, waitSeconds int) (strin
 		return "", fmt.Errorf("gagal menyimpan file screenshot: %w", err)
 	}
 
-	return fmt.Sprintf("📸 <b>Screenshot Berhasil Diambil (CDP)!</b>\n• URL: <code>%s</code>\n• File: <code>%s</code>\n\n[ATTACH_FILE:%s|CAPTION:Screenshot %s]", targetURL, absOutPath, absOutPath, targetURL), nil
+	caption := fmt.Sprintf("Screenshot %s", targetURL)
+	if withSoM {
+		caption += " (Set-of-Marks [0..N])"
+	}
+
+	return fmt.Sprintf("📸 <b>Screenshot Berhasil Diambil (CDP)!</b>\n• URL: <code>%s</code>\n• Mode: %s\n• File: <code>%s</code>\n\n[ATTACH_FILE:%s|CAPTION:%s]", targetURL, map[bool]string{true: "Set-of-Marks (Numbered [0..N])", false: "Clean (No Labels)"}[withSoM], absOutPath, absOutPath, caption), nil
 }
 
 // cleanupOldScreenshots menghapus file screenshot lama yang melebihi maxAge

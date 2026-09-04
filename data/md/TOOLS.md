@@ -45,13 +45,15 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
    - Gunakan untuk menghubungkan AI dengan endpoint REST API internal (seperti GoAssist HTTP di `http://localhost:8080/api/...`) atau layanan webhook luar.
 
 6. **Browser Automation (`browser`)**:
-   - Kamu **MEMILIKI BROWSER OTOMATIS BERBASIS CHROME DEVTOOLS PROTOCOL (Go-Rod CDP)** yang mampu mengeksekusi JavaScript, merender website modern (SPA, React, Vue, Angular), dan berinteraksi secara native tanpa kendala CORS/iframe!
-   - Gunakan action `'open'` untuk membuka URL dan mengekstrak teks serta elemen interaktif (tombol/form input beserta CSS selector-nya).
-   - Gunakan action `'click'` untuk mengklik tombol/link menggunakan selector target.
-   - Gunakan action `'type'` untuk mengetikkan teks ke dalam input form atau kolom pencarian.
-   - Gunakan action `'eval_js'` untuk mengeksekusi script JavaScript langsung di console halaman aktif.
-   - Gunakan action `'screenshot'` untuk mengambil gambar tangkapan layar web (.png) beresolusi tinggi, yang akan otomatis dilampirkan ke chat pengguna.
-   - Gunakan action `'scroll'` untuk melakukan scroll halaman ke bawah.
+   - Kamu **MEMILIKI BROWSER OTOMATIS BERBASIS CHROME DEVTOOLS PROTOCOL (Go-Rod CDP)** yang mengadopsi arsitektur **browser-use**: mengeksekusi JavaScript, merender website modern (SPA, React, Vue, Angular), dan berinteraksi secara deterministik menggunakan **Index Numerik** (`[0..N]`)!
+   - **Alur Interaksi Berbasis Index (Sangat Direkomendasikan)**:
+     1. Panggil `browser(action="open", url="https://...")` untuk membuka halaman dan menerima teks serta pohon elemen interaktif bernomor index `[0]`, `[1]`, `[2]`, dst.
+     2. Panggil `browser(action="type", index=0, text="laptop", press_enter=true)` untuk mengisi input form dan otomatis menekan Enter.
+     3. Panggil `browser(action="click", index=2)` untuk mengklik tombol/link berdasarkan nomor index tanpa perlu repot menulis CSS selector yang rapuh.
+     4. Panggil `browser(action="press_key", key="Enter")` atau `"Escape"` / `"Tab"` untuk menekan tombol keyboard.
+     5. Panggil `browser(action="scroll", direction="down")` atau `browser(action="scroll", index=5)` untuk scroll langsung ke elemen tertentu.
+     6. Panggil `browser(action="screenshot", som=true)` untuk mengambil gambar web dengan label Set-of-Marks (kotak berwarna dan nomor index di atas setiap tombol) yang akan otomatis dikirim ke chat pengguna.
+     7. Panggil `browser(action="eval_js", script="...")` jika butuh menjalankan JavaScript langsung di halaman.
 
 7. **Pencarian Web AI (`tavily_search` / `web_search`)**:
    - Gunakan untuk mencari berita terkini, fakta terbaru, atau dokumentasi teknis di internet secara real-time.
