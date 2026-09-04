@@ -3,6 +3,8 @@ package admin
 import (
 	"fmt"
 	"html"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +37,8 @@ type ComboWizardSession struct {
 	Targets          []storage.ComboTarget
 	SelectedProvider *storage.ProviderRecord
 	Strategy         string
+	ProvPage         int
+	ModelPage        int
 	CreatedAt        time.Time
 }
 
@@ -222,7 +226,8 @@ func (w *ComboWizard) HandleTextMessage(c tele.Context) (bool, error) {
 		return true, c.Reply("❌ Operasi combo wizard dibatalkan.")
 	}
 
-	if sess.Step == StepComboEnterName {
+	switch sess.Step {
+	case StepComboEnterName:
 		cleanName := strings.ToLower(strings.TrimSpace(msgText))
 		cleanName = strings.ReplaceAll(cleanName, " ", "_")
 		if cleanName == "" {
@@ -232,11 +237,80 @@ func (w *ComboWizard) HandleTextMessage(c tele.Context) (bool, error) {
 		sess.Name = cleanName
 		sess.Description = fmt.Sprintf("Smart Combo %s", cleanName)
 		sess.Step = StepComboPickProvider
+		sess.ProvPage = 0
 
-		return true, w.promptPickProvider(c, sess)
-	}
+		return true, w.promptPickProvider(c, sess, 0)
 
-	if sess.Step == StepComboEditDesc {
+	case StepComboPickProvider, StepComboEditAddTargetPickProv:
+		providers, _ := w.db.ListProviders()
+		if len(providers) == 0 {
+			return false, nil
+		}
+
+		var selectedProv *storage.ProviderRecord
+		// 1. Try matching by 1-based number index
+		if num, err := strconv.Atoi(msgText); err == nil && num >= 1 && num <= len(providers) {
+			provCopy := providers[num-1]
+			selectedProv = &provCopy
+		}
+		// 2. Try matching by ID or Name (case-insensitive)
+		if selectedProv == nil {
+			for _, p := range providers {
+				if strings.EqualFold(p.ID, msgText) || strings.EqualFold(p.Name, msgText) {
+					provCopy := p
+					selectedProv = &provCopy
+					break
+				}
+			}
+		}
+
+		if selectedProv != nil {
+			sess.SelectedProvider = selectedProv
+			sess.ModelPage = 0
+			if sess.Step == StepComboPickProvider {
+				sess.Step = StepComboPickModel
+				return true, w.promptPickModel(c, sess, 0)
+			} else {
+				sess.Step = StepComboEditAddTargetPickMod
+				return true, w.promptEditAddTargetPickMod(c, sess, 0)
+			}
+		}
+
+		return true, c.Reply(fmt.Sprintf("⚠️ Provider <code>%s</code> tidak ditemukan.\n<i>Silakan ketik nomor (1-%d), ID/nama provider, atau klik tombol di atas.</i>", html.EscapeString(msgText), len(providers)), tele.ModeHTML)
+
+	case StepComboPickModel, StepComboEditAddTargetPickMod:
+		p := sess.SelectedProvider
+		if p == nil {
+			return false, nil
+		}
+		allModels := w.getModelsForProvider(p)
+
+		var chosenModel string
+		// 1. Try matching by 1-based index from model list
+		if num, err := strconv.Atoi(msgText); err == nil && num >= 1 && num <= len(allModels) {
+			chosenModel = allModels[num-1]
+		}
+		// 2. Try matching existing models (case-insensitive)
+		if chosenModel == "" {
+			for _, m := range allModels {
+				if strings.EqualFold(m, msgText) {
+					chosenModel = m
+					break
+				}
+			}
+		}
+		// 3. Allow typing custom model name directly
+		if chosenModel == "" {
+			chosenModel = msgText
+		}
+
+		if sess.Step == StepComboPickModel {
+			return true, w.applySelectedModel(c, sess, chosenModel)
+		} else {
+			return true, w.applyEditAddTargetModel(c, sess, chosenModel)
+		}
+
+	case StepComboEditDesc:
 		combo, err := w.db.GetCombo(sess.EditingComboName)
 		if err != nil || combo == nil {
 			w.CancelWizard(userID)
@@ -253,32 +327,121 @@ func (w *ComboWizard) HandleTextMessage(c tele.Context) (bool, error) {
 	return false, nil
 }
 
-func (w *ComboWizard) promptPickProvider(c tele.Context, sess *ComboWizardSession) error {
+const (
+	comboProvidersPerPage = 6
+	comboModelsPerPage    = 8
+)
+
+func (w *ComboWizard) getModelsForProvider(p *storage.ProviderRecord) []string {
+	if p == nil {
+		return []string{"default"}
+	}
+	seen := make(map[string]bool)
+	var rest []string
+
+	def := strings.TrimSpace(p.DefaultModel)
+	if def != "" {
+		seen[strings.ToLower(def)] = true
+	}
+
+	for _, m := range p.Models {
+		m = strings.TrimSpace(m)
+		if m != "" && !seen[strings.ToLower(m)] {
+			seen[strings.ToLower(m)] = true
+			rest = append(rest, m)
+		}
+	}
+
+	sort.Strings(rest)
+
+	var list []string
+	if def != "" {
+		list = append(list, def)
+	}
+	list = append(list, rest...)
+	if len(list) == 0 {
+		list = []string{"default"}
+	}
+	return list
+}
+
+func (w *ComboWizard) promptPickProvider(c tele.Context, sess *ComboWizardSession, page int) error {
+	if c == nil {
+		return nil
+	}
 	providers, err := w.db.ListProviders()
 	if err != nil || len(providers) == 0 {
 		return c.Reply("❌ Belum ada provider AI aktif yang terdaftar. Buat provider terlebih dahulu via <code>/wizard</code>.", tele.ModeHTML)
 	}
 
-	targetNum := len(sess.Targets) + 1
-	text := fmt.Sprintf("🎯 <b>PILIH TARGET #%d UNTUK COMBO '%s'</b>\n\n", targetNum, html.EscapeString(sess.Name))
+	totalProvs := len(providers)
+	totalPages := (totalProvs + comboProvidersPerPage - 1) / comboProvidersPerPage
+	if page < 0 {
+		page = 0
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+	sess.ProvPage = page
 
-	if len(sess.Targets) > 0 {
-		text += "📋 <b>Rantai Saat Ini:</b>\n"
-		for i, t := range sess.Targets {
-			text += fmt.Sprintf(" %d. <b>%s</b> ➔ <code>%s</code>\n", i+1, html.EscapeString(t.ProviderID), html.EscapeString(t.Model))
-		}
-		text += "\n"
+	startIdx := page * comboProvidersPerPage
+	endIdx := startIdx + comboProvidersPerPage
+	if endIdx > totalProvs {
+		endIdx = totalProvs
+	}
+	pageProvs := providers[startIdx:endIdx]
+
+	targetNum := len(sess.Targets) + 1
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🎯 <b>PILIH TARGET #%d UNTUK COMBO '%s'</b>\n", targetNum, html.EscapeString(sess.Name)))
+	if totalPages > 1 {
+		sb.WriteString(fmt.Sprintf("Halaman <code>%d/%d</code> (Total: <code>%d provider</code>)\n\n", page+1, totalPages, totalProvs))
+	} else {
+		sb.WriteString("\n")
 	}
 
-	text += "Pilih provider yang ingin ditambahkan ke rantai ini:"
+	if len(sess.Targets) > 0 {
+		sb.WriteString("📋 <b>Rantai Saat Ini:</b>\n")
+		for i, t := range sess.Targets {
+			sb.WriteString(fmt.Sprintf(" %d. <b>%s</b> ➔ <code>%s</code>\n", i+1, html.EscapeString(t.ProviderID), html.EscapeString(t.Model)))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("Pilih provider yang ingin ditambahkan ke rantai ini:\n")
+	for i, p := range pageProvs {
+		globalIdx := startIdx + i + 1
+		sb.WriteString(fmt.Sprintf("%d. 🤖 <b>%s</b> (<code>%s</code> | %d model)\n", globalIdx, html.EscapeString(p.Name), html.EscapeString(p.Type), len(p.Models)))
+	}
+	sb.WriteString("\n💡 <i>Klik tombol di bawah atau balas chat dengan nomor/nama provider:</i>\n")
 
 	menu := &tele.ReplyMarkup{}
 	var rows []tele.Row
 
-	for _, p := range providers {
-		provCopy := p
-		btn := menu.Data(fmt.Sprintf("🤖 %s (%s)", provCopy.Name, provCopy.Type), fmt.Sprintf("cwiz_prov_%s", provCopy.ID))
-		rows = append(rows, menu.Row(btn))
+	var curRow []tele.Btn
+	for _, p := range pageProvs {
+		btn := menu.Data(fmt.Sprintf("🤖 %s", p.Name), fmt.Sprintf("cwiz_prov_%s", p.ID))
+		curRow = append(curRow, btn)
+		if len(curRow) == 2 {
+			rows = append(rows, menu.Row(curRow...))
+			curRow = nil
+		}
+	}
+	if len(curRow) > 0 {
+		rows = append(rows, menu.Row(curRow...))
+	}
+
+	// Pagination Navigation
+	if totalPages > 1 {
+		var navRow []tele.Btn
+		if page > 0 {
+			navRow = append(navRow, menu.Data("⬅️ Prev", fmt.Sprintf("cwiz_prov_p_%d", page-1)))
+		}
+		navRow = append(navRow, menu.Data(fmt.Sprintf("📄 %d/%d", page+1, totalPages), "cwiz_noop"))
+		if page < totalPages-1 {
+			navRow = append(navRow, menu.Data("Next ➡️", fmt.Sprintf("cwiz_prov_p_%d", page+1)))
+		}
+		rows = append(rows, menu.Row(navRow...))
 	}
 
 	if len(sess.Targets) > 0 {
@@ -290,10 +453,24 @@ func (w *ComboWizard) promptPickProvider(c tele.Context, sess *ComboWizardSessio
 	rows = append(rows, menu.Row(btnCancel))
 
 	menu.Inline(rows...)
-	return c.EditOrSend(text, menu, tele.ModeHTML)
+	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
 }
 
-// HandleProviderSelect handles provider choice during creation / reordering
+// HandleProviderPage handles pagination for provider selection in combo creation
+func (w *ComboWizard) HandleProviderPage(c tele.Context, page int) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	w.mu.RLock()
+	sess, exists := w.sessions[c.Sender().ID]
+	w.mu.RUnlock()
+	if !exists {
+		return c.Reply("⚠️ Sesi wizard telah berakhir. Ketik <code>/combowizard</code>.", tele.ModeHTML)
+	}
+	return w.promptPickProvider(c, sess, page)
+}
+
+// HandleProviderSelect handles provider choice during creation
 func (w *ComboWizard) HandleProviderSelect(c tele.Context, provID string) error {
 	if c.Sender() == nil {
 		return nil
@@ -305,7 +482,7 @@ func (w *ComboWizard) HandleProviderSelect(c tele.Context, provID string) error 
 	w.mu.RUnlock()
 
 	if !exists {
-		return c.Reply("⚠️ Sesi wizard telah berakhir. Ketik <code>/combos</code> atau <code>/wizard</code> untuk memulai baru.", tele.ModeHTML)
+		return c.Reply("⚠️ Sesi wizard telah berakhir. Ketik <code>/combowizard</code>.", tele.ModeHTML)
 	}
 
 	p, err := w.db.GetProvider(provID)
@@ -315,36 +492,83 @@ func (w *ComboWizard) HandleProviderSelect(c tele.Context, provID string) error 
 
 	sess.SelectedProvider = p
 	sess.Step = StepComboPickModel
+	sess.ModelPage = 0
 
-	return w.promptPickModel(c, sess)
+	return w.promptPickModel(c, sess, 0)
 }
 
-func (w *ComboWizard) promptPickModel(c tele.Context, sess *ComboWizardSession) error {
+func (w *ComboWizard) promptPickModel(c tele.Context, sess *ComboWizardSession, page int) error {
+	if c == nil {
+		return nil
+	}
 	p := sess.SelectedProvider
 	if p == nil {
-		return w.promptPickProvider(c, sess)
+		return w.promptPickProvider(c, sess, 0)
 	}
 
-	models := p.Models
-	if len(models) == 0 && p.DefaultModel != "" {
-		models = []string{p.DefaultModel}
+	models := w.getModelsForProvider(p)
+	totalModels := len(models)
+	totalPages := (totalModels + comboModelsPerPage - 1) / comboModelsPerPage
+	if page < 0 {
+		page = 0
 	}
-	if len(models) == 0 {
-		models = []string{"default"}
+	if page >= totalPages {
+		page = totalPages - 1
 	}
+	sess.ModelPage = page
 
-	text := fmt.Sprintf("🧠 <b>PILIH MODEL DARI PROVIDER: %s</b>\n\n"+
-		"Pilih model yang akan digunakan dalam rantai target ini:", html.EscapeString(p.Name))
+	startIdx := page * comboModelsPerPage
+	endIdx := startIdx + comboModelsPerPage
+	if endIdx > totalModels {
+		endIdx = totalModels
+	}
+	pageModels := models[startIdx:endIdx]
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🧠 <b>PILIH MODEL DARI: %s</b>\n", html.EscapeString(strings.ToUpper(p.Name))))
+	sb.WriteString(fmt.Sprintf("Target #%d untuk combo '%s' | Hal <code>%d/%d</code> (Total: <code>%d model</code>)\n\n",
+		len(sess.Targets)+1, html.EscapeString(sess.Name), page+1, totalPages, totalModels))
+	sb.WriteString("Daftar model tersedia:\n")
+
+	for i, m := range pageModels {
+		globalIdx := startIdx + i + 1
+		isDef := strings.EqualFold(m, p.DefaultModel)
+		defTag := ""
+		if isDef {
+			defTag = " ⭐ (Default)"
+		}
+		sb.WriteString(fmt.Sprintf("%d. <code>%s</code>%s\n", globalIdx, html.EscapeString(m), defTag))
+	}
+	sb.WriteString("\n💡 <i>Klik tombol di bawah, gunakan pagination, atau balas chat dengan <b>nomor</b> atau <b>nama model</b>:</i>\n")
 
 	menu := &tele.ReplyMarkup{}
 	var rows []tele.Row
 
-	for i, m := range models {
-		if i >= 15 {
-			break
+	for i, m := range pageModels {
+		globalIdx := startIdx + i
+		isDef := strings.EqualFold(m, p.DefaultModel)
+		btnLabel := m
+		if len([]rune(btnLabel)) > 26 {
+			btnLabel = string([]rune(btnLabel)[:23]) + "..."
 		}
-		btn := menu.Data(fmt.Sprintf("⚡ %s", m), fmt.Sprintf("cwiz_mod_%d", i))
+		if isDef {
+			btnLabel = "⭐ " + btnLabel
+		}
+		btn := menu.Data(btnLabel, fmt.Sprintf("cwiz_mod_%d", globalIdx))
 		rows = append(rows, menu.Row(btn))
+	}
+
+	// Pagination Navigation
+	if totalPages > 1 {
+		var navRow []tele.Btn
+		if page > 0 {
+			navRow = append(navRow, menu.Data("⬅️ Prev", fmt.Sprintf("cwiz_mod_p_%d", page-1)))
+		}
+		navRow = append(navRow, menu.Data(fmt.Sprintf("📄 %d/%d", page+1, totalPages), "cwiz_noop"))
+		if page < totalPages-1 {
+			navRow = append(navRow, menu.Data("Next ➡️", fmt.Sprintf("cwiz_mod_p_%d", page+1)))
+		}
+		rows = append(rows, menu.Row(navRow...))
 	}
 
 	btnBack := menu.Data("⬅️ Ganti Provider", "cwiz_back_prov")
@@ -352,10 +576,24 @@ func (w *ComboWizard) promptPickModel(c tele.Context, sess *ComboWizardSession) 
 	rows = append(rows, menu.Row(btnBack, btnCancel))
 
 	menu.Inline(rows...)
-	return c.EditOrSend(text, menu, tele.ModeHTML)
+	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
 }
 
-// HandleModelSelect handles model choice during creation / reordering
+// HandleModelPage handles pagination for model selection in combo creation
+func (w *ComboWizard) HandleModelPage(c tele.Context, page int) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	w.mu.RLock()
+	sess, exists := w.sessions[c.Sender().ID]
+	w.mu.RUnlock()
+	if !exists {
+		return c.Reply("⚠️ Sesi wizard telah berakhir. Ketik <code>/combowizard</code>.", tele.ModeHTML)
+	}
+	return w.promptPickModel(c, sess, page)
+}
+
+// HandleModelSelect handles model choice during creation
 func (w *ComboWizard) HandleModelSelect(c tele.Context, modelIdx int) error {
 	if c.Sender() == nil {
 		return nil
@@ -371,14 +609,26 @@ func (w *ComboWizard) HandleModelSelect(c tele.Context, modelIdx int) error {
 	}
 
 	p := sess.SelectedProvider
-	models := p.Models
-	if len(models) == 0 && p.DefaultModel != "" {
-		models = []string{p.DefaultModel}
+	allModels := w.getModelsForProvider(p)
+	selectedModel := p.DefaultModel
+	if modelIdx >= 0 && modelIdx < len(allModels) {
+		selectedModel = allModels[modelIdx]
 	}
 
-	selectedModel := p.DefaultModel
-	if modelIdx >= 0 && modelIdx < len(models) {
-		selectedModel = models[modelIdx]
+	return w.applySelectedModel(c, sess, selectedModel)
+}
+
+func (w *ComboWizard) applySelectedModel(c tele.Context, sess *ComboWizardSession, selectedModel string) error {
+	p := sess.SelectedProvider
+	if p == nil {
+		return w.promptPickProvider(c, sess, 0)
+	}
+
+	if selectedModel == "" {
+		selectedModel = p.DefaultModel
+	}
+	if selectedModel == "" {
+		selectedModel = "default"
 	}
 
 	priority := len(sess.Targets) + 1
@@ -390,8 +640,31 @@ func (w *ComboWizard) HandleModelSelect(c tele.Context, modelIdx int) error {
 
 	sess.SelectedProvider = nil
 	sess.Step = StepComboPickProvider
+	sess.ModelPage = 0
 
-	return w.promptPickProvider(c, sess)
+	return w.promptPickProvider(c, sess, sess.ProvPage)
+}
+
+// HandleBackToProvider goes back to provider selection preserving targets
+func (w *ComboWizard) HandleBackToProvider(c tele.Context) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	w.mu.RLock()
+	sess, exists := w.sessions[c.Sender().ID]
+	w.mu.RUnlock()
+	if !exists {
+		return w.StartWizard(c)
+	}
+
+	sess.SelectedProvider = nil
+	if sess.IsEditing {
+		sess.Step = StepComboEditAddTargetPickProv
+		return w.promptEditAddTargetPickProv(c, sess, sess.ProvPage)
+	}
+
+	sess.Step = StepComboPickProvider
+	return w.promptPickProvider(c, sess, sess.ProvPage)
 }
 
 // HandleSaveCombo finalizes and saves the combo
@@ -447,38 +720,109 @@ func (w *ComboWizard) HandleSaveCombo(c tele.Context) error {
 
 // HandleEditAddTargetStart starts adding a new target to existing combo
 func (w *ComboWizard) HandleEditAddTargetStart(c tele.Context, comboName string) error {
-	providers, err := w.db.ListProviders()
-	if err != nil || len(providers) == 0 {
-		return c.Reply("❌ Belum ada provider AI yang terdaftar.")
-	}
-
-	text := fmt.Sprintf("➕ <b>TAMBAH TARGET KE COMBO '%s'</b>\n\nPilih provider untuk target baru ini:", html.EscapeString(comboName))
-
-	menu := &tele.ReplyMarkup{}
-	var rows []tele.Row
-
-	for _, p := range providers {
-		provCopy := p
-		btn := menu.Data(fmt.Sprintf("🤖 %s (%s)", provCopy.Name, provCopy.Type), fmt.Sprintf("cwiz_ed_prov_%s", provCopy.ID))
-		rows = append(rows, menu.Row(btn))
-	}
-
-	btnBack := menu.Data("⬅️ Batal / Kembali", fmt.Sprintf("cwiz_ed_pick_%s", comboName))
-	rows = append(rows, menu.Row(btnBack))
-	menu.Inline(rows...)
-
 	if c.Sender() != nil {
 		w.mu.Lock()
 		w.sessions[c.Sender().ID] = &ComboWizardSession{
 			IsEditing:        true,
 			EditingComboName: comboName,
 			Step:             StepComboEditAddTargetPickProv,
+			ProvPage:         0,
 			CreatedAt:        time.Now(),
 		}
 		w.mu.Unlock()
 	}
 
-	return c.EditOrSend(text, menu, tele.ModeHTML)
+	w.mu.RLock()
+	sess := w.sessions[c.Sender().ID]
+	w.mu.RUnlock()
+
+	return w.promptEditAddTargetPickProv(c, sess, 0)
+}
+
+func (w *ComboWizard) promptEditAddTargetPickProv(c tele.Context, sess *ComboWizardSession, page int) error {
+	providers, err := w.db.ListProviders()
+	if err != nil || len(providers) == 0 {
+		return c.Reply("❌ Belum ada provider AI yang terdaftar.")
+	}
+
+	totalProvs := len(providers)
+	totalPages := (totalProvs + comboProvidersPerPage - 1) / comboProvidersPerPage
+	if page < 0 {
+		page = 0
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+	sess.ProvPage = page
+
+	startIdx := page * comboProvidersPerPage
+	endIdx := startIdx + comboProvidersPerPage
+	if endIdx > totalProvs {
+		endIdx = totalProvs
+	}
+	pageProvs := providers[startIdx:endIdx]
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("➕ <b>TAMBAH TARGET KE COMBO '%s'</b>\n", html.EscapeString(sess.EditingComboName)))
+	if totalPages > 1 {
+		sb.WriteString(fmt.Sprintf("Halaman <code>%d/%d</code> (Total: <code>%d provider</code>)\n\n", page+1, totalPages, totalProvs))
+	} else {
+		sb.WriteString("\n")
+	}
+	sb.WriteString("Pilih provider untuk target baru ini:\n")
+	for i, p := range pageProvs {
+		globalIdx := startIdx + i + 1
+		sb.WriteString(fmt.Sprintf("%d. 🤖 <b>%s</b> (<code>%s</code> | %d model)\n", globalIdx, html.EscapeString(p.Name), html.EscapeString(p.Type), len(p.Models)))
+	}
+	sb.WriteString("\n💡 <i>Klik tombol di bawah atau balas chat dengan nomor/nama provider:</i>\n")
+
+	menu := &tele.ReplyMarkup{}
+	var rows []tele.Row
+
+	var curRow []tele.Btn
+	for _, p := range pageProvs {
+		btn := menu.Data(fmt.Sprintf("🤖 %s", p.Name), fmt.Sprintf("cwiz_ed_prov_%s", p.ID))
+		curRow = append(curRow, btn)
+		if len(curRow) == 2 {
+			rows = append(rows, menu.Row(curRow...))
+			curRow = nil
+		}
+	}
+	if len(curRow) > 0 {
+		rows = append(rows, menu.Row(curRow...))
+	}
+
+	if totalPages > 1 {
+		var navRow []tele.Btn
+		if page > 0 {
+			navRow = append(navRow, menu.Data("⬅️ Prev", fmt.Sprintf("cwiz_ed_prov_p_%d", page-1)))
+		}
+		navRow = append(navRow, menu.Data(fmt.Sprintf("📄 %d/%d", page+1, totalPages), "cwiz_noop"))
+		if page < totalPages-1 {
+			navRow = append(navRow, menu.Data("Next ➡️", fmt.Sprintf("cwiz_ed_prov_p_%d", page+1)))
+		}
+		rows = append(rows, menu.Row(navRow...))
+	}
+
+	btnBack := menu.Data("⬅️ Batal / Kembali", fmt.Sprintf("cwiz_ed_pick_%s", sess.EditingComboName))
+	rows = append(rows, menu.Row(btnBack))
+	menu.Inline(rows...)
+
+	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
+}
+
+// HandleEditAddTargetProvPage handles pagination for provider selection in edit mode
+func (w *ComboWizard) HandleEditAddTargetProvPage(c tele.Context, page int) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	w.mu.RLock()
+	sess, exists := w.sessions[c.Sender().ID]
+	w.mu.RUnlock()
+	if !exists {
+		return c.Reply("⚠️ Sesi edit telah berakhir. Gunakan <code>/editcombo</code>.", tele.ModeHTML)
+	}
+	return w.promptEditAddTargetPickProv(c, sess, page)
 }
 
 // HandleEditAddTargetProvSelect handles provider choice when adding target to combo
@@ -503,33 +847,101 @@ func (w *ComboWizard) HandleEditAddTargetProvSelect(c tele.Context, provID strin
 
 	sess.SelectedProvider = p
 	sess.Step = StepComboEditAddTargetPickMod
+	sess.ModelPage = 0
 
-	models := p.Models
-	if len(models) == 0 && p.DefaultModel != "" {
-		models = []string{p.DefaultModel}
-	}
-	if len(models) == 0 {
-		models = []string{"default"}
+	return w.promptEditAddTargetPickMod(c, sess, 0)
+}
+
+func (w *ComboWizard) promptEditAddTargetPickMod(c tele.Context, sess *ComboWizardSession, page int) error {
+	p := sess.SelectedProvider
+	if p == nil {
+		return w.promptEditAddTargetPickProv(c, sess, 0)
 	}
 
-	text := fmt.Sprintf("🧠 <b>PILIH MODEL DARI %s UNTUK COMBO '%s'</b>\n\nPilih model:", html.EscapeString(p.Name), html.EscapeString(sess.EditingComboName))
+	models := w.getModelsForProvider(p)
+	totalModels := len(models)
+	totalPages := (totalModels + comboModelsPerPage - 1) / comboModelsPerPage
+	if page < 0 {
+		page = 0
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+	sess.ModelPage = page
+
+	startIdx := page * comboModelsPerPage
+	endIdx := startIdx + comboModelsPerPage
+	if endIdx > totalModels {
+		endIdx = totalModels
+	}
+	pageModels := models[startIdx:endIdx]
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🧠 <b>PILIH MODEL DARI: %s</b>\n", html.EscapeString(strings.ToUpper(p.Name))))
+	sb.WriteString(fmt.Sprintf("Target baru combo '%s' | Hal <code>%d/%d</code> (Total: <code>%d model</code>)\n\n",
+		html.EscapeString(sess.EditingComboName), page+1, totalPages, totalModels))
+	sb.WriteString("Daftar model tersedia:\n")
+
+	for i, m := range pageModels {
+		globalIdx := startIdx + i + 1
+		isDef := strings.EqualFold(m, p.DefaultModel)
+		defTag := ""
+		if isDef {
+			defTag = " ⭐ (Default)"
+		}
+		sb.WriteString(fmt.Sprintf("%d. <code>%s</code>%s\n", globalIdx, html.EscapeString(m), defTag))
+	}
+	sb.WriteString("\n💡 <i>Klik tombol di bawah, gunakan pagination, atau balas chat dengan <b>nomor</b> atau <b>nama model</b>:</i>\n")
 
 	menu := &tele.ReplyMarkup{}
 	var rows []tele.Row
 
-	for i, m := range models {
-		if i >= 15 {
-			break
+	for i, m := range pageModels {
+		globalIdx := startIdx + i
+		isDef := strings.EqualFold(m, p.DefaultModel)
+		btnLabel := m
+		if len([]rune(btnLabel)) > 26 {
+			btnLabel = string([]rune(btnLabel)[:23]) + "..."
 		}
-		btn := menu.Data(fmt.Sprintf("⚡ %s", m), fmt.Sprintf("cwiz_ed_mod_%d", i))
+		if isDef {
+			btnLabel = "⭐ " + btnLabel
+		}
+		btn := menu.Data(btnLabel, fmt.Sprintf("cwiz_ed_mod_%d", globalIdx))
 		rows = append(rows, menu.Row(btn))
 	}
 
-	btnBack := menu.Data("⬅️ Ganti Provider", "cwiz_ed_add_target")
-	rows = append(rows, menu.Row(btnBack))
-	menu.Inline(rows...)
+	if totalPages > 1 {
+		var navRow []tele.Btn
+		if page > 0 {
+			navRow = append(navRow, menu.Data("⬅️ Prev", fmt.Sprintf("cwiz_ed_mod_p_%d", page-1)))
+		}
+		navRow = append(navRow, menu.Data(fmt.Sprintf("📄 %d/%d", page+1, totalPages), "cwiz_noop"))
+		if page < totalPages-1 {
+			navRow = append(navRow, menu.Data("Next ➡️", fmt.Sprintf("cwiz_ed_mod_p_%d", page+1)))
+		}
+		rows = append(rows, menu.Row(navRow...))
+	}
 
-	return c.EditOrSend(text, menu, tele.ModeHTML)
+	btnBack := menu.Data("⬅️ Ganti Provider", "cwiz_ed_add_target")
+	btnCancel := menu.Data("❌ Batal", "cwiz_cancel")
+	rows = append(rows, menu.Row(btnBack, btnCancel))
+
+	menu.Inline(rows...)
+	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
+}
+
+// HandleEditAddTargetModPage handles pagination for model selection in edit mode
+func (w *ComboWizard) HandleEditAddTargetModPage(c tele.Context, page int) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	w.mu.RLock()
+	sess, exists := w.sessions[c.Sender().ID]
+	w.mu.RUnlock()
+	if !exists {
+		return c.Reply("⚠️ Sesi edit telah berakhir. Gunakan <code>/editcombo</code>.", tele.ModeHTML)
+	}
+	return w.promptEditAddTargetPickMod(c, sess, page)
 }
 
 // HandleEditAddTargetModSelect finalizes adding target to existing combo
@@ -547,20 +959,32 @@ func (w *ComboWizard) HandleEditAddTargetModSelect(c tele.Context, modelIdx int)
 		return c.Reply("⚠️ Sesi edit telah berakhir. Gunakan <code>/editcombo</code>.", tele.ModeHTML)
 	}
 
+	p := sess.SelectedProvider
+	allModels := w.getModelsForProvider(p)
+	selectedModel := p.DefaultModel
+	if modelIdx >= 0 && modelIdx < len(allModels) {
+		selectedModel = allModels[modelIdx]
+	}
+
+	return w.applyEditAddTargetModel(c, sess, selectedModel)
+}
+
+func (w *ComboWizard) applyEditAddTargetModel(c tele.Context, sess *ComboWizardSession, selectedModel string) error {
 	combo, err := w.db.GetCombo(sess.EditingComboName)
 	if err != nil || combo == nil {
 		return c.Reply("❌ Combo tidak ditemukan.")
 	}
 
 	p := sess.SelectedProvider
-	models := p.Models
-	if len(models) == 0 && p.DefaultModel != "" {
-		models = []string{p.DefaultModel}
+	if p == nil {
+		return w.HandleEditAddTargetStart(c, sess.EditingComboName)
 	}
 
-	selectedModel := p.DefaultModel
-	if modelIdx >= 0 && modelIdx < len(models) {
-		selectedModel = models[modelIdx]
+	if selectedModel == "" {
+		selectedModel = p.DefaultModel
+	}
+	if selectedModel == "" {
+		selectedModel = "default"
 	}
 
 	priority := len(combo.Targets) + 1
@@ -578,7 +1002,8 @@ func (w *ComboWizard) HandleEditAddTargetModSelect(c tele.Context, modelIdx int)
 	sess.SelectedProvider = nil
 	w.mu.Unlock()
 
-	_ = c.Reply(fmt.Sprintf("✅ Target baru (<b>%s</b> ➔ <code>%s</code>) berhasil ditambahkan ke combo <b>%s</b>!", html.EscapeString(p.ID), html.EscapeString(selectedModel), html.EscapeString(combo.Name)), tele.ModeHTML)
+	_ = c.Reply(fmt.Sprintf("✅ Target baru (<b>%s</b> ➔ <code>%s</code>) berhasil ditambahkan ke combo <b>%s</b>!",
+		html.EscapeString(p.ID), html.EscapeString(selectedModel), html.EscapeString(combo.Name)), tele.ModeHTML)
 	return w.RenderComboEditDashboard(c, combo)
 }
 

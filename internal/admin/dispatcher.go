@@ -108,7 +108,19 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		return a.modelUI.HandleSetDefaultCallback(c)
 	}
 	if data == "mod_menu_combos" {
-		txt, kb := a.modelUI.RenderCombosList(c)
+		txt, kb := a.modelUI.RenderCombosList(c, 0)
+		return c.EditOrSend(txt, kb, tele.ModeHTML)
+	}
+	if strings.HasPrefix(data, "mod_c_prev_") {
+		var page int
+		fmt.Sscanf(strings.TrimPrefix(data, "mod_c_prev_"), "%d", &page)
+		txt, kb := a.modelUI.RenderCombosList(c, page)
+		return c.EditOrSend(txt, kb, tele.ModeHTML)
+	}
+	if strings.HasPrefix(data, "mod_c_next_") {
+		var page int
+		fmt.Sscanf(strings.TrimPrefix(data, "mod_c_next_"), "%d", &page)
+		txt, kb := a.modelUI.RenderCombosList(c, page)
 		return c.EditOrSend(txt, kb, tele.ModeHTML)
 	}
 	if data == "mod_menu_providers" {
@@ -156,7 +168,7 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 			return a.modelUI.HandleSetModelCallback(c, provName, modelIdx)
 		}
 	}
-	if data == "mod_noop" {
+	if data == "mod_noop" || data == "cwiz_noop" {
 		return c.Respond(&tele.CallbackResponse{})
 	}
 
@@ -223,18 +235,38 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		comboName := strings.TrimPrefix(data, "cwiz_ed_pick_")
 		return a.comboWizard.StartEditWizard(c, comboName)
 	}
+	if strings.HasPrefix(data, "cwiz_prov_p_") {
+		var page int
+		fmt.Sscanf(strings.TrimPrefix(data, "cwiz_prov_p_"), "%d", &page)
+		return a.comboWizard.HandleProviderPage(c, page)
+	}
 	if strings.HasPrefix(data, "cwiz_prov_") {
 		provID := strings.TrimPrefix(data, "cwiz_prov_")
 		return a.comboWizard.HandleProviderSelect(c, provID)
+	}
+	if strings.HasPrefix(data, "cwiz_mod_p_") {
+		var page int
+		fmt.Sscanf(strings.TrimPrefix(data, "cwiz_mod_p_"), "%d", &page)
+		return a.comboWizard.HandleModelPage(c, page)
 	}
 	if strings.HasPrefix(data, "cwiz_mod_") {
 		var idx int
 		fmt.Sscanf(strings.TrimPrefix(data, "cwiz_mod_"), "%d", &idx)
 		return a.comboWizard.HandleModelSelect(c, idx)
 	}
+	if strings.HasPrefix(data, "cwiz_ed_prov_p_") {
+		var page int
+		fmt.Sscanf(strings.TrimPrefix(data, "cwiz_ed_prov_p_"), "%d", &page)
+		return a.comboWizard.HandleEditAddTargetProvPage(c, page)
+	}
 	if strings.HasPrefix(data, "cwiz_ed_prov_") {
 		provID := strings.TrimPrefix(data, "cwiz_ed_prov_")
 		return a.comboWizard.HandleEditAddTargetProvSelect(c, provID)
+	}
+	if strings.HasPrefix(data, "cwiz_ed_mod_p_") {
+		var page int
+		fmt.Sscanf(strings.TrimPrefix(data, "cwiz_ed_mod_p_"), "%d", &page)
+		return a.comboWizard.HandleEditAddTargetModPage(c, page)
 	}
 	if strings.HasPrefix(data, "cwiz_ed_mod_") {
 		var idx int

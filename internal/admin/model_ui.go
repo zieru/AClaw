@@ -214,44 +214,88 @@ func (ui *ModelUI) ModelMenuKeyboard(userID int64) *tele.ReplyMarkup {
 	return menu
 }
 
-// RenderCombosList renders available combos for selection
-func (ui *ModelUI) RenderCombosList(c tele.Context) (string, *tele.ReplyMarkup) {
-	if c.Sender() != nil {
-		ui.setSession(c.Sender().ID, ModelUIStepPickCombo, "", 0)
-	}
+const combosPerPage = 6
 
+// RenderCombosList renders available combos for selection with pagination
+func (ui *ModelUI) RenderCombosList(c tele.Context, page int) (string, *tele.ReplyMarkup) {
 	combos := ui.providerManager.ListCombos()
 	menu := &tele.ReplyMarkup{}
 	var rows []tele.Row
 
-	var sb strings.Builder
-	sb.WriteString("🔀 <b>PILIH MODEL COMBO / CHAIN</b>\n\n")
-
-	if len(combos) == 0 {
+	totalCombos := len(combos)
+	if totalCombos == 0 {
+		if c.Sender() != nil {
+			ui.setSession(c.Sender().ID, ModelUIStepPickCombo, "", 0)
+		}
+		var sb strings.Builder
+		sb.WriteString("🔀 <b>PILIH MODEL COMBO / CHAIN</b>\n\n")
 		sb.WriteString("<i>(Belum ada combo yang terdaftar. Buat dengan <code>/addcombo</code> atau <code>/combowizard</code>)</i>\n\n")
-	} else {
-		sb.WriteString("Pilih salah satu fallback combo di bawah untuk diterapkan:\n\n")
-		var curRow []tele.Btn
-
-		for i, cRec := range combos {
-			var targets []string
-			for _, t := range cRec.Targets {
-				targets = append(targets, fmt.Sprintf("%s/%s", t.ProviderID, t.Model))
-			}
-			sb.WriteString(fmt.Sprintf("%d. <b>%s</b>\n   • <i>Targets:</i> <code>%s</code>\n", i+1, html.EscapeString(cRec.Name), html.EscapeString(strings.Join(targets, " ➔ "))))
-
-			btn := menu.Data(fmt.Sprintf("🔀 %s", cRec.Name), fmt.Sprintf("mod_set_c_%s", cRec.Name))
-			curRow = append(curRow, btn)
-			if len(curRow) == 2 {
-				rows = append(rows, menu.Row(curRow...))
-				curRow = []tele.Btn{}
-			}
-		}
-		if len(curRow) > 0 {
-			rows = append(rows, menu.Row(curRow...))
-		}
-		sb.WriteString("\n💡 <i>Klik tombol di bawah atau balas chat dengan nomor/nama combo pilihan Anda:</i>\n")
+		btnBack := menu.Data("⬅️ Kembali ke Menu Model", "mod_main")
+		menu.Inline(menu.Row(btnBack))
+		return sb.String(), menu
 	}
+
+	totalPages := (totalCombos + combosPerPage - 1) / combosPerPage
+	if page < 0 {
+		page = 0
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+
+	if c.Sender() != nil {
+		ui.setSession(c.Sender().ID, ModelUIStepPickCombo, "", page)
+	}
+
+	startIdx := page * combosPerPage
+	endIdx := startIdx + combosPerPage
+	if endIdx > totalCombos {
+		endIdx = totalCombos
+	}
+	pageCombos := combos[startIdx:endIdx]
+
+	var sb strings.Builder
+	sb.WriteString("🔀 <b>PILIH MODEL COMBO / CHAIN</b>\n")
+	if totalPages > 1 {
+		sb.WriteString(fmt.Sprintf("Halaman <code>%d/%d</code> (Total: <code>%d combo</code>)\n\n", page+1, totalPages, totalCombos))
+	} else {
+		sb.WriteString("\n")
+	}
+	sb.WriteString("Pilih salah satu fallback combo di bawah untuk diterapkan:\n\n")
+
+	var curRow []tele.Btn
+	for i, cRec := range pageCombos {
+		globalIdx := startIdx + i + 1
+		var targets []string
+		for _, t := range cRec.Targets {
+			targets = append(targets, fmt.Sprintf("%s/%s", t.ProviderID, t.Model))
+		}
+		sb.WriteString(fmt.Sprintf("%d. <b>%s</b>\n   • <i>Targets:</i> <code>%s</code>\n", globalIdx, html.EscapeString(cRec.Name), html.EscapeString(strings.Join(targets, " ➔ "))))
+
+		btn := menu.Data(fmt.Sprintf("🔀 %s", cRec.Name), fmt.Sprintf("mod_set_c_%s", cRec.Name))
+		curRow = append(curRow, btn)
+		if len(curRow) == 2 {
+			rows = append(rows, menu.Row(curRow...))
+			curRow = nil
+		}
+	}
+	if len(curRow) > 0 {
+		rows = append(rows, menu.Row(curRow...))
+	}
+
+	if totalPages > 1 {
+		var navRow []tele.Btn
+		if page > 0 {
+			navRow = append(navRow, menu.Data("⬅️ Prev", fmt.Sprintf("mod_c_prev_%d", page-1)))
+		}
+		navRow = append(navRow, menu.Data(fmt.Sprintf("📄 %d/%d", page+1, totalPages), "mod_noop"))
+		if page < totalPages-1 {
+			navRow = append(navRow, menu.Data("Next ➡️", fmt.Sprintf("mod_c_next_%d", page+1)))
+		}
+		rows = append(rows, menu.Row(navRow...))
+	}
+
+	sb.WriteString("\n💡 <i>Klik tombol di bawah atau balas chat dengan nomor/nama combo pilihan Anda:</i>\n")
 
 	btnBack := menu.Data("⬅️ Kembali ke Menu Model", "mod_main")
 	rows = append(rows, menu.Row(btnBack))

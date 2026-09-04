@@ -48,6 +48,10 @@ func (ui *ComboUI) RenderCombosList() string {
 				sb.WriteString(fmt.Sprintf("   • Info: <i>%s</i>\n", html.EscapeString(c.Description)))
 			}
 			sb.WriteString(fmt.Sprintf("   • Chain: %s\n\n", strings.Join(targetsStr, " ➔ ")))
+			if sb.Len() > 3600 {
+				sb.WriteString(fmt.Sprintf("<i>...dan %d combo lainnya.</i>\n\n", len(combos)-i-1))
+				break
+			}
 		}
 	}
 

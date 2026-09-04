@@ -461,7 +461,7 @@ func (a *AdminBot) registerRoutes() {
 		return c.EditOrSend("❌ Combo wizard dibatalkan.", a.comboUI.CombosKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "cwiz_back_prov"}, func(c tele.Context) error {
-		return a.comboWizard.StartWizard(c)
+		return a.comboWizard.HandleBackToProvider(c)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_add_target"}, func(c tele.Context) error {
 		if c.Sender() == nil {
