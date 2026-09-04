@@ -58,9 +58,15 @@ func (p *GeminiProvider) SetHTTPClient(client interface{}) {
 	}
 }
 
+type geminiBlob struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
+}
+
 type geminiPart struct {
 	Text             string              `json:"text,omitempty"`
 	Thought          string              `json:"thought,omitempty"`
+	InlineData       *geminiBlob         `json:"inlineData,omitempty"`
 	FunctionCall     *geminiFunctionCall `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResp `json:"functionResponse,omitempty"`
 	ThoughtSignature string              `json:"thought_signature,omitempty"`
@@ -624,6 +630,21 @@ func buildGeminiContents(messages []ChatMessage) ([]geminiContent, *geminiConten
 		} else {
 			if m.Content != "" {
 				parts = append(parts, geminiPart{Text: m.Content})
+			}
+			for _, img := range m.Images {
+				mimeType := "image/jpeg"
+				data := img
+				if strings.HasPrefix(img, "data:") && strings.Contains(img, ";base64,") {
+					partsMime := strings.SplitN(img[5:], ";base64,", 2)
+					mimeType = partsMime[0]
+					data = partsMime[1]
+				}
+				parts = append(parts, geminiPart{
+					InlineData: &geminiBlob{
+						MimeType: mimeType,
+						Data:     data,
+					},
+				})
 			}
 			for _, tc := range m.ToolCalls {
 				sig := tc.ThoughtSignature

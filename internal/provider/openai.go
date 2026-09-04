@@ -107,7 +107,7 @@ type openAIToolCall struct {
 
 type openAIMessage struct {
 	Role       string           `json:"role"`
-	Content    string           `json:"content,omitempty"`
+	Content    interface{}      `json:"content,omitempty"`
 	Name       string           `json:"name,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
@@ -122,6 +122,60 @@ type openAIFunctionDef struct {
 type openAIToolDef struct {
 	Type     string            `json:"type"`
 	Function openAIFunctionDef `json:"function"`
+}
+
+func buildOpenAIMessages(messages []ChatMessage) []openAIMessage {
+	var msgs []openAIMessage
+	for _, m := range messages {
+		var toolCalls []openAIToolCall
+		for _, tc := range m.ToolCalls {
+			argBytes, _ := json.Marshal(tc.Arguments)
+			toolCalls = append(toolCalls, openAIToolCall{
+				ID:   tc.ID,
+				Type: "function",
+				Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{
+					Name:      tc.Name,
+					Arguments: string(argBytes),
+				},
+			})
+		}
+
+		var msgContent interface{} = m.Content
+		if len(m.Images) > 0 {
+			var parts []map[string]interface{}
+			if m.Content != "" {
+				parts = append(parts, map[string]interface{}{
+					"type": "text",
+					"text": m.Content,
+				})
+			}
+			for _, img := range m.Images {
+				url := img
+				if !strings.HasPrefix(url, "data:") && !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+					url = "data:image/jpeg;base64," + img
+				}
+				parts = append(parts, map[string]interface{}{
+					"type": "image_url",
+					"image_url": map[string]interface{}{
+						"url": url,
+					},
+				})
+			}
+			msgContent = parts
+		}
+
+		msgs = append(msgs, openAIMessage{
+			Role:       string(m.Role),
+			Content:    msgContent,
+			Name:       m.Name,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  toolCalls,
+		})
+	}
+	return msgs
 }
 
 type openAIReqBody struct {
@@ -181,32 +235,7 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		model = p.defaultModel
 	}
 
-	var msgs []openAIMessage
-	for _, m := range req.Messages {
-		var toolCalls []openAIToolCall
-		for _, tc := range m.ToolCalls {
-			argBytes, _ := json.Marshal(tc.Arguments)
-			toolCalls = append(toolCalls, openAIToolCall{
-				ID:   tc.ID,
-				Type: "function",
-				Function: struct {
-					Name      string `json:"name"`
-					Arguments string `json:"arguments"`
-				}{
-					Name:      tc.Name,
-					Arguments: string(argBytes),
-				},
-			})
-		}
-
-		msgs = append(msgs, openAIMessage{
-			Role:       string(m.Role),
-			Content:    m.Content,
-			Name:       m.Name,
-			ToolCallID: m.ToolCallID,
-			ToolCalls:  toolCalls,
-		})
-	}
+	msgs := buildOpenAIMessages(req.Messages)
 
 	var toolDefs []openAIToolDef
 	for _, t := range req.Tools {
@@ -458,31 +487,7 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		model = p.defaultModel
 	}
 
-	var msgs []openAIMessage
-	for _, m := range req.Messages {
-		var toolCalls []openAIToolCall
-		for _, tc := range m.ToolCalls {
-			argBytes, _ := json.Marshal(tc.Arguments)
-			toolCalls = append(toolCalls, openAIToolCall{
-				ID:   tc.ID,
-				Type: "function",
-				Function: struct {
-					Name      string `json:"name"`
-					Arguments string `json:"arguments"`
-				}{
-					Name:      tc.Name,
-					Arguments: string(argBytes),
-				},
-			})
-		}
-		msgs = append(msgs, openAIMessage{
-			Role:       string(m.Role),
-			Content:    m.Content,
-			Name:       m.Name,
-			ToolCallID: m.ToolCallID,
-			ToolCalls:  toolCalls,
-		})
-	}
+	msgs := buildOpenAIMessages(req.Messages)
 
 	var toolDefs []openAIToolDef
 	for _, t := range req.Tools {

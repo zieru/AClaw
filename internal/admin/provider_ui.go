@@ -711,7 +711,7 @@ func (ui *ProviderUI) syncProviderToManager(p *storage.ProviderRecord) {
 		inst.SetHTTPClient(proxyClient)
 	}
 
-	ui.providerManager.Register(inst, p.Priority)
+	ui.providerManager.RegisterWithID(p.ID, inst, p.Priority)
 }
 
 func formatModelsSummary(models []string, maxDisplay int) string {

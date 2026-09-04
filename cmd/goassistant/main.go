@@ -155,7 +155,7 @@ func main() {
 			Priority:     1,
 		}
 		_ = db.SaveProvider(default9Router)
-		provMgr.Register(provider.NewOpenAIProviderWithKeys(default9Router.Name, default9Router.Type, default9Router.BaseURL, default9Router.APIKeys, default9Router.KeyStrategy, default9Router.DefaultModel, default9Router.Models), 1)
+		provMgr.RegisterWithID(default9Router.ID, provider.NewOpenAIProviderWithKeys(default9Router.Name, default9Router.Type, default9Router.BaseURL, default9Router.APIKeys, default9Router.KeyStrategy, default9Router.DefaultModel, default9Router.Models), 1)
 		log.Printf("🤖 Provider default 9Router didaftarkan (%s)", default9Router.DefaultModel)
 	} else {
 		for _, p := range dbProviders {
@@ -198,7 +198,7 @@ func main() {
 			default:
 				inst = provider.NewOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
 			}
-			provMgr.Register(inst, p.Priority)
+			provMgr.RegisterWithID(p.ID, inst, p.Priority)
 			log.Printf("🤖 Provider aktif: %s (Tipe: %s, Default Model: %s, Keys: %d)", p.Name, p.Type, p.DefaultModel, len(keys))
 		}
 	}

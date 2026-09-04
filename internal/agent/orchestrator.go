@@ -56,6 +56,7 @@ type UserRequest struct {
 	UserName       string
 	UserPrompt     string
 	AttachedFileMB float64
+	AttachedImages []string // Base64 data URLs for vision models
 	PreferredRole  string
 	PreferredProv  string
 	OnProgress     func(status string)
@@ -223,6 +224,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	messages = append(messages, provider.ChatMessage{
 		Role:    provider.RoleUser,
 		Content: req.UserPrompt,
+		Images:  req.AttachedImages,
 	})
 
 	// 9. Execute with Tool Loop (up to 5 turns)

@@ -45,6 +45,7 @@ type ToolCall struct {
 type ChatMessage struct {
 	Role       MessageRole `json:"role"`
 	Content    string      `json:"content"`
+	Images     []string    `json:"images,omitempty"` // Base64 data strings or URLs for vision models
 	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 	ToolCallID string      `json:"tool_call_id,omitempty"` // For role=tool response
 	Name       string      `json:"name,omitempty"`
@@ -129,7 +130,8 @@ type comboLatencyEntry struct {
 type Manager struct {
 	mu            sync.RWMutex
 	providers     map[string]Provider
-	order         []string // Priority order
+	providersByID map[string]Provider // Map lowercase ID -> Provider instance
+	order         []string            // Priority order
 	combos        map[string]*storage.ModelComboRecord
 	defaultClient interface{}
 
@@ -147,6 +149,7 @@ func GetManager() *Manager {
 	managerOnce.Do(func() {
 		globalManager = &Manager{
 			providers:     make(map[string]Provider),
+			providersByID: make(map[string]Provider),
 			combos:        make(map[string]*storage.ModelComboRecord),
 			comboCounters: make(map[string]*uint64),
 			comboLatency:  make(map[string]map[string]*comboLatencyEntry),
@@ -169,8 +172,13 @@ func (m *Manager) SetDefaultHTTPClient(client interface{}) {
 	}
 }
 
-// Register adds or updates a provider
+// Register adds or updates a provider with optional ID
 func (m *Manager) Register(p Provider, priority int) {
+	m.RegisterWithID("", p, priority)
+}
+
+// RegisterWithID adds or updates a provider associating both its unique ID and Name
+func (m *Manager) RegisterWithID(id string, p Provider, priority int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.defaultClient != nil {
@@ -179,14 +187,23 @@ func (m *Manager) Register(p Provider, priority int) {
 		}
 	}
 	m.providers[p.Name()] = p
+	if m.providersByID == nil {
+		m.providersByID = make(map[string]Provider)
+	}
+	if id != "" {
+		m.providersByID[strings.ToLower(strings.TrimSpace(id))] = p
+	}
 	m.updateOrderLocked()
 }
 
-// Unregister removes a provider
-func (m *Manager) Unregister(name string) {
+// Unregister removes a provider by name or ID
+func (m *Manager) Unregister(nameOrID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.providers, name)
+	delete(m.providers, nameOrID)
+	if m.providersByID != nil {
+		delete(m.providersByID, strings.ToLower(strings.TrimSpace(nameOrID)))
+	}
 	m.updateOrderLocked()
 }
 
@@ -367,16 +384,7 @@ func (m *Manager) probeComboTargets(combo *storage.ModelComboRecord) {
 	var wg sync.WaitGroup
 	for _, target := range combo.Targets {
 		m.mu.RLock()
-		p, exists := m.providers[target.ProviderID]
-		if !exists {
-			for _, prov := range m.providers {
-				if strings.EqualFold(prov.Name(), target.ProviderID) {
-					p = prov
-					exists = true
-					break
-				}
-			}
-		}
+		p, exists := m.getLocked(target.ProviderID)
 		m.mu.RUnlock()
 
 		if !exists || p == nil {
@@ -474,10 +482,22 @@ func (m *Manager) StopProber() {
 func (m *Manager) Get(name string) (Provider, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.getLocked(name)
+}
 
+func (m *Manager) getLocked(name string) (Provider, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, false
+	}
+
+	nameLower := strings.ToLower(name)
+
+	// 0. Exact ID match from providersByID
+	if m.providersByID != nil {
+		if p, ok := m.providersByID[nameLower]; ok {
+			return p, true
+		}
 	}
 
 	// 1. Exact match
@@ -499,10 +519,10 @@ func (m *Manager) Get(name string) (Provider, bool) {
 		}
 	}
 
-	// 4. Substring / Prefix match in provider name
-	nameLower := strings.ToLower(name)
+	// 4. Substring / Prefix match in provider name (bidirectional, e.g. "hcnsec" matches "HCNSEC.cn")
 	for _, p := range m.providers {
-		if strings.Contains(strings.ToLower(p.Name()), nameLower) {
+		pNameLower := strings.ToLower(p.Name())
+		if strings.Contains(pNameLower, nameLower) || strings.Contains(nameLower, pNameLower) {
 			return p, true
 		}
 	}
@@ -540,17 +560,7 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 			default:
 			}
 
-			p, exists := m.providers[target.ProviderID]
-			if !exists {
-				// Try case-insensitive lookup
-				for _, prov := range m.providers {
-					if strings.EqualFold(prov.Name(), target.ProviderID) {
-						p = prov
-						exists = true
-						break
-					}
-				}
-			}
+			p, exists := m.getLocked(target.ProviderID)
 			if !exists {
 				errMsg := fmt.Sprintf("[%d/%d %s/%s]: provider tidak terdaftar/nonaktif", idx+1, len(orderedTargets), target.ProviderID, target.Model)
 				attemptErrors = append(attemptErrors, errMsg)

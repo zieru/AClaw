@@ -1013,7 +1013,7 @@ func (w *ProviderWizard) syncProviderToManager(p *storage.ProviderRecord) {
 		inst.SetHTTPClient(proxyClient)
 	}
 
-	w.providerManager.Register(inst, p.Priority)
+	w.providerManager.RegisterWithID(p.ID, inst, p.Priority)
 }
 
 // CancelWizard clears state

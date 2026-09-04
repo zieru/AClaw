@@ -2,7 +2,10 @@ package admin
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,6 +18,10 @@ import (
 
 // handleDirectChat processes direct PM messages to the admin bot using the Agent Orchestrator
 func (a *AdminBot) handleDirectChat(c tele.Context, msg string) error {
+	return a.handleDirectChatWithMedia(c, msg, nil, 0)
+}
+
+func (a *AdminBot) handleDirectChatWithMedia(c tele.Context, msg string, images []string, fileMB float64) error {
 	_ = c.Notify(tele.Typing)
 	cancelMenu := &tele.ReplyMarkup{}
 	cancelBtn := cancelMenu.Data("🛑 Batalkan", "cancel_task")
@@ -33,13 +40,15 @@ func (a *AdminBot) handleDirectChat(c tele.Context, msg string) error {
 	}()
 
 	resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{
-		ChannelType: "telegram_admin",
-		ChannelID:   "admin",
-		ChannelName: "Telegram Admin PM",
-		ChatID:      fmt.Sprintf("%d", c.Chat().ID),
-		UserID:      fmt.Sprintf("%d", c.Sender().ID),
-		UserName:    c.Sender().Username,
-		UserPrompt:  msg,
+		ChannelType:    "telegram_admin",
+		ChannelID:      "admin",
+		ChannelName:    "Telegram Admin PM",
+		ChatID:         fmt.Sprintf("%d", c.Chat().ID),
+		UserID:         fmt.Sprintf("%d", c.Sender().ID),
+		UserName:       c.Sender().Username,
+		UserPrompt:     msg,
+		AttachedFileMB: fileMB,
+		AttachedImages: images,
 		OnProgress: func(status string) {
 			onProgressStatus(status)
 		},
@@ -70,6 +79,126 @@ func (a *AdminBot) handleDirectChat(c tele.Context, msg string) error {
 	}
 
 	return sendOrEditSplitMessage(c, thinkingMsg, resp.Text, resp.MediaFiles...)
+}
+
+func isTextDocument(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".txt", ".md", ".json", ".csv", ".tsv", ".yaml", ".yml", ".xml", ".html", ".htm",
+		".css", ".js", ".ts", ".jsx", ".tsx", ".go", ".py", ".java", ".c", ".cpp", ".h",
+		".sql", ".sh", ".bat", ".ps1", ".log", ".ini", ".conf", ".env", ".toml", ".php":
+		return true
+	default:
+		return false
+	}
+}
+
+func isImageDocument(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp":
+		return true
+	default:
+		return false
+	}
+}
+
+// handleDirectPhoto processes photo/image sent to admin bot
+func (a *AdminBot) handleDirectPhoto(c tele.Context) error {
+	msg := c.Message()
+	if msg == nil || msg.Photo == nil {
+		return nil
+	}
+	photo := msg.Photo
+
+	uploadDir := filepath.Join(a.cfg.Server.DataDir, "uploads")
+	_ = os.MkdirAll(uploadDir, 0755)
+
+	caption := strings.TrimSpace(msg.Caption)
+	if caption == "" {
+		caption = "Tolong analisis dan jelaskan gambar/foto ini."
+	}
+
+	reader, err := a.bot.File(&photo.File)
+	if err != nil {
+		return a.handleDirectChat(c, caption)
+	}
+	defer reader.Close()
+
+	imgBytes, err := io.ReadAll(reader)
+	if err != nil || len(imgBytes) == 0 {
+		return a.handleDirectChat(c, caption)
+	}
+
+	fileMB := float64(len(imgBytes)) / (1024 * 1024)
+	fileName := fmt.Sprintf("photo_%d.jpg", time.Now().Unix())
+	targetPath := filepath.Join(uploadDir, fileName)
+	_ = os.WriteFile(targetPath, imgBytes, 0644)
+
+	base64URL := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(imgBytes)
+	fileHeader := fmt.Sprintf("[📸 Gambar Terlampir: %s (%.1f KB) | Tersimpan di: %s]\n\n", fileName, float64(len(imgBytes))/1024.0, targetPath)
+
+	return a.handleDirectChatWithMedia(c, fileHeader+caption, []string{base64URL}, fileMB)
+}
+
+// handleDirectDocument processes document/file sent to admin bot
+func (a *AdminBot) handleDirectDocument(c tele.Context) error {
+	msg := c.Message()
+	if msg == nil || msg.Document == nil {
+		return nil
+	}
+	doc := msg.Document
+
+	// If user is currently in MD wizard session and document is .md, let mdUI handle it
+	if strings.HasSuffix(strings.ToLower(doc.FileName), ".md") {
+		if a.mdUI != nil && a.mdUI.HasActiveSession(c.Sender().ID) {
+			return a.mdUI.HandleDocumentUpload(c)
+		}
+	}
+
+	uploadDir := filepath.Join(a.cfg.Server.DataDir, "uploads")
+	_ = os.MkdirAll(uploadDir, 0755)
+
+	caption := strings.TrimSpace(msg.Caption)
+	if caption == "" {
+		caption = fmt.Sprintf("Tolong analisis dan jelaskan berkas/file terlampir: %s", doc.FileName)
+	}
+
+	fileMB := float64(doc.FileSize) / (1024 * 1024)
+	targetPath := filepath.Join(uploadDir, doc.FileName)
+
+	reader, err := a.bot.File(&doc.File)
+	if err != nil {
+		return a.handleDirectChat(c, fmt.Sprintf("[📎 Berkas: %s]\n%s", doc.FileName, caption))
+	}
+	defer reader.Close()
+
+	docBytes, err := io.ReadAll(reader)
+	if err != nil {
+		return a.handleDirectChat(c, fmt.Sprintf("[📎 Berkas: %s]\n%s", doc.FileName, caption))
+	}
+	_ = os.WriteFile(targetPath, docBytes, 0644)
+
+	var images []string
+	var promptBuilder strings.Builder
+	promptBuilder.WriteString(fmt.Sprintf("[📎 Berkas Terlampir: %s (%.1f KB) | Tersimpan di: %s]\n\n", doc.FileName, float64(len(docBytes))/1024.0, targetPath))
+
+	if isImageDocument(doc.FileName) {
+		mime := "image/jpeg"
+		if strings.HasSuffix(strings.ToLower(doc.FileName), ".png") {
+			mime = "image/png"
+		} else if strings.HasSuffix(strings.ToLower(doc.FileName), ".webp") {
+			mime = "image/webp"
+		}
+		images = append(images, fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(docBytes)))
+	} else if isTextDocument(doc.FileName) && len(docBytes) <= 150*1024 {
+		promptBuilder.WriteString("Isi File:\n```\n")
+		promptBuilder.WriteString(string(docBytes))
+		promptBuilder.WriteString("\n```\n\n")
+	}
+
+	promptBuilder.WriteString(caption)
+	return a.handleDirectChatWithMedia(c, promptBuilder.String(), images, fileMB)
 }
 
 func sendSplitMessage(c tele.Context, text string) error {

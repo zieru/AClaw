@@ -47,6 +47,14 @@ func NewMDUI(loader *agent.MDLoader, db *storage.DB, bot *tele.Bot) *MDUI {
 	}
 }
 
+// HasActiveSession checks if user is currently interacting with MD wizard
+func (ui *MDUI) HasActiveSession(userID int64) bool {
+	ui.mu.RLock()
+	defer ui.mu.RUnlock()
+	sess, ok := ui.sessions[userID]
+	return ok && sess != nil && sess.Step != MDStepNone
+}
+
 // RenderMDList returns summary of all markdown bot files in HTML format
 func (ui *MDUI) RenderMDList() string {
 	files, err := ui.mdLoader.ListFiles()

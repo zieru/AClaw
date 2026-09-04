@@ -2,8 +2,10 @@ package telegram
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"html"
+	"io"
 	"log"
 	"path/filepath"
 	"strconv"
@@ -145,7 +147,32 @@ func (a *BotAdapter) registerHandlers() {
 			return nil
 		}
 
-		return a.executePrompt(c, msg, userPrompt, 0)
+		return a.executePrompt(c, msg, userPrompt, nil, 0)
+	})
+
+	// Photo / Image handler
+	a.bot.Handle(tele.OnPhoto, func(c tele.Context) error {
+		photo := c.Message().Photo
+		if photo == nil {
+			return nil
+		}
+
+		caption := strings.TrimSpace(c.Message().Caption)
+		if caption == "" {
+			caption = "Tolong analisis dan jelaskan gambar/foto terlampir."
+		}
+
+		var images []string
+		var fileMB float64
+		if reader, err := a.bot.File(&photo.File); err == nil {
+			defer reader.Close()
+			if imgBytes, err := io.ReadAll(reader); err == nil && len(imgBytes) > 0 {
+				fileMB = float64(len(imgBytes)) / (1024 * 1024)
+				images = append(images, "data:image/jpeg;base64,"+base64.StdEncoding.EncodeToString(imgBytes))
+			}
+		}
+
+		return a.executePrompt(c, c.Message(), caption, images, fileMB)
 	})
 
 	// Document / File handler
@@ -156,16 +183,47 @@ func (a *BotAdapter) registerHandlers() {
 		}
 
 		fileMB := float64(doc.FileSize) / (1024 * 1024)
-		caption := c.Message().Caption
+		caption := strings.TrimSpace(c.Message().Caption)
 		if caption == "" {
 			caption = fmt.Sprintf("Analisis dokumen terlampir: %s", doc.FileName)
 		}
 
-		return a.executePrompt(c, c.Message(), caption, fileMB)
+		var images []string
+		prompt := caption
+		if reader, err := a.bot.File(&doc.File); err == nil {
+			defer reader.Close()
+			if docBytes, err := io.ReadAll(reader); err == nil {
+				ext := strings.ToLower(filepath.Ext(doc.FileName))
+				if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp" {
+					mime := "image/jpeg"
+					if ext == ".png" {
+						mime = "image/png"
+					} else if ext == ".webp" {
+						mime = "image/webp"
+					}
+					images = append(images, fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(docBytes)))
+				} else if isTextExt(ext) && len(docBytes) <= 150*1024 {
+					prompt = fmt.Sprintf("[📎 Berkas: %s]\n```\n%s\n```\n\n%s", doc.FileName, string(docBytes), caption)
+				}
+			}
+		}
+
+		return a.executePrompt(c, c.Message(), prompt, images, fileMB)
 	})
 }
 
-func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPrompt string, fileMB float64) error {
+func isTextExt(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".txt", ".md", ".json", ".csv", ".tsv", ".yaml", ".yml", ".xml", ".html", ".htm",
+		".css", ".js", ".ts", ".jsx", ".tsx", ".go", ".py", ".java", ".c", ".cpp", ".h",
+		".sql", ".sh", ".bat", ".ps1", ".log", ".ini", ".conf", ".env", ".toml", ".php":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPrompt string, images []string, fileMB float64) error {
 	_ = c.Notify(tele.Typing)
 	cancelMenu := &tele.ReplyMarkup{}
 	cancelBtn := cancelMenu.Data("🛑 Batalkan", "cancel_task")
@@ -214,6 +272,7 @@ func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPr
 		UserName:       c.Sender().Username,
 		UserPrompt:     userPrompt,
 		AttachedFileMB: fileMB,
+		AttachedImages: images,
 		OnProgress: func(status string) {
 			onProgressStatus(status)
 		},
@@ -265,7 +324,7 @@ func (a *BotAdapter) handleRetry(c tele.Context) error {
 		return c.Send(text, tele.ModeHTML)
 	}
 
-	return a.executePrompt(c, c.Message(), lastPrompt, 0)
+	return a.executePrompt(c, c.Message(), lastPrompt, nil, 0)
 }
 
 // createProgressiveThinkingManager runs a periodic ticker that updates thinking and streaming text dynamically

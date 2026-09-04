@@ -11,13 +11,16 @@ import (
 )
 
 func (a *AdminBot) registerDispatcher() {
-	// 1. File Upload (Markdown documents / backups)
-	a.bot.Handle(tele.OnDocument, a.mdUI.HandleDocumentUpload)
+	// 1. Photo / Image Upload
+	a.bot.Handle(tele.OnPhoto, a.handleDirectPhoto)
 
-	// 2. Unified Text Interceptor (Wizard active states + Direct Chat)
+	// 2. Document / File Upload
+	a.bot.Handle(tele.OnDocument, a.handleDirectDocument)
+
+	// 3. Unified Text Interceptor (Wizard active states + Direct Chat)
 	a.bot.Handle(tele.OnText, a.handleTextMessage)
 
-	// 3. Unified Dynamic Callback Dispatcher
+	// 4. Unified Dynamic Callback Dispatcher
 	a.bot.Handle(tele.OnCallback, a.handleDynamicCallback)
 }
 
