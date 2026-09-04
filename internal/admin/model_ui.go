@@ -402,10 +402,10 @@ func (ui *ModelUI) RenderProviderModels(c tele.Context, provName string, page in
 
 func (ui *ModelUI) getAllModelsForProvider(p provider.Provider) []string {
 	seen := make(map[string]bool)
-	var list []string
+	var rest []string
 
-	if def := strings.TrimSpace(p.DefaultModel()); def != "" {
-		list = append(list, def)
+	def := strings.TrimSpace(p.DefaultModel())
+	if def != "" {
 		seen[strings.ToLower(def)] = true
 	}
 
@@ -413,11 +413,17 @@ func (ui *ModelUI) getAllModelsForProvider(p provider.Provider) []string {
 		m = strings.TrimSpace(m)
 		if m != "" && !seen[strings.ToLower(m)] {
 			seen[strings.ToLower(m)] = true
-			list = append(list, m)
+			rest = append(rest, m)
 		}
 	}
 
-	sort.Strings(list)
+	sort.Strings(rest)
+
+	var list []string
+	if def != "" {
+		list = append(list, def)
+	}
+	list = append(list, rest...)
 	return list
 }
 

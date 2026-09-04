@@ -89,3 +89,49 @@ func TestModelUISaveOverride(t *testing.T) {
 		t.Errorf("expected empty ModelOverride, got '%s'", pol.ModelOverride)
 	}
 }
+
+func TestGetAllModelsForProviderDefaultFirst(t *testing.T) {
+	ui, _, _ := setupTestModelUI(t)
+
+	// Create a provider where default model is "gpt-4o-mini" (starts with g)
+	// and other models include "anthropic/claude-3-5-sonnet", "ai21/jamba", "deepseek/deepseek-chat", "z-model"
+	p := provider.NewOpenAIProviderWithKeys(
+		"test_provider",
+		"openai",
+		"https://api.openai.com/v1",
+		[]string{"sk-test"},
+		"round-robin",
+		"gpt-4o-mini", // Default model
+		[]string{
+			"z-model",
+			"anthropic/claude-3-5-sonnet",
+			"gpt-4o-mini",
+			"ai21/jamba",
+			"deepseek/deepseek-chat",
+		},
+	)
+
+	models := ui.getAllModelsForProvider(p)
+	if len(models) != 5 {
+		t.Fatalf("expected 5 models, got %d: %v", len(models), models)
+	}
+
+	// First model MUST be the default model
+	if models[0] != "gpt-4o-mini" {
+		t.Errorf("expected models[0] to be default model 'gpt-4o-mini', got '%s'", models[0])
+	}
+
+	// Remaining models must be sorted alphabetically
+	expectedRemaining := []string{
+		"ai21/jamba",
+		"anthropic/claude-3-5-sonnet",
+		"deepseek/deepseek-chat",
+		"z-model",
+	}
+	for i, exp := range expectedRemaining {
+		if models[i+1] != exp {
+			t.Errorf("expected models[%d] to be '%s', got '%s'", i+1, exp, models[i+1])
+		}
+	}
+}
+
