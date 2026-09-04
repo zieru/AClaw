@@ -201,3 +201,88 @@ func TestComboAllTargetsFailDetailedError(t *testing.T) {
 	}
 }
 
+func TestComboStrategies(t *testing.T) {
+	mgr := &Manager{
+		providers:     make(map[string]Provider),
+		combos:        make(map[string]*storage.ModelComboRecord),
+		comboCounters: make(map[string]*uint64),
+		comboLatency:  make(map[string]map[string]*comboLatencyEntry),
+	}
+
+	cTargets := []storage.ComboTarget{
+		{ProviderID: "p1", Model: "m1"},
+		{ProviderID: "p2", Model: "m2"},
+		{ProviderID: "p3", Model: "m3"},
+	}
+
+	// 1. Failsafe
+	cFS := &storage.ModelComboRecord{
+		Name:     "c_fs",
+		Targets:  cTargets,
+		Strategy: "failsafe",
+	}
+	resFS := mgr.GetOrderedTargets(cFS)
+	if len(resFS) != 3 || resFS[0].ProviderID != "p1" || resFS[1].ProviderID != "p2" || resFS[2].ProviderID != "p3" {
+		t.Errorf("failsafe unexpected order: %+v", resFS)
+	}
+
+	// 2. Round-Robin
+	cRR := &storage.ModelComboRecord{
+		Name:     "c_rr",
+		Targets:  cTargets,
+		Strategy: "round-robin",
+	}
+	// Call 1 -> starts with p1
+	r1 := mgr.GetOrderedTargets(cRR)
+	if r1[0].ProviderID != "p1" {
+		t.Errorf("round-robin call 1 expected p1, got %s", r1[0].ProviderID)
+	}
+	// Call 2 -> starts with p2
+	r2 := mgr.GetOrderedTargets(cRR)
+	if r2[0].ProviderID != "p2" {
+		t.Errorf("round-robin call 2 expected p2, got %s", r2[0].ProviderID)
+	}
+	// Call 3 -> starts with p3
+	r3 := mgr.GetOrderedTargets(cRR)
+	if r3[0].ProviderID != "p3" {
+		t.Errorf("round-robin call 3 expected p3, got %s", r3[0].ProviderID)
+	}
+	// Call 4 -> wraps around to p1
+	r4 := mgr.GetOrderedTargets(cRR)
+	if r4[0].ProviderID != "p1" {
+		t.Errorf("round-robin call 4 expected p1, got %s", r4[0].ProviderID)
+	}
+
+	// 3. Race-Probe (Fastest)
+	cFast := &storage.ModelComboRecord{
+		Name:     "c_fast",
+		Targets:  cTargets,
+		Strategy: "race-probe",
+	}
+	// Record latencies: p1 = 800ms, p2 = 120ms (fastest), p3 = 350ms
+	mgr.recordComboLatency("c_fast", "p1", "m1", 800*1000*1000, false, "")
+	mgr.recordComboLatency("c_fast", "p2", "m2", 120*1000*1000, false, "")
+	mgr.recordComboLatency("c_fast", "p3", "m3", 350*1000*1000, false, "")
+
+	resFast := mgr.GetOrderedTargets(cFast)
+	if resFast[0].ProviderID != "p2" {
+		t.Errorf("race-probe expected fastest p2 first, got %s", resFast[0].ProviderID)
+	}
+	if resFast[1].ProviderID != "p3" {
+		t.Errorf("race-probe expected p3 second, got %s", resFast[1].ProviderID)
+	}
+	if resFast[2].ProviderID != "p1" {
+		t.Errorf("race-probe expected p1 third, got %s", resFast[2].ProviderID)
+	}
+
+	// Now simulate p2 failing
+	mgr.recordComboLatency("c_fast", "p2", "m2", 5000*1000*1000, true, "timeout")
+	resFastFail := mgr.GetOrderedTargets(cFast)
+	if resFastFail[0].ProviderID != "p3" {
+		t.Errorf("race-probe expected p3 first when p2 fails, got %s", resFastFail[0].ProviderID)
+	}
+	if resFastFail[2].ProviderID != "p2" {
+		t.Errorf("race-probe expected failed p2 last, got %s", resFastFail[2].ProviderID)
+	}
+}
+

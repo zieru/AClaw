@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"goassistant/internal/config"
@@ -115,6 +118,13 @@ func IsFreeProvider(providerType string) bool {
 	}
 }
 
+type comboLatencyEntry struct {
+	latency   time.Duration
+	lastCheck time.Time
+	failed    bool
+	err       string
+}
+
 // Manager coordinates multiple providers, selection, model routing, combos, and fallbacks
 type Manager struct {
 	mu            sync.RWMutex
@@ -122,6 +132,11 @@ type Manager struct {
 	order         []string // Priority order
 	combos        map[string]*storage.ModelComboRecord
 	defaultClient interface{}
+
+	comboMu       sync.RWMutex
+	comboCounters map[string]*uint64
+	comboLatency  map[string]map[string]*comboLatencyEntry
+	stopProbe     chan struct{}
 }
 
 var globalManager *Manager
@@ -131,9 +146,13 @@ var managerOnce sync.Once
 func GetManager() *Manager {
 	managerOnce.Do(func() {
 		globalManager = &Manager{
-			providers: make(map[string]Provider),
-			combos:    make(map[string]*storage.ModelComboRecord),
+			providers:     make(map[string]Provider),
+			combos:        make(map[string]*storage.ModelComboRecord),
+			comboCounters: make(map[string]*uint64),
+			comboLatency:  make(map[string]map[string]*comboLatencyEntry),
+			stopProbe:     make(chan struct{}),
 		}
+		globalManager.startProber()
 	})
 	return globalManager
 }
@@ -182,15 +201,26 @@ func (m *Manager) updateOrderLocked() {
 // RegisterCombo registers a multi-provider fallback combo
 func (m *Manager) RegisterCombo(c *storage.ModelComboRecord) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.combos[strings.ToLower(c.Name)] = c
+	strat := strings.ToLower(strings.TrimSpace(c.Strategy))
+	m.mu.Unlock()
+
+	if strat == "race-probe" || strat == "fastest" || strat == "race" || strat == "latency" || strat == "best-latency" {
+		go m.probeComboTargets(c)
+	}
 }
 
 // UnregisterCombo removes a combo
 func (m *Manager) UnregisterCombo(name string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.combos, strings.ToLower(name))
+	cName := strings.ToLower(name)
+	delete(m.combos, cName)
+	m.mu.Unlock()
+
+	m.comboMu.Lock()
+	delete(m.comboCounters, cName)
+	delete(m.comboLatency, cName)
+	m.comboMu.Unlock()
 }
 
 // GetCombo retrieves a combo by name
@@ -210,6 +240,234 @@ func (m *Manager) ListCombos() []*storage.ModelComboRecord {
 		list = append(list, c)
 	}
 	return list
+}
+
+func (m *Manager) recordComboLatency(comboName, providerID, model string, latency time.Duration, failed bool, errStr string) {
+	m.comboMu.Lock()
+	defer m.comboMu.Unlock()
+	comboKey := strings.ToLower(comboName)
+	if m.comboLatency == nil {
+		m.comboLatency = make(map[string]map[string]*comboLatencyEntry)
+	}
+	targetMap, ok := m.comboLatency[comboKey]
+	if !ok {
+		targetMap = make(map[string]*comboLatencyEntry)
+		m.comboLatency[comboKey] = targetMap
+	}
+	targetKey := fmt.Sprintf("%s/%s", strings.ToLower(providerID), strings.ToLower(model))
+	targetMap[targetKey] = &comboLatencyEntry{
+		latency:   latency,
+		lastCheck: time.Now(),
+		failed:    failed,
+		err:       errStr,
+	}
+}
+
+// GetOrderedTargets returns targets reordered according to the combo's routing strategy
+func (m *Manager) GetOrderedTargets(combo *storage.ModelComboRecord) []storage.ComboTarget {
+	if combo == nil || len(combo.Targets) == 0 {
+		return nil
+	}
+
+	targets := make([]storage.ComboTarget, len(combo.Targets))
+	copy(targets, combo.Targets)
+
+	strat := strings.ToLower(strings.TrimSpace(combo.Strategy))
+	comboKey := strings.ToLower(combo.Name)
+
+	switch strat {
+	case "round-robin", "rr":
+		m.comboMu.Lock()
+		if m.comboCounters == nil {
+			m.comboCounters = make(map[string]*uint64)
+		}
+		cntPtr, ok := m.comboCounters[comboKey]
+		if !ok {
+			var initCnt uint64
+			cntPtr = &initCnt
+			m.comboCounters[comboKey] = cntPtr
+		}
+		val := atomic.AddUint64(cntPtr, 1)
+		m.comboMu.Unlock()
+
+		offset := int((val - 1) % uint64(len(targets)))
+		if offset > 0 {
+			targets = append(targets[:0], append(targets[offset:], targets[:offset]...)...)
+		}
+		return targets
+
+	case "random", "rand":
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		r.Shuffle(len(targets), func(i, j int) {
+			targets[i], targets[j] = targets[j], targets[i]
+		})
+		return targets
+
+	case "race-probe", "fastest", "race", "latency", "best-latency":
+		m.comboMu.RLock()
+		var targetMap map[string]*comboLatencyEntry
+		if m.comboLatency != nil {
+			targetMap = m.comboLatency[comboKey]
+		}
+		m.comboMu.RUnlock()
+
+		// If never probed yet, trigger background probe and use default order for this turn
+		if len(targetMap) == 0 {
+			go m.probeComboTargets(combo)
+			return targets
+		}
+
+		type targetScore struct {
+			target  storage.ComboTarget
+			latency time.Duration
+		}
+
+		scores := make([]targetScore, len(targets))
+		for i, t := range targets {
+			tKey := fmt.Sprintf("%s/%s", strings.ToLower(t.ProviderID), strings.ToLower(t.Model))
+			entry := targetMap[tKey]
+			if entry != nil {
+				isRecentFail := entry.failed && time.Since(entry.lastCheck) < 2*time.Minute
+				effLatency := entry.latency
+				if isRecentFail {
+					effLatency = 99999 * time.Millisecond
+				}
+				scores[i] = targetScore{
+					target:  t,
+					latency: effLatency,
+				}
+			} else {
+				scores[i] = targetScore{
+					target:  t,
+					latency: 1500 * time.Millisecond,
+				}
+			}
+		}
+
+		sort.SliceStable(scores, func(i, j int) bool {
+			return scores[i].latency < scores[j].latency
+		})
+
+		ordered := make([]storage.ComboTarget, len(targets))
+		for i, s := range scores {
+			ordered[i] = s.target
+		}
+		return ordered
+
+	default: // "failsafe" or default priority
+		return targets
+	}
+}
+
+func (m *Manager) probeComboTargets(combo *storage.ModelComboRecord) {
+	if combo == nil || len(combo.Targets) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	for _, target := range combo.Targets {
+		m.mu.RLock()
+		p, exists := m.providers[target.ProviderID]
+		if !exists {
+			for _, prov := range m.providers {
+				if strings.EqualFold(prov.Name(), target.ProviderID) {
+					p = prov
+					exists = true
+					break
+				}
+			}
+		}
+		m.mu.RUnlock()
+
+		if !exists || p == nil {
+			continue
+		}
+
+		wg.Add(1)
+		go func(p Provider, t storage.ComboTarget) {
+			defer wg.Done()
+			probeCtx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+
+			req := ChatRequest{
+				Model: t.Model,
+				Messages: []ChatMessage{
+					{
+						Role:    RoleUser,
+						Content: "ping",
+					},
+				},
+				MaxTokens:   1,
+				Temperature: 0.1,
+			}
+
+			start := time.Now()
+			resp, err := executeProviderCall(probeCtx, p, req)
+			dur := time.Since(start)
+
+			failed := (err != nil || resp == nil)
+			errStr := ""
+			if err != nil {
+				errStr = err.Error()
+			}
+			m.recordComboLatency(combo.Name, t.ProviderID, t.Model, dur, failed, errStr)
+			if !failed {
+				log.Printf("[Probe:%s] %s/%s respons: %dms", combo.Name, t.ProviderID, t.Model, dur.Milliseconds())
+			} else {
+				log.Printf("[Probe:%s] %s/%s gagal (%dms): %v", combo.Name, t.ProviderID, t.Model, dur.Milliseconds(), err)
+			}
+		}(p, target)
+	}
+	wg.Wait()
+}
+
+func (m *Manager) startProber() {
+	go func() {
+		// Wait 10 seconds on startup for all providers & combos to load
+		time.Sleep(10 * time.Second)
+		ticker := time.NewTicker(90 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-m.stopProbe:
+				return
+			case <-ticker.C:
+				m.probeActiveCombos()
+			}
+		}
+	}()
+}
+
+func (m *Manager) probeActiveCombos() {
+	m.mu.RLock()
+	var combosToProbe []*storage.ModelComboRecord
+	for _, c := range m.combos {
+		if c.IsActive && len(c.Targets) > 0 {
+			strat := strings.ToLower(strings.TrimSpace(c.Strategy))
+			if strat == "race-probe" || strat == "fastest" || strat == "race" || strat == "latency" || strat == "best-latency" {
+				combosToProbe = append(combosToProbe, c)
+			}
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, c := range combosToProbe {
+		m.probeComboTargets(c)
+	}
+}
+
+// StopProber stops background combo prober
+func (m *Manager) StopProber() {
+	m.comboMu.Lock()
+	defer m.comboMu.Unlock()
+	if m.stopProbe != nil {
+		select {
+		case <-m.stopProbe:
+		default:
+			close(m.stopProbe)
+		}
+	}
 }
 
 // Get finds a provider by name (exact, case-insensitive, type, or substring)
@@ -273,8 +531,9 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 	// 1. Check if model or preferredName is a registered Combo (e.g. "combo:smart" or "smart")
 	comboName := strings.ToLower(strings.TrimPrefix(req.Model, "combo:"))
 	if combo, ok := m.combos[comboName]; ok && combo.IsActive && len(combo.Targets) > 0 {
+		orderedTargets := m.GetOrderedTargets(combo)
 		var attemptErrors []string
-		for idx, target := range combo.Targets {
+		for idx, target := range orderedTargets {
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -293,7 +552,7 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 				}
 			}
 			if !exists {
-				errMsg := fmt.Sprintf("[%d/%d %s/%s]: provider tidak terdaftar/nonaktif", idx+1, len(combo.Targets), target.ProviderID, target.Model)
+				errMsg := fmt.Sprintf("[%d/%d %s/%s]: provider tidak terdaftar/nonaktif", idx+1, len(orderedTargets), target.ProviderID, target.Model)
 				attemptErrors = append(attemptErrors, errMsg)
 				log.Printf("[Combo:%s] Target #%d [%s/%s] tidak ditemukan atau nonaktif", combo.Name, idx+1, target.ProviderID, target.Model)
 				continue
@@ -312,21 +571,24 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 
 			targetStart := time.Now()
 			resp, err := executeProviderCall(ctx, p, targetReq)
+			targetLatency := time.Since(targetStart)
 			if err == nil && resp != nil {
+				m.recordComboLatency(combo.Name, target.ProviderID, target.Model, targetLatency, false, "")
 				resp.Tries = idx + 1
 				if idx > 0 {
-					log.Printf("[Combo:%s] Berhasil fallback ke target #%d [%s/%s] (latensi: %dms)", combo.Name, idx+1, target.ProviderID, target.Model, time.Since(targetStart).Milliseconds())
+					log.Printf("[Combo:%s] Berhasil fallback ke target #%d [%s/%s] (latensi: %dms)", combo.Name, idx+1, target.ProviderID, target.Model, targetLatency.Milliseconds())
 				}
 				return resp, nil
 			}
 
-			latency := time.Since(targetStart).Milliseconds()
-			errItem := fmt.Sprintf("[%d/%d %s/%s (%dms)]: %v", idx+1, len(combo.Targets), target.ProviderID, target.Model, latency, err)
+			m.recordComboLatency(combo.Name, target.ProviderID, target.Model, targetLatency, true, fmt.Sprintf("%v", err))
+			latency := targetLatency.Milliseconds()
+			errItem := fmt.Sprintf("[%d/%d %s/%s (%dms)]: %v", idx+1, len(orderedTargets), target.ProviderID, target.Model, latency, err)
 			attemptErrors = append(attemptErrors, errItem)
 			log.Printf("[Combo:%s] Target #%d [%s/%s] gagal (%dms): %v", combo.Name, idx+1, target.ProviderID, target.Model, latency, err)
 		}
 		if len(attemptErrors) > 0 {
-			return nil, fmt.Errorf("combo '%s' seluruh target gagal (%d/%d): %s", combo.Name, len(attemptErrors), len(combo.Targets), strings.Join(attemptErrors, " | "))
+			return nil, fmt.Errorf("combo '%s' seluruh target gagal (%d/%d): %s", combo.Name, len(attemptErrors), len(orderedTargets), strings.Join(attemptErrors, " | "))
 		}
 	}
 

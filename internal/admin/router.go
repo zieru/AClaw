@@ -513,6 +513,16 @@ func (a *AdminBot) registerRoutes() {
 		}
 		return a.comboWizard.HandleEditSetStrategy(c, sess.EditingComboName, "failsafe")
 	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_st_fast"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.HandleEditSetStrategy(c, sess.EditingComboName, "race-probe")
+	})
 	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_st_rr"}, func(c tele.Context) error {
 		if c.Sender() == nil {
 			return nil
@@ -522,6 +532,16 @@ func (a *AdminBot) registerRoutes() {
 			return a.comboWizard.StartEditWizard(c, "")
 		}
 		return a.comboWizard.HandleEditSetStrategy(c, sess.EditingComboName, "round-robin")
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_st_rand"}, func(c tele.Context) error {
+		if c.Sender() == nil {
+			return nil
+		}
+		sess, ok := a.comboWizard.sessions[c.Sender().ID]
+		if !ok || sess.EditingComboName == "" {
+			return a.comboWizard.StartEditWizard(c, "")
+		}
+		return a.comboWizard.HandleEditSetStrategy(c, sess.EditingComboName, "random")
 	})
 	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_desc"}, func(c tele.Context) error {
 		if c.Sender() == nil {

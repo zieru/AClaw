@@ -156,7 +156,18 @@ func (w *ComboWizard) RenderComboEditDashboard(c tele.Context, combo *storage.Mo
 	if combo.Description != "" {
 		sb.WriteString(fmt.Sprintf("• <b>Deskripsi:</b> <i>%s</i>\n", html.EscapeString(combo.Description)))
 	}
-	sb.WriteString(fmt.Sprintf("• <b>Strategi:</b> <code>%s</code>\n", html.EscapeString(combo.Strategy)))
+	stratLabel := combo.Strategy
+	switch strings.ToLower(combo.Strategy) {
+	case "race-probe", "fastest":
+		stratLabel = "⚡ race-probe (Fastest Latency)"
+	case "round-robin", "rr":
+		stratLabel = "🔄 round-robin (Bergantian)"
+	case "random", "rand":
+		stratLabel = "🎲 random (Acak)"
+	case "failsafe":
+		stratLabel = "🛡️ failsafe (Fallback Rantai)"
+	}
+	sb.WriteString(fmt.Sprintf("• <b>Strategi:</b> <code>%s</code>\n", stratLabel))
 	sb.WriteString(fmt.Sprintf("• <b>Total Target:</b> %d step\n\n", len(combo.Targets)))
 
 	sb.WriteString("📋 <b>Rantai Eksekusi Saat Ini:</b>\n")
@@ -700,7 +711,18 @@ func (w *ComboWizard) HandleSaveCombo(c tele.Context) error {
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🎉 <b>COMBO '%s' BERHASIL DIBUAT & DIAKTIFKAN!</b>\n\n", html.EscapeString(comboRec.Name)))
-	sb.WriteString(fmt.Sprintf("• Strategi: <code>%s</code> (Failsafe Fallback)\n", comboRec.Strategy))
+	stratLabel := comboRec.Strategy
+	switch strings.ToLower(comboRec.Strategy) {
+	case "race-probe", "fastest":
+		stratLabel = "⚡ race-probe (Fastest Latency)"
+	case "round-robin", "rr":
+		stratLabel = "🔄 round-robin (Bergantian)"
+	case "random", "rand":
+		stratLabel = "🎲 random (Acak)"
+	case "failsafe":
+		stratLabel = "🛡️ failsafe (Fallback Rantai)"
+	}
+	sb.WriteString(fmt.Sprintf("• Strategi: <code>%s</code>\n", stratLabel))
 	sb.WriteString("• <b>Rantai Eksekusi:</b>\n")
 	for i, t := range comboRec.Targets {
 		sb.WriteString(fmt.Sprintf("   %d. Provider: <b>%s</b> ➔ Model: <code>%s</code>\n", i+1, html.EscapeString(t.ProviderID), html.EscapeString(t.Model)))
@@ -1096,17 +1118,22 @@ func (w *ComboWizard) HandleEditStrategyMenu(c tele.Context, comboName string) e
 
 	text := fmt.Sprintf("🔀 <b>STRATEGI COMBO: %s</b>\n\n"+
 		"Strategi saat ini: <code>%s</code>\n\n"+
-		"• <b>Failsafe (Fallback Rantai):</b> Mencoba target #1. Jika limit/error, otomatis fallback ke target #2, #3, dst.\n"+
-		"• <b>Round-Robin:</b> Membagi pesan secara merata bergantian ke setiap target di rantai.\n\n"+
+		"• <b>Failsafe (Fallback Rantai):</b> Selalu mencoba target #1. Jika limit/error, otomatis fallback ke target #2, #3, dst.\n"+
+		"• <b>Fastest (Race-Probe Cepat & Hemat):</b> Menguji latensi dengan micro-probe di background, lalu otomatis memakai target tercepat (bebas delay ganda) dengan fallback failsafe.\n"+
+		"• <b>Round-Robin:</b> Membagi pesan secara merata bergantian ke setiap target di rantai.\n"+
+		"• <b>Random:</b> Memilih target secara acak di setiap permintaan chat.\n\n"+
 		"Pilih strategi:", html.EscapeString(combo.Name), html.EscapeString(combo.Strategy))
 
 	menu := &tele.ReplyMarkup{}
-	btnFS := menu.Data("🛡️ Failsafe (Fallback Rantai)", "cwiz_ed_st_fs")
+	btnFS := menu.Data("🛡️ Failsafe", "cwiz_ed_st_fs")
+	btnFast := menu.Data("⚡ Fastest (Race-Probe)", "cwiz_ed_st_fast")
 	btnRR := menu.Data("🔄 Round-Robin", "cwiz_ed_st_rr")
+	btnRand := menu.Data("🎲 Random", "cwiz_ed_st_rand")
 	btnBack := menu.Data("⬅️ Batal / Kembali", fmt.Sprintf("cwiz_ed_pick_%s", combo.Name))
 
 	menu.Inline(
-		menu.Row(btnFS, btnRR),
+		menu.Row(btnFS, btnFast),
+		menu.Row(btnRR, btnRand),
 		menu.Row(btnBack),
 	)
 
