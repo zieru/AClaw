@@ -418,10 +418,24 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 }
 
 func executeProviderCall(ctx context.Context, p Provider, req ChatRequest) (*ChatResponse, error) {
+	var resp *ChatResponse
+	var err error
 	if req.Stream && req.StreamCallback != nil {
 		if sp, ok := p.(StreamingProvider); ok {
-			return sp.GenerateChatStream(ctx, req)
+			resp, err = sp.GenerateChatStream(ctx, req)
+		} else {
+			resp, err = p.GenerateChat(ctx, req)
+		}
+	} else {
+		resp, err = p.GenerateChat(ctx, req)
+	}
+	if err == nil && resp != nil {
+		if resp.ProviderName == "" {
+			resp.ProviderName = p.Name()
+		}
+		if resp.Model == "" {
+			resp.Model = req.Model
 		}
 	}
-	return p.GenerateChat(ctx, req)
+	return resp, err
 }

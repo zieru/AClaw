@@ -65,8 +65,8 @@ func TestFormatFooter(t *testing.T) {
 	if !strings.Contains(fullFooter, "🔧 2 tools") {
 		t.Errorf("expected tools count in full footer, got '%s'", fullFooter)
 	}
-	if !strings.Contains(fullFooter, "🤖 gpt-4o-mini") {
-		t.Errorf("expected model name in full footer, got '%s'", fullFooter)
+	if !strings.Contains(fullFooter, "🤖 9router • gpt-4o-mini") {
+		t.Errorf("expected provider and model name in full footer, got '%s'", fullFooter)
 	}
 }
 

@@ -403,7 +403,13 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		totalTokensSaved += resp.CacheReadTokens
 		totalCostUSD += resp.CostUSD
 		lastModel = resp.Model
+		if lastModel == "" {
+			lastModel = activeModelName
+		}
 		lastProviderName = resp.ProviderName
+		if lastProviderName == "" {
+			lastProviderName = activeProvName
+		}
 		if resp.Thinking != "" {
 			finalThinking = resp.Thinking
 		}
@@ -699,7 +705,13 @@ func FormatFooter(mode string, promptTokens, completionTokens, thinkingTokens, t
 		}
 
 		// Model / Provider
-		if model != "" {
+		if providerName != "" && model != "" {
+			if strings.EqualFold(providerName, model) {
+				parts = append(parts, fmt.Sprintf("🤖 %s", model))
+			} else {
+				parts = append(parts, fmt.Sprintf("🤖 %s • %s", providerName, model))
+			}
+		} else if model != "" {
 			parts = append(parts, fmt.Sprintf("🤖 %s", model))
 		} else if providerName != "" {
 			parts = append(parts, fmt.Sprintf("🤖 %s", providerName))
