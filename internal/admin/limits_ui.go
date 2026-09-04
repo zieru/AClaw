@@ -1063,10 +1063,6 @@ func (ui *LimitsUI) RenderLimitProviderModelsPicker(c tele.Context, provName str
 		rows = append(rows, menu.Row(btn))
 	}
 
-	for _, r := range rows {
-		menu.Inline(r)
-	}
-
 	// Pagination Navigation
 	var navRow []tele.Btn
 	if page > 0 {
@@ -1077,12 +1073,14 @@ func (ui *LimitsUI) RenderLimitProviderModelsPicker(c tele.Context, provName str
 		navRow = append(navRow, menu.Data("Next ➡️", fmt.Sprintf("lim_mod_prov_%s_%d", provName, page+1)))
 	}
 	if len(navRow) > 0 {
-		menu.Inline(menu.Row(navRow...))
+		rows = append(rows, menu.Row(navRow...))
 	}
 
 	btnBackProv := menu.Data("⬅️ Daftar Provider", "lim_mod_provs")
 	btnBackMain := menu.Data("🏠 Menu Model", "lim_mod_menu")
-	menu.Inline(menu.Row(btnBackProv, btnBackMain))
+	rows = append(rows, menu.Row(btnBackProv, btnBackMain))
+
+	menu.Inline(rows...)
 
 	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
 }

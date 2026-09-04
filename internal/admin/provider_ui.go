@@ -49,28 +49,36 @@ func (ui *ProviderUI) RenderProvidersList() string {
 				keyCount = 1
 			}
 
-			modelsStr := "(default only)"
-			if len(p.Models) > 0 {
-				modelsStr = strings.Join(p.Models, ", ")
-			}
+			modelsStr := formatModelsSummary(p.Models, 3)
 
-			sb.WriteString(fmt.Sprintf("%d. %s <b>%s</b> (<code>%s</code> | Tipe: <code>%s</code>)\n", i+1, statusIcon, html.EscapeString(p.Name), html.EscapeString(p.ID), html.EscapeString(p.Type)))
-			sb.WriteString(fmt.Sprintf("   • Default Model: <code>%s</code>\n", html.EscapeString(p.DefaultModel)))
-			sb.WriteString(fmt.Sprintf("   • Models: <code>%s</code>\n", html.EscapeString(modelsStr)))
-			sb.WriteString(fmt.Sprintf("   • Key Pool: <b>%d key</b> (Strategi: <code>%s</code>)\n", keyCount, html.EscapeString(p.KeyStrategy)))
+			provEntry := fmt.Sprintf("%d. %s <b>%s</b> (<code>%s</code> | Tipe: <code>%s</code>)\n"+
+				"   • Default Model: <code>%s</code>\n"+
+				"   • Models (%d): <code>%s</code>\n"+
+				"   • Key Pool: <b>%d key</b> (Strategi: <code>%s</code>)\n",
+				i+1, statusIcon, html.EscapeString(p.Name), html.EscapeString(p.ID), html.EscapeString(p.Type),
+				html.EscapeString(p.DefaultModel),
+				len(p.Models), html.EscapeString(modelsStr),
+				keyCount, html.EscapeString(p.KeyStrategy))
+
 			if p.ProxyEnabled {
 				grp := p.ProxyGroup
 				if grp == "" {
 					grp = "default"
 				}
-				sb.WriteString(fmt.Sprintf("   • Proxy Pool: 🟢 <b>Aktif</b> (Group: <code>%s</code>)\n", html.EscapeString(grp)))
+				provEntry += fmt.Sprintf("   • Proxy Pool: 🟢 <b>Aktif</b> (Group: <code>%s</code>)\n", html.EscapeString(grp))
 			} else {
-				sb.WriteString("   • Proxy Pool: ⚪ <i>Direct / Off</i>\n")
+				provEntry += "   • Proxy Pool: ⚪ <i>Direct / Off</i>\n"
 			}
 			if p.BaseURL != "" {
-				sb.WriteString(fmt.Sprintf("   • Base URL: <code>%s</code>\n", html.EscapeString(p.BaseURL)))
+				provEntry += fmt.Sprintf("   • Base URL: <code>%s</code>\n", html.EscapeString(p.BaseURL))
 			}
-			sb.WriteString("\n")
+			provEntry += "\n"
+
+			if sb.Len()+len(provEntry) > 3700 {
+				sb.WriteString(fmt.Sprintf("<i>...dan %d provider lainnya (klik tombol provider di bawah).</i>\n\n", len(providers)-i))
+				break
+			}
+			sb.WriteString(provEntry)
 		}
 	}
 
@@ -131,10 +139,7 @@ func (ui *ProviderUI) RenderProviderDashboard(p *storage.ProviderRecord) (string
 		keyCount = 1
 	}
 
-	modelsStr := "(default only)"
-	if len(p.Models) > 0 {
-		modelsStr = strings.Join(p.Models, ", ")
-	}
+	modelsStr := formatModelsSummary(p.Models, 6)
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🤖 <b>DASHBOARD PROVIDER: %s</b>\n\n", html.EscapeString(p.Name)))
@@ -142,7 +147,10 @@ func (ui *ProviderUI) RenderProviderDashboard(p *storage.ProviderRecord) (string
 	sb.WriteString(fmt.Sprintf("• Tipe Driver: <code>%s</code>\n", html.EscapeString(p.Type)))
 	sb.WriteString(fmt.Sprintf("• Status: %s\n", statusStr))
 	sb.WriteString(fmt.Sprintf("• Default Model: <code>%s</code>\n", html.EscapeString(p.DefaultModel)))
-	sb.WriteString(fmt.Sprintf("• Model Terdaftar: <code>%s</code>\n", html.EscapeString(modelsStr)))
+	sb.WriteString(fmt.Sprintf("• Model Terdaftar (%d): <code>%s</code>\n", len(p.Models), html.EscapeString(modelsStr)))
+	if len(p.Models) > 6 {
+		sb.WriteString("   💡 <i>Gunakan menu <code>/model</code> untuk melihat seluruh model secara terpaginasi.</i>\n")
+	}
 	sb.WriteString(fmt.Sprintf("• Key Pool: <b>%d API Key</b> (Strategi: <code>%s</code>)\n", keyCount, html.EscapeString(p.KeyStrategy)))
 
 	if p.ProxyEnabled {
@@ -704,4 +712,15 @@ func (ui *ProviderUI) syncProviderToManager(p *storage.ProviderRecord) {
 	}
 
 	ui.providerManager.Register(inst, p.Priority)
+}
+
+func formatModelsSummary(models []string, maxDisplay int) string {
+	if len(models) == 0 {
+		return "(default only)"
+	}
+	if len(models) <= maxDisplay {
+		return strings.Join(models, ", ")
+	}
+	sample := strings.Join(models[:maxDisplay], ", ")
+	return fmt.Sprintf("%s, ... (+%d model lainnya)", sample, len(models)-maxDisplay)
 }

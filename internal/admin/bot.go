@@ -3,6 +3,7 @@ package admin
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,6 +70,16 @@ func NewAdminBot(
 	pref := tele.Settings{
 		Token:  token,
 		Poller: &tele.LongPoller{Timeout: time.Duration(cfg.AdminTelegram.PollTimeout) * time.Second},
+		OnError: func(err error, c tele.Context) {
+			if c != nil && c.Chat() != nil {
+				log.Printf("[Admin-TG] Error chat %d: %v", c.Chat().ID, err)
+				if strings.Contains(err.Error(), "MESSAGE_TOO_LONG") {
+					_ = c.Send("⚠️ <b>Pesan melebihi batas Telegram (4096 karakter).</b>\nSistem telah mencegah pengiriman pesan berlebih.", tele.ModeHTML)
+				}
+			} else {
+				log.Printf("[Admin-TG] Error: %v", err)
+			}
+		},
 	}
 
 	bot, err := tele.NewBot(pref)
