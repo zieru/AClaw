@@ -117,3 +117,73 @@ func TestGeminiWebCookieAutoUpdate(t *testing.T) {
 	}
 }
 
+func TestSanitizeGarbledGeminiWebText(t *testing.T) {
+	// Exact case reported by user: broken draft 1 ending at "| **Rentang Suhu Oper" fused with revised draft 2
+	garbled := `| Parameter | LTO (Lithium Titanate) | LFP (LiFePO4) |
+| :--- | :--- | :--- |
+| **Tegangan Nominal** | ~2.3V – 2.4V per sel | ~3.2V per sel |
+| **Siklus Hidup (Cycle Life)** | 10.000 – 25.000+ siklus | 2.500 – 5.000 siklus |
+| **Kecepatan Cas/Discharge (C-Rate)** | Sangat tinggi (bisa 5C – 10C+, penuh < 15 menit) | Moderat (umumnya 0.5C – 1C, fast charge 2C) |
+| **Kepadatan Energi (Energy Density)** | Rendah (~60–110 Wh/kg) | Sedang (~130–170 Wh/kg) |
+| **Rentang Suhu Oper**Lithium Titanate (LTO)** unggul mutlak dalam kecepatan isi daya, daya tahan siklus, dan toleransi suhu ekstrem, sedangkan **Lithium Iron Phosphate (LiFePO4 / LFP)** jauh lebih ekonomis dan memiliki densitas energi yang lebih padat untuk penggunaan umum.
+
+| Parameter | Lithium Titanate (LTO) | Lithium Iron Phosphate (LiFePO4) |
+| :--- | :--- | :--- |
+| **Tegangan Nominal Sel** | 2,3V – 2,4V | 3,2V |
+| **Siklus Hidup (Cycle Life)** | 10.000 – 25.000+ siklus | 3.000 – 6.000 siklus |
+| **Kecepatan Cas (C-Rate)** | Ekstrem (bisa 6C – 10C+, penuh < 10 menit) | Standar–Tinggi (umumnya 0,5C – 1C, cepat di 2C) |
+| **Kepadatan Energi** | Rendah (~60–110 Wh/kg) | Sedang (~120–180 Wh/kg) |
+| **Toleransi Suhu Dingin** | Sangat prima (bisa cas hingga -30°C) | Kurang baik (sulit/rusak jika dicas di bawah 0°C) |
+| **Keamanan Termal** | Sangat aman (paling tahan ledakan/tusukan) | Sangat aman (stabil dibanding NMC/LCO) |
+| **Biaya per Wh** | Mahal (2–3x lipat dibanding LFP) | Murah dan sangat ekonomis |
+
+**Perbedaan Praktis:**
+* **LiFePO4:** Pilihan terbaik untuk aplikasi hemat biaya dengan kapasitas besar.
+* **LTO:** Pilihan khusus jika sistem butuh pengisian super cepat.`
+
+	cleaned := sanitizeGarbledGeminiWebText(garbled)
+
+	if strings.Contains(cleaned, "Rentang Suhu Oper") {
+		t.Errorf("expected broken draft 1 to be removed, but found 'Rentang Suhu Oper'")
+	}
+	if !strings.HasPrefix(cleaned, "**Lithium Titanate (LTO)** unggul mutlak") {
+		t.Errorf("expected cleaned text to start with the second draft, got: %s", cleaned[:50])
+	}
+	if !strings.Contains(cleaned, "2,3V – 2,4V") {
+		t.Errorf("expected clean table in draft 2 to be preserved")
+	}
+
+	// Normal text with a single table should remain untouched
+	normal := `Berikut perbandingan:
+
+| Item | Nilai |
+| :--- | :--- |
+| A | 10 |
+| B | 20 |
+
+Selesai.`
+	if sanitizeGarbledGeminiWebText(normal) != normal {
+		t.Errorf("expected normal text with single table to remain unchanged")
+	}
+}
+
+func TestIsGeminiWebRefusal(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected bool
+	}{
+		{"Saya hanya AI berbasis teks dan tidak bisa membantu Anda untuk itu.", true},
+		{"Maaf, saya hanya model bahasa dan tidak dapat membantu Anda untuk itu.", true},
+		{"I am a large language model, trained by Google.", true},
+		{"Lithium titanate adalah bahan anoda baterai.", false},
+		{"Tentu, ini penjelasan mengenai Lithium Titanate.", false},
+	}
+
+	for _, c := range cases {
+		actual := isGeminiWebRefusal(c.input)
+		if actual != c.expected {
+			t.Errorf("for input %q, expected refusal=%v, got=%v", c.input, c.expected, actual)
+		}
+	}
+}
+

@@ -512,7 +512,17 @@ func (p *GeminiWebProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 	}
 	p.mu.Unlock()
 
+	// Sanitize any garbled draft restarts from Gemini Web stream buffer
+	finalContent = sanitizeGarbledGeminiWebText(finalContent)
+
+	// Auto-reset conversation ID if model hit a safety block/canned refusal
+	if isGeminiWebRefusal(finalContent) {
+		log.Printf("⚠️ [GeminiWeb] Terdeteksi penolakan/refusal dari model (%s). Mereset conversation ID untuk mencegah context lock.", p.name)
+		p.ResetConversation()
+	}
+
 	if finalContent == "" {
+		p.ResetConversation()
 		return nil, errors.New("tidak ada konten yang dihasilkan oleh Gemini Web. Periksa kembali autentikasi")
 	}
 
@@ -536,6 +546,95 @@ func (p *GeminiWebProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 		Model:            p.defaultModel,
 		ProviderName:     p.name,
 	}, nil
+}
+
+// isGeminiWebRefusal detects canned refusal strings from Gemini Web safety guardrails
+func isGeminiWebRefusal(text string) bool {
+	lower := strings.ToLower(text)
+	refusals := []string{
+		"saya hanya ai berbasis teks",
+		"saya hanya model bahasa",
+		"tidak bisa membantu anda untuk itu",
+		"tidak dapat membantu anda untuk itu",
+		"i am a text-based ai",
+		"i'm a text-based ai",
+		"as a text-based ai, i",
+		"i am a large language model",
+		"i cannot help with that",
+		"i'm sorry, but i can't help with that",
+	}
+	for _, r := range refusals {
+		if strings.Contains(lower, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// sanitizeGarbledGeminiWebText detects and removes aborted/restarted draft fragments in Gemini Web responses
+func sanitizeGarbledGeminiWebText(content string) string {
+	if strings.TrimSpace(content) == "" {
+		return content
+	}
+
+	tableSepRegex := regexp.MustCompile(`(?m)^\|(\s*:?-+:?\s*\|)+\s*$`)
+	tableMatches := tableSepRegex.FindAllStringIndex(content, -1)
+
+	// If there are at least 2 table definitions in the content
+	if len(tableMatches) >= 2 {
+		firstSepEnd := tableMatches[0][1]
+		secondSepStart := tableMatches[1][0]
+
+		between := content[firstSepEnd:secondSepStart]
+
+		// Look for a line in 'between' that started as a table row (has leading |)
+		// but was aborted mid-row and has NO other pipes in the entire line (strings.Count(line, "|") == 1)
+		lines := strings.Split(between, "\n")
+		for _, line := range lines {
+			trimmedLine := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmedLine, "|") && strings.Count(trimmedLine, "|") == 1 && len(trimmedLine) > 20 {
+				// Case A: Fused line where aborted cell joins directly with restarted draft:
+				// e.g. "| **Rentang Suhu Oper**Lithium Titanate (LTO)** unggul mutlak..."
+				fusedRe := regexp.MustCompile(`^\|\s*(?:\*\*)?[^*|]+(?:\*\*)?(\*\*[A-Z].+)$`)
+				if matches := fusedRe.FindStringSubmatch(trimmedLine); len(matches) >= 2 {
+					restartedDraftStart := matches[1]
+					if pos := strings.Index(content, restartedDraftStart); pos != -1 && pos < secondSepStart {
+						candidate := strings.TrimSpace(content[pos:])
+						if tableSepRegex.MatchString(candidate) {
+							return candidate
+						}
+					}
+				}
+
+				// Case B: Aborted cell followed by sentence after space:
+				fusedSpaceRe := regexp.MustCompile(`^\|\s*(?:\*\*)?[^*|]+(?:\*\*)?\s+([A-Z][a-z]+ [A-Z][\s\S]+)$`)
+				if matches := fusedSpaceRe.FindStringSubmatch(trimmedLine); len(matches) >= 2 {
+					restartedDraftStart := matches[1]
+					if pos := strings.Index(content, restartedDraftStart); pos != -1 && pos < secondSepStart {
+						candidate := strings.TrimSpace(content[pos:])
+						if tableSepRegex.MatchString(candidate) {
+							return candidate
+						}
+					}
+				}
+			}
+		}
+
+		// Also check if any non-table paragraph line in 'between' starts a fresh draft that repeats the table
+		for _, line := range lines {
+			trimmedLine := strings.TrimSpace(line)
+			if !strings.HasPrefix(trimmedLine, "|") && len(trimmedLine) > 30 {
+				if pos := strings.Index(content[firstSepEnd:], trimmedLine); pos != -1 {
+					candidate := strings.TrimSpace(content[firstSepEnd+pos:])
+					if tableSepRegex.MatchString(candidate) {
+						return candidate
+					}
+				}
+			}
+		}
+	}
+
+	return content
 }
 
 // ResetConversation resets the ongoing conversation context

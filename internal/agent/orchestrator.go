@@ -270,6 +270,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		compressedMsgs, saverReport := tokensaver.CompressMessages(messages, policy.TokenSaverMode, policy.MaxTokens*4)
 		totalTokensSaved += saverReport.TokensSaved
 
+		isStreaming := policy.StreamingEnabled && req.OnStreamChunk != nil
 		chatReq := provider.ChatRequest{
 			Model:           policy.ModelOverride,
 			Messages:        compressedMsgs,
@@ -278,8 +279,11 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 			MaxTokens:       policy.MaxTokens,
 			ThinkingEnabled: policy.ThinkingEnabled,
 			OnProgress:      req.OnProgress,
-			Stream:          req.OnStreamChunk != nil,
+			Stream:          isStreaming,
 			StreamCallback:  req.OnStreamChunk,
+		}
+		if !isStreaming {
+			chatReq.StreamCallback = nil
 		}
 
 		resp, err := o.providerManager.GenerateWithFallback(ctx, req.PreferredProv, chatReq)

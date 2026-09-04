@@ -62,18 +62,19 @@ func TestStorageAndPolicyResolver(t *testing.T) {
 
 	// 4. Test Chat/Group Policy Override
 	err = db.SavePolicy(&PolicyRecord{
-		Scope:           "chat",
-		ScopeID:         "chat_group_1",
-		MaxUploadFileMB: 2,
-		ModelOverride:   "gpt-4o-mini",
-		FooterMode:      "off",
+		Scope:            "chat",
+		ScopeID:          "chat_group_1",
+		MaxUploadFileMB:  2,
+		ModelOverride:    "gpt-4o-mini",
+		FooterMode:       "off",
+		StreamingEnabled: false,
 	})
 	if err != nil {
 		t.Fatalf("failed to save chat policy: %v", err)
 	}
 
 	pol = db.GetResolvedPolicy("chan_tg", "chat_group_1")
-	if pol.MaxUploadFileMB != 2 || pol.ModelOverride != "gpt-4o-mini" || pol.MaxTokens != 4096 || pol.FooterMode != "off" {
+	if pol.MaxUploadFileMB != 2 || pol.ModelOverride != "gpt-4o-mini" || pol.MaxTokens != 4096 || pol.FooterMode != "off" || pol.StreamingEnabled {
 		t.Fatalf("chat policy did not override properly: %+v", pol)
 	}
 

@@ -180,7 +180,18 @@ func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPr
 		thinkingMsg, _ = a.bot.Send(c.Chat(), "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
 	}
 
-	stopUpdater, onProgressStatus, onStreamChunk := createProgressiveThinkingManager(a.bot, thinkingMsg, "🤔 <i>Sedang berpikir...</i>")
+	policy := a.db.GetResolvedPolicy(a.channelID, strconv.FormatInt(c.Chat().ID, 10))
+
+	var stopUpdater func()
+	var onProgressStatus func(string)
+	var onStreamChunk func(provider.StreamChunk)
+
+	if policy.StreamingEnabled {
+		stopUpdater, onProgressStatus, onStreamChunk = createProgressiveThinkingManager(a.bot, thinkingMsg, "🤔 <i>Sedang berpikir...</i>")
+	} else {
+		stopUpdater, onProgressStatus, _ = createProgressiveThinkingManager(a.bot, thinkingMsg, "🤔 <i>Sedang memproses respon...</i>")
+		onStreamChunk = nil
+	}
 	defer stopUpdater()
 
 	timeoutSec := config.Get().Timeouts.HandlerSeconds
@@ -207,7 +218,9 @@ func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPr
 			onProgressStatus(status)
 		},
 		OnStreamChunk: func(chunk provider.StreamChunk) {
-			onStreamChunk(chunk)
+			if onStreamChunk != nil {
+				onStreamChunk(chunk)
+			}
 		},
 	})
 

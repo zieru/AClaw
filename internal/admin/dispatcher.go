@@ -269,6 +269,9 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 	if data == "lim_set_footer_menu" {
 		return a.limitsUI.RenderFooterMenu(c)
 	}
+	if data == "lim_set_stream_menu" {
+		return a.limitsUI.RenderStreamMenu(c)
+	}
 	if data == "lim_set_upload_menu" {
 		return a.limitsUI.RenderUploadMenu(c)
 	}

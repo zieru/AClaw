@@ -118,9 +118,16 @@ func (ui *LimitsUI) RenderLimitsSummary() string {
 	}
 	sb.WriteString(fmt.Sprintf("• Tampilan Footer: <code>%s</code>\n", footerLabel))
 
+	streamLabel := "Aktif ⚡ (Live Stream)"
+	if !globalPol.StreamingEnabled {
+		streamLabel = "Nonaktif ⏹️ (Non-Stream)"
+	}
+	sb.WriteString(fmt.Sprintf("• ⚡ Mode Respon: <code>%s</code>\n", streamLabel))
+
 	sb.WriteString("\n📋 <b>Cara Mengubah Pembatasan:</b>\n")
 	sb.WriteString("• Klik tombol <b>🧙‍♂️ Atur Limits (Wizard)</b> untuk mengubah via tombol interaktif.\n")
 	sb.WriteString("• Atau gunakan perintah manual:\n")
+	sb.WriteString("  <code>/setlimit global system stream on|off</code>\n")
 	sb.WriteString("  <code>/setlimit global system timeout_api 90</code>\n")
 	sb.WriteString("  <code>/setlimit global system timeout_handler 120</code>\n")
 	sb.WriteString("  <code>/setlimit global system max_audit 5000</code>\n")
@@ -129,7 +136,7 @@ func (ui *LimitsUI) RenderLimitsSummary() string {
 	return sb.String()
 }
 
-// LimitsKeyboard returns inline keyboard with quick toggle for global footer mode and wizard launcher
+// LimitsKeyboard returns inline keyboard with quick toggle for global footer mode, stream mode, and wizard launcher
 func (ui *LimitsUI) LimitsKeyboard() *tele.ReplyMarkup {
 	menu := &tele.ReplyMarkup{}
 	globalPol, _ := ui.db.GetPolicy("global", "system")
@@ -154,13 +161,20 @@ func (ui *LimitsUI) LimitsKeyboard() *tele.ReplyMarkup {
 	btnOff := menu.Data(btnOffText, "set_footer_global_off")
 	btnTokens := menu.Data(btnTokensText, "set_footer_global_tokens")
 	btnFull := menu.Data(btnFullText, "set_footer_global_full")
+
+	btnStreamText := "⚡ Stream: ON"
+	if globalPol != nil && !globalPol.StreamingEnabled {
+		btnStreamText = "⏹️ Stream: OFF"
+	}
+	btnStream := menu.Data(btnStreamText, "lim_set_val_stream_toggle")
+
 	btnWizard := menu.Data("🧙‍♂️ Atur Limits (Wizard)", "lim_wiz_start")
 	btnRotateNow := menu.Data("🧹 Pangkas / Rotasi Log Sekarang", "lim_do_rotate_audit")
 	btnBack := menu.Data("⬅️ Kembali ke Menu Utama", "menu_main")
 
 	menu.Inline(
 		menu.Row(btnOff, btnTokens, btnFull),
-		menu.Row(btnWizard),
+		menu.Row(btnStream, btnWizard),
 		menu.Row(btnRotateNow),
 		menu.Row(btnBack),
 	)
@@ -282,11 +296,17 @@ func (ui *LimitsUI) RenderScopeLimitsDashboard(c tele.Context, scope, scopeID st
 	} else {
 		sb.WriteString("• 🤖 <b>Model Override:</b> <i>(Default Provider)</i>\n")
 	}
-	sb.WriteString(fmt.Sprintf("• 📊 <b>Tampilan Footer:</b> <code>%s</code>\n\n", pol.FooterMode))
+	sb.WriteString(fmt.Sprintf("• 📊 <b>Tampilan Footer:</b> <code>%s</code>\n", pol.FooterMode))
+	streamStatus := "⚡ Aktif (Live Stream)"
+	if !pol.StreamingEnabled {
+		streamStatus = "⏹️ Nonaktif (Non-Stream)"
+	}
+	sb.WriteString(fmt.Sprintf("• ⚡ <b>Mode Respon:</b> <code>%s</code>\n\n", streamStatus))
 	sb.WriteString("Pilih parameter yang ingin diubah:")
 
 	menu := &tele.ReplyMarkup{}
 	btnFooter := menu.Data("📊 Footer Mode", "lim_set_footer_menu")
+	btnStream := menu.Data("⚡ Stream Mode", "lim_set_stream_menu")
 	btnUpload := menu.Data("📁 Max Upload", "lim_set_upload_menu")
 	btnTokens := menu.Data("🪙 Max Tokens", "lim_set_tokens_menu")
 	btnHistory := menu.Data("💬 Max History", "lim_set_history_menu")
@@ -301,13 +321,13 @@ func (ui *LimitsUI) RenderScopeLimitsDashboard(c tele.Context, scope, scopeID st
 	btnBack := menu.Data("⬅️ Kembali", "menu_limits")
 
 	menu.Inline(
-		menu.Row(btnFooter, btnUpload),
-		menu.Row(btnTokens, btnHistory),
-		menu.Row(btnCompact, btnModel),
-		menu.Row(btnTimeAPI, btnTimeHandler),
-		menu.Row(btnAuditMax, btnBudget),
-		menu.Row(btnPruneAudit, btnChangeScope),
-		menu.Row(btnBack),
+		menu.Row(btnFooter, btnStream),
+		menu.Row(btnUpload, btnTokens),
+		menu.Row(btnHistory, btnCompact),
+		menu.Row(btnModel, btnTimeAPI),
+		menu.Row(btnTimeHandler, btnAuditMax),
+		menu.Row(btnBudget, btnPruneAudit),
+		menu.Row(btnChangeScope, btnBack),
 	)
 
 	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
@@ -513,7 +533,7 @@ func (ui *LimitsUI) HandleSetLimit(c tele.Context) error {
 		return ui.StartLimitsWizard(c)
 	}
 	if len(args) < 4 {
-		return c.Reply("⚠️ Format salah!\nContoh:\n• <code>/setlimit global system timeout_api 90</code>\n• <code>/setlimit global system timeout_handler 120</code>\n• <code>/setlimit global system max_audit 5000</code>\n• <code>/setlimit global system footer full</code>\n• <code>/setlimit global system max_upload 15</code>", tele.ModeHTML)
+		return c.Reply("⚠️ Format salah!\nContoh:\n• <code>/setlimit global system stream on|off</code>\n• <code>/setlimit global system timeout_api 90</code>\n• <code>/setlimit global system timeout_handler 120</code>\n• <code>/setlimit global system max_audit 5000</code>\n• <code>/setlimit global system footer full</code>\n• <code>/setlimit global system max_upload 15</code>", tele.ModeHTML)
 	}
 
 	scope := strings.ToLower(args[0])
@@ -541,6 +561,15 @@ func (ui *LimitsUI) HandleSetLimit(c tele.Context) error {
 	}
 
 	switch param {
+	case "stream", "streaming", "stream_response", "streaming_enabled":
+		v := strings.ToLower(val)
+		if v == "on" || v == "true" || v == "1" || v == "enable" || v == "aktif" {
+			pol.StreamingEnabled = true
+		} else if v == "off" || v == "false" || v == "0" || v == "disable" || v == "nonaktif" {
+			pol.StreamingEnabled = false
+		} else {
+			return c.Reply("❌ Nilai stream harus berupa: <code>on</code> atau <code>off</code>", tele.ModeHTML)
+		}
 	case "footer", "footermode", "footer_mode":
 		v := strings.ToLower(val)
 		if v != "off" && v != "tokens" && v != "full" && v != "none" {
@@ -684,6 +713,43 @@ func (ui *LimitsUI) RenderFooterMenu(c tele.Context) error {
 	menu.Inline(
 		menu.Row(bOff, bTok),
 		menu.Row(bFull),
+		menu.Row(bBack),
+	)
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// RenderStreamMenu renders streaming response options (Stream vs Non-Stream)
+func (ui *LimitsUI) RenderStreamMenu(c tele.Context) error {
+	sess, ok := ui.GetSession(c.Sender().ID)
+	if !ok || sess.Scope == "" {
+		return ui.StartLimitsWizard(c)
+	}
+	pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
+	isStream := true
+	if pol != nil {
+		isStream = pol.StreamingEnabled
+	}
+
+	statusStr := "🟢 Aktif (Live Streaming)"
+	if !isStream {
+		statusStr = "🔴 Nonaktif (Non-Stream / Tunggu Respon Utuh)"
+	}
+
+	text := fmt.Sprintf("⚡ <b>PENGATURAN MODE RESPON STREAMING (<code>%s:%s</code>)</b>\n\n"+
+		"Status Saat Ini: <b>%s</b>\n\n"+
+		"Pilih mode pengiriman respon model AI:\n\n"+
+		"• <b>⚡ Aktif (Stream Response):</b> AI mengetik dan mengirimkan teks secara progresif/real-time.\n"+
+		"• <b>⏹️ Nonaktif (Non-Stream Response):</b> AI memproses di balik layar dan hanya mengirimkan pesan setelah 100%% selesai secara utuh. Sangat disarankan jika provider/model mengalami glitch potongan teks atau untuk menghemat rate limit API.",
+		html.EscapeString(sess.Scope), html.EscapeString(sess.ScopeID), statusStr)
+
+	menu := &tele.ReplyMarkup{}
+	bOn := menu.Data("⚡ Aktif (Stream)", "lim_set_val_stream_on")
+	bOff := menu.Data("⏹️ Nonaktif (Non-Stream)", "lim_set_val_stream_off")
+	bToggle := menu.Data("🔘 Toggle ON/OFF", "lim_set_val_stream_toggle")
+	bBack := menu.Data("⬅️ Kembali", "lim_back_dash")
+	menu.Inline(
+		menu.Row(bOn, bOff),
+		menu.Row(bToggle),
 		menu.Row(bBack),
 	)
 	return c.EditOrSend(text, menu, tele.ModeHTML)
@@ -1191,6 +1257,15 @@ func (ui *LimitsUI) HandleSetVal(c tele.Context, param, val string) error {
 	}
 
 	switch param {
+	case "stream":
+		v := strings.ToLower(val)
+		if v == "on" || v == "1" || v == "true" {
+			pol.StreamingEnabled = true
+		} else if v == "off" || v == "0" || v == "false" {
+			pol.StreamingEnabled = false
+		} else if v == "toggle" {
+			pol.StreamingEnabled = !pol.StreamingEnabled
+		}
 	case "footer":
 		pol.FooterMode = val
 	case "upload":
