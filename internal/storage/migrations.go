@@ -175,4 +175,24 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON audit_logs(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_channel ON audit_logs(channel_id);
+
+CREATE TABLE IF NOT EXISTS response_cache (
+    cache_key TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    response_text TEXT NOT NULL,
+    thinking_text TEXT NOT NULL DEFAULT '',
+    tools_called TEXT NOT NULL DEFAULT '[]',
+    media_files TEXT NOT NULL DEFAULT '[]',
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    thinking_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0.0,
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_response_cache_expires ON response_cache(expires_at);
 `

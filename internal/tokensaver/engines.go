@@ -130,12 +130,16 @@ var (
 	reMultiNewline   = regexp.MustCompile(`\n{3,}`)
 	reMultiSpace     = regexp.MustCompile(`[ \t]{2,}`)
 	reTrackingParams = regexp.MustCompile(`(?i)(\?|&)(utm_[^=]+|fbclid|gclid|trk)=[^&#\s]*`)
+	reMDComments     = regexp.MustCompile(`(?s)<!--.*?-->`)
 )
 
 func (e *LiteEngine) Process(ctx *PipelineContext, msgs []provider.ChatMessage) ([]provider.ChatMessage, error) {
 	result := make([]provider.ChatMessage, 0, len(msgs))
 	for _, m := range msgs {
 		content := m.Content
+
+		// Strip markdown comments
+		content = reMDComments.ReplaceAllString(content, "")
 
 		// Normalize newlines
 		content = reMultiNewline.ReplaceAllString(content, "\n\n")
@@ -452,12 +456,16 @@ func (e *AggressiveAgingEngine) Name() string        { return "Aggressive" }
 func (e *AggressiveAgingEngine) Description() string { return "Summarization + progressive aging of old turns" }
 
 func (e *AggressiveAgingEngine) Process(ctx *PipelineContext, msgs []provider.ChatMessage) ([]provider.ChatMessage, error) {
-	if len(msgs) <= 4 {
+	minTurns := 4
+	if ctx != nil && ctx.Config != nil && (ctx.Config.Preset == PresetUltra || ctx.Config.Preset == PresetAggressive) {
+		minTurns = 2
+	}
+	if len(msgs) <= minTurns {
 		return msgs, nil
 	}
 
 	result := make([]provider.ChatMessage, 0, len(msgs))
-	cutoff := len(msgs) - 4 // Turns older than 4 gets aggressively condensed
+	cutoff := len(msgs) - minTurns // Turns older than cutoff gets aggressively condensed
 
 	for i, m := range msgs {
 		content := m.Content

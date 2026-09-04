@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"goassistant/internal/tools"
 )
 
 func TestResponseCache(t *testing.T) {
@@ -136,5 +138,76 @@ func TestStaticFirstPromptBuilder(t *testing.T) {
 	}
 	if idxIdentity > idxTools {
 		t.Errorf("expected IDENTITY.md (%d) to appear BEFORE TOOLS.md (%d)", idxIdentity, idxTools)
+	}
+}
+
+func TestResponseCacheNormalizationAndGlobalFallback(t *testing.T) {
+	cache := NewResponseCache(100, 10*time.Minute)
+	defer cache.Close()
+
+	model := "gpt-4o"
+	// 1. Test normalization with punctuation and whitespace
+	originalPrompt := "Apa itu lithium titanate?"
+	resp := &AgentResponse{
+		Text:        "Lithium titanate (LTO) adalah bahan baterai canggih.",
+		TotalTokens: 50,
+	}
+	cache.Set("channel_alpha", model, originalPrompt, resp, 10*time.Minute)
+
+	// Variations that should all HIT:
+	variations := []string{
+		"apa itu lithium titanate",
+		"  Apa   itu   lithium   titanate?  ",
+		"apa itu lithium titanate??!",
+		"APA ITU LITHIUM TITANATE.",
+	}
+	for _, v := range variations {
+		cached, hit := cache.Get("channel_alpha", model, v)
+		if !hit || cached == nil {
+			t.Fatalf("expected cache hit for variation %q", v)
+		}
+		if cached.Text != resp.Text {
+			t.Errorf("expected text %s, got %s", resp.Text, cached.Text)
+		}
+	}
+
+	// 2. Test cross-channel global fallback
+	// Query from channel_beta should hit the global entry created by channel_alpha
+	cachedBeta, hitBeta := cache.Get("channel_beta", model, "apa itu lithium titanate")
+	if !hitBeta || cachedBeta == nil {
+		t.Fatalf("expected cross-channel global cache hit from channel_beta")
+	}
+	if cachedBeta.Text != resp.Text {
+		t.Errorf("expected %s, got %s", resp.Text, cachedBeta.Text)
+	}
+}
+
+func TestDynamicToolFilteringAndMinify(t *testing.T) {
+	toolsMD := "<!-- internal notes -->\n# Guidelines Tools\n\n1. **Waktu & Tanggal (`get_current_time`)**:\n   Panggil tool ini saat tanya jam atau tanggal.\n\n2. **Browser Automation (`browser`)**:\n   Buka web dengan Chromium.\n\n3. **Perintah Terminal (`bash_exec`)**:\n   Jalankan binary g3a atau script.\n"
+	minified := MinifySystemPrompt("Line 1\n\n\n\n<!-- comment -->Line 2  ")
+	if strings.Contains(minified, "<!-- comment -->") {
+		t.Errorf("expected HTML comment to be stripped")
+	}
+	if strings.Contains(minified, "\n\n\n") {
+		t.Errorf("expected multiple newlines to be collapsed")
+	}
+
+	// Test tool filtering
+	filtered := filterToolsGuidelines(toolsMD, nil)
+	if filtered != toolsMD {
+		t.Errorf("expected nil allowedTools to preserve toolsMD")
+	}
+
+	filteredEmpty := filterToolsGuidelines(toolsMD, []tools.Tool{})
+	if filteredEmpty != "" {
+		t.Errorf("expected empty allowedTools to result in empty guidelines, got %s", filteredEmpty)
+	}
+
+	filteredTime := filterToolsGuidelines(toolsMD, []tools.Tool{&tools.DateTimeTool{}})
+	if !strings.Contains(filteredTime, "get_current_time") {
+		t.Errorf("expected get_current_time in filtered guidelines")
+	}
+	if strings.Contains(filteredTime, "browser") || strings.Contains(filteredTime, "bash_exec") {
+		t.Errorf("expected browser and bash_exec to be pruned")
 	}
 }

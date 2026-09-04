@@ -53,6 +53,12 @@ func (t *HTTPClientTool) Execute(ctx context.Context, args map[string]interface{
 		method = strings.ToUpper(strings.TrimSpace(m))
 	}
 
+	if method == "GET" {
+		if cached, hit := GetGlobalToolCache().Get(t.Name(), args); hit {
+			return cached, nil
+		}
+	}
+
 	var bodyReader io.Reader
 	if b, ok := args["body"].(string); ok && b != "" {
 		bodyReader = bytes.NewBufferString(b)
@@ -85,5 +91,10 @@ func (t *HTTPClientTool) Execute(ctx context.Context, args map[string]interface{
 		result = result[:5000] + "\n...[response truncated]"
 	}
 
-	return fmt.Sprintf("HTTP Status: %s (%d)\nResponse:\n%s", resp.Status, resp.StatusCode, result), nil
+	outStr := fmt.Sprintf("HTTP Status: %s (%d)\nResponse:\n%s", resp.Status, resp.StatusCode, result)
+	if method == "GET" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		GetGlobalToolCache().Set(t.Name(), args, outStr, 15*time.Minute)
+	}
+
+	return outStr, nil
 }

@@ -2,8 +2,11 @@ package agent
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
+
+	"goassistant/internal/tools"
 )
 
 type PromptBuilder struct {
@@ -27,6 +30,77 @@ type PromptContext struct {
 	ActiveProvider  string
 	ThinkingEnabled bool
 	StreamMode      bool
+	AllowedTools    []tools.Tool
+}
+
+var (
+	reHTMLComments  = regexp.MustCompile(`(?s)<!--.*?-->`)
+	reMultiNewlines = regexp.MustCompile(`\n{3,}`)
+)
+
+// MinifySystemPrompt strips HTML comments, trims whitespace, and collapses blank lines
+func MinifySystemPrompt(prompt string) string {
+	prompt = reHTMLComments.ReplaceAllString(prompt, "")
+	lines := strings.Split(prompt, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimRight(l, " \t\r")
+	}
+	prompt = strings.Join(lines, "\n")
+	prompt = reMultiNewlines.ReplaceAllString(prompt, "\n\n")
+	return strings.TrimSpace(prompt)
+}
+
+// filterToolsGuidelines dynamically filters TOOLS.md to only keep guidelines for allowed tools
+func filterToolsGuidelines(toolsMD string, allowedTools []tools.Tool) string {
+	if allowedTools == nil {
+		return toolsMD
+	}
+	if len(allowedTools) == 0 {
+		return ""
+	}
+	allowedMap := make(map[string]bool)
+	for _, t := range allowedTools {
+		allowedMap[strings.ToLower(t.Name())] = true
+	}
+
+	// Split by numbered sections e.g. "1. **"
+	sectionSplitter := regexp.MustCompile(`(?m)^(\d+\.\s+\*\*.*?\*\*:?)`)
+	parts := sectionSplitter.Split(toolsMD, -1)
+	headers := sectionSplitter.FindAllString(toolsMD, -1)
+
+	if len(headers) == 0 {
+		return toolsMD
+	}
+
+	var sb strings.Builder
+	if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+		sb.WriteString(strings.TrimSpace(parts[0]))
+		sb.WriteString("\n\n")
+	}
+
+	for i, h := range headers {
+		body := ""
+		if i+1 < len(parts) {
+			body = parts[i+1]
+		}
+		full := h + body
+		lower := strings.ToLower(full)
+
+		// Check if any allowed tool matches this section
+		keep := false
+		for toolName := range allowedMap {
+			if strings.Contains(lower, "`"+toolName+"`") || strings.Contains(lower, toolName) {
+				keep = true
+				break
+			}
+		}
+		if keep {
+			sb.WriteString(strings.TrimSpace(full))
+			sb.WriteString("\n\n")
+		}
+	}
+
+	return strings.TrimSpace(sb.String())
 }
 
 // BuildSystemPrompt builds the complete system prompt from Markdown files and context
@@ -62,9 +136,14 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 	// 4. Tool Instructions if TOOLS.md exists (scoped to channel or global fallback) - STATIC
 	toolsMD, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "TOOLS.md")
 	if err == nil && toolsMD != "" {
-		sb.WriteString("## Tool Usage Guidelines:\n")
-		sb.WriteString(toolsMD)
-		sb.WriteString("\n\n")
+		if ctx.AllowedTools != nil {
+			toolsMD = filterToolsGuidelines(toolsMD, ctx.AllowedTools)
+		}
+		if toolsMD != "" {
+			sb.WriteString("## Tool Usage Guidelines:\n")
+			sb.WriteString(toolsMD)
+			sb.WriteString("\n\n")
+		}
 	}
 
 	// 5. Injected Dynamic Context & Memory (Placed at suffix to maximize static prefix prompt caching)
@@ -112,7 +191,7 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 		rawPrompt = strings.ReplaceAll(rawPrompt, "{{stream_mode}}", "batch")
 	}
 
-	return rawPrompt, nil
+	return MinifySystemPrompt(rawPrompt), nil
 }
 
 // BuildSubagentPrompt constructs a dedicated, focused system prompt for a specialized subagent

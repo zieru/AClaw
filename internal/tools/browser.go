@@ -82,6 +82,12 @@ func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]int
 		action = strings.ToLower(strings.TrimSpace(act))
 	}
 
+	if action == "open" {
+		if cached, hit := GetGlobalToolCache().Get(b.Name(), args); hit {
+			return cached, nil
+		}
+	}
+
 	waitSeconds := 3
 	if w, ok := args["wait_seconds"].(float64); ok && w > 0 {
 		waitSeconds = int(w)
@@ -207,7 +213,11 @@ func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]int
 		if targetURL == "" {
 			return "", fmt.Errorf("parameter 'url' wajib diisi")
 		}
-		return rodOpenAndInspect(page, targetURL, waitSeconds)
+		res, err := rodOpenAndInspect(page, targetURL, waitSeconds)
+		if err == nil && strings.TrimSpace(res) != "" {
+			GetGlobalToolCache().Set(b.Name(), args, res, 15*time.Minute)
+		}
+		return res, err
 	}
 }
 

@@ -74,6 +74,24 @@ func Open(dbPath string) (*DB, error) {
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN token_budget INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN response_cache_enabled INTEGER NOT NULL DEFAULT 1")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN response_cache_ttl_sec INTEGER NOT NULL DEFAULT 1800")
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS response_cache (
+		cache_key TEXT PRIMARY KEY,
+		channel_id TEXT NOT NULL,
+		model TEXT NOT NULL,
+		prompt TEXT NOT NULL,
+		response_text TEXT NOT NULL,
+		thinking_text TEXT NOT NULL DEFAULT '',
+		tools_called TEXT NOT NULL DEFAULT '[]',
+		media_files TEXT NOT NULL DEFAULT '[]',
+		prompt_tokens INTEGER NOT NULL DEFAULT 0,
+		completion_tokens INTEGER NOT NULL DEFAULT 0,
+		thinking_tokens INTEGER NOT NULL DEFAULT 0,
+		total_tokens INTEGER NOT NULL DEFAULT 0,
+		cost_usd REAL NOT NULL DEFAULT 0.0,
+		expires_at DATETIME NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_response_cache_expires ON response_cache(expires_at)")
 
 	// Ensure default global policy exists and has footer_mode 'full' by default
 	_, _ = db.Exec("INSERT OR IGNORE INTO channel_policies (id, scope, scope_id, footer_mode, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold) VALUES ('global', 'global', 'system', 'full', 10, 2048, 20, 1, 15)")
@@ -1601,5 +1619,94 @@ func (d *DB) SetSetting(key, val string) error {
 	ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP
 	`
 	_, err := d.db.Exec(query, key, val)
+	return err
+}
+
+// --- Response Cache Persistent Operations ---
+
+type ResponseCacheRecord struct {
+	CacheKey         string    `json:"cache_key"`
+	ChannelID        string    `json:"channel_id"`
+	Model            string    `json:"model"`
+	Prompt           string    `json:"prompt"`
+	ResponseText     string    `json:"response_text"`
+	ThinkingText     string    `json:"thinking_text"`
+	ToolsCalled      string    `json:"tools_called"`
+	MediaFiles       string    `json:"media_files"`
+	PromptTokens     int       `json:"prompt_tokens"`
+	CompletionTokens int       `json:"completion_tokens"`
+	ThinkingTokens   int       `json:"thinking_tokens"`
+	TotalTokens      int       `json:"total_tokens"`
+	CostUSD          float64   `json:"cost_usd"`
+	ExpiresAt        time.Time `json:"expires_at"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+func (d *DB) GetCachedResponse(key string) (*ResponseCacheRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	query := `
+	SELECT cache_key, channel_id, model, prompt, response_text, thinking_text, tools_called, media_files,
+	       prompt_tokens, completion_tokens, thinking_tokens, total_tokens, cost_usd, expires_at, created_at
+	FROM response_cache
+	WHERE cache_key = ? AND expires_at > CURRENT_TIMESTAMP
+	`
+	row := d.db.QueryRow(query, key)
+	var r ResponseCacheRecord
+	err := row.Scan(&r.CacheKey, &r.ChannelID, &r.Model, &r.Prompt, &r.ResponseText, &r.ThinkingText,
+		&r.ToolsCalled, &r.MediaFiles, &r.PromptTokens, &r.CompletionTokens, &r.ThinkingTokens,
+		&r.TotalTokens, &r.CostUSD, &r.ExpiresAt, &r.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (d *DB) SetCachedResponse(rec *ResponseCacheRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	query := `
+	INSERT INTO response_cache (cache_key, channel_id, model, prompt, response_text, thinking_text, tools_called, media_files,
+	                            prompt_tokens, completion_tokens, thinking_tokens, total_tokens, cost_usd, expires_at, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(cache_key) DO UPDATE SET
+		response_text = excluded.response_text,
+		thinking_text = excluded.thinking_text,
+		tools_called = excluded.tools_called,
+		media_files = excluded.media_files,
+		prompt_tokens = excluded.prompt_tokens,
+		completion_tokens = excluded.completion_tokens,
+		thinking_tokens = excluded.thinking_tokens,
+		total_tokens = excluded.total_tokens,
+		cost_usd = excluded.cost_usd,
+		expires_at = excluded.expires_at
+	`
+	_, err := d.db.Exec(query, rec.CacheKey, rec.ChannelID, rec.Model, rec.Prompt, rec.ResponseText, rec.ThinkingText,
+		rec.ToolsCalled, rec.MediaFiles, rec.PromptTokens, rec.CompletionTokens, rec.ThinkingTokens,
+		rec.TotalTokens, rec.CostUSD, rec.ExpiresAt)
+	return err
+}
+
+func (d *DB) DeleteExpiredCachedResponses() (int64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	res, err := d.db.Exec("DELETE FROM response_cache WHERE expires_at <= CURRENT_TIMESTAMP")
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (d *DB) FlushCachedResponses() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, err := d.db.Exec("DELETE FROM response_cache")
 	return err
 }

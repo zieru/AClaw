@@ -33,6 +33,9 @@ func NewOrchestrator(
 	tr *tools.Registry,
 	pm *provider.Manager,
 ) *Orchestrator {
+	if db != nil {
+		GetGlobalResponseCache().SetDB(db)
+	}
 	return &Orchestrator{
 		db:              db,
 		sessionManager:  sm,
@@ -179,34 +182,36 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		}
 	}
 
-	// 7. Build Memory & System Prompt
-	memContext, _ := o.memoryManager.GetContextMemory(req.ChannelID, req.UserID)
-
-	sysPrompt, err := o.promptBuilder.BuildSystemPrompt(PromptContext{
-		ChannelID:      req.ChannelID,
-		AgentRole:      req.PreferredRole,
-		ChannelType:    req.ChannelType,
-		ChannelName:    req.ChannelName,
-		UserName:       req.UserName,
-		UserID:         req.UserID,
-		MemoryContext:  memContext,
-		SessionSummary: session.Summary,
-		ActiveModel:    activeModelName,
-		ActiveProvider: activeProvName,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("gagal membangun prompt: %w", err)
-	}
-
-	// 6. Retrieve History
+	// 6. Retrieve History & Allowed Tools
 	history, err := o.sessionManager.GetHistory(session.ID, policy.MaxHistoryTurns)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mengambil riwayat sesi: %w", err)
 	}
 
-	// 7. Resolve Allowed Tools Matrix
 	perms, _ := o.db.GetChannelToolPerms(req.ChannelID)
 	allowedTools := o.toolRegistry.ListAllowed(perms)
+
+	// 7. Build Memory & System Prompt
+	memContext, _ := o.memoryManager.GetContextMemory(req.ChannelID, req.UserID)
+
+	sysPrompt, err := o.promptBuilder.BuildSystemPrompt(PromptContext{
+		ChannelID:       req.ChannelID,
+		AgentRole:       req.PreferredRole,
+		ChannelType:     req.ChannelType,
+		ChannelName:     req.ChannelName,
+		UserName:        req.UserName,
+		UserID:          req.UserID,
+		MemoryContext:   memContext,
+		SessionSummary:  session.Summary,
+		ActiveModel:     activeModelName,
+		ActiveProvider:  activeProvName,
+		ThinkingEnabled: policy.ThinkingEnabled,
+		StreamMode:      policy.StreamingEnabled,
+		AllowedTools:    allowedTools,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("gagal membangun prompt: %w", err)
+	}
 
 	// 8. Prepare Messages for LLM
 	var messages []provider.ChatMessage
