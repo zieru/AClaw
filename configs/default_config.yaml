@@ -49,7 +49,7 @@ subagent:
 # GoAssist HTTP Server Configuration
 http_server:
   enabled: true              # Aktifkan HTTP server bersamaan dengan daemon
-  port: 8080                 # Port HTTP Server
+  port: 12110                 # Port HTTP Server
   endpoints_file: "configs/endpoints.yaml" # Path konfigurasi endpoint dinamis
   read_timeout_seconds: 15
   write_timeout_seconds: 45

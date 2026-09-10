@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"strings"
 	"sync"
 	"time"
@@ -23,12 +24,25 @@ type SubTask struct {
 
 // SubTaskResult holds the result from a single sub-agent execution
 type SubTaskResult struct {
-	Role       string        `json:"role"`
-	Output     string        `json:"output"`
-	Error      string        `json:"error,omitempty"`
-	Tokens     int           `json:"tokens"`
-	Latency    time.Duration `json:"latency"`
-	Success    bool          `json:"success"`
+	Role     string        `json:"role"`
+	Output   string        `json:"output"`
+	Thinking string        `json:"thinking,omitempty"`
+	Error    string        `json:"error,omitempty"`
+	Tokens   int           `json:"tokens"`
+	Latency  time.Duration `json:"latency"`
+	Success  bool          `json:"success"`
+}
+
+func cleanThinkingPreview(text string, maxLen int) string {
+	clean := strings.TrimSpace(text)
+	clean = strings.ReplaceAll(clean, "\n", " ")
+	for strings.Contains(clean, "  ") {
+		clean = strings.ReplaceAll(clean, "  ", " ")
+	}
+	if len(clean) > maxLen {
+		clean = clean[:maxLen-3] + "..."
+	}
+	return clean
 }
 
 // SubagentTool implements tools.Tool for delegating subtasks to specialized subagents.
@@ -127,7 +141,15 @@ func (s *SubagentTool) Execute(ctx context.Context, args map[string]interface{})
 		return "", fmt.Errorf("sub-agen @%s gagal: %s", role, result.Error)
 	}
 
-	return fmt.Sprintf("=== [HASIL SUB-AGEN @%s] ===\n%s", role, result.Output), nil
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("=== [HASIL SUB-AGEN @%s] ===\n", role))
+	sb.WriteString(fmt.Sprintf("🎯 GOAL: %s\n", strings.TrimSpace(instruction)))
+	if result.Thinking != "" {
+		sb.WriteString(fmt.Sprintf("💭 PROSES PENALARAN (THINKING):\n%s\n", strings.TrimSpace(result.Thinking)))
+	}
+	sb.WriteString(fmt.Sprintf("📋 HASIL AKHIR:\n%s", strings.TrimSpace(result.Output)))
+
+	return sb.String(), nil
 }
 
 // executeParallel runs multiple sub-tasks concurrently with semaphore control
@@ -183,9 +205,13 @@ func (s *SubagentTool) executeParallel(ctx context.Context, tasksJSON string, mo
 	successCount := 0
 	for i, result := range results {
 		sb.WriteString(fmt.Sprintf("--- Sub-Agen #%d @%s ---\n", i+1, tasks[i].Role))
+		sb.WriteString(fmt.Sprintf("🎯 GOAL: %s\n", strings.TrimSpace(tasks[i].Instruction)))
+		if result.Thinking != "" {
+			sb.WriteString(fmt.Sprintf("💭 PROSES PENALARAN (THINKING):\n%s\n", strings.TrimSpace(result.Thinking)))
+		}
 		if result.Success {
 			successCount++
-			sb.WriteString(result.Output)
+			sb.WriteString(fmt.Sprintf("📋 HASIL:\n%s", result.Output))
 		} else {
 			sb.WriteString(fmt.Sprintf("❌ Error: %s", result.Error))
 		}
@@ -256,9 +282,19 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 		},
 	}
 
+	progress := GetProgressReporter(ctx)
+	if progress != nil {
+		shortInst := task.Instruction
+		if len(shortInst) > 85 {
+			shortInst = shortInst[:82] + "..."
+		}
+		progress(fmt.Sprintf("🤖 <b>[Sub-agen @%s]</b> Ditugaskan\n🎯 <b>Goal:</b> <i>%s</i>", role, html.EscapeString(shortInst)))
+	}
+
 	// 4. Execute subagent inference loop (up to 3 turns)
 	maxTurns := 3
 	var finalOutput string
+	var collectedThinking []string
 	totalTokens := 0
 
 	subCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -268,25 +304,35 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 		compressedMsgs, _ := tokensaver.CompressMessages(messages, "auto", tokenBudget*4)
 
 		chatReq := provider.ChatRequest{
-			Model:       modelOverride,
-			Messages:    compressedMsgs,
-			Tools:       allowedTools,
-			Temperature: 0.5,
-			MaxTokens:   tokenBudget,
+			Model:           modelOverride,
+			Messages:        compressedMsgs,
+			Tools:           allowedTools,
+			Temperature:     0.5,
+			MaxTokens:       tokenBudget,
+			ThinkingEnabled: true,
 		}
 
 		resp, err := s.providerManager.GenerateWithFallback(subCtx, preferredProv, chatReq)
 		if err != nil {
 			return SubTaskResult{
-				Role:    role,
-				Error:   fmt.Sprintf("gagal: %v", err),
-				Tokens:  totalTokens,
-				Latency: time.Since(start),
-				Success: false,
+				Role:     role,
+				Error:    fmt.Sprintf("gagal: %v", err),
+				Thinking: strings.Join(collectedThinking, "\n\n"),
+				Tokens:   totalTokens,
+				Latency:  time.Since(start),
+				Success:  false,
 			}
 		}
 
 		totalTokens += resp.TotalTokens
+
+		if resp.Thinking != "" {
+			collectedThinking = append(collectedThinking, resp.Thinking)
+			if progress != nil {
+				thinkPreview := cleanThinkingPreview(resp.Thinking, 85)
+				progress(fmt.Sprintf("🤖 <b>[@%s]</b> 💭 <i>%s</i>", role, html.EscapeString(thinkPreview)))
+			}
+		}
 
 		if len(resp.ToolCalls) == 0 {
 			finalOutput = resp.Content
@@ -305,6 +351,9 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 			if tc.Name == "delegate_task" {
 				continue // Guard against recursion
 			}
+			if progress != nil {
+				progress(fmt.Sprintf("🤖 <b>[@%s]</b> 🔍 <i>Menjalankan tool: <b>%s</b>...</i>", role, tc.Name))
+			}
 			toolOut, toolErr := s.toolRegistry.Execute(subCtx, tc.Name, tc.Arguments)
 			if toolErr != nil {
 				toolOut = fmt.Sprintf("Error tool %s: %v", tc.Name, toolErr)
@@ -317,6 +366,10 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 			}
 			messages = append(messages, toolMsg)
 		}
+
+		if progress != nil && turn < maxTurns-1 {
+			progress(fmt.Sprintf("🤖 <b>[@%s]</b> ✍️ <i>Menganalisis data & menyusun kesimpulan...</i>", role))
+		}
 	}
 
 	if finalOutput == "" {
@@ -324,11 +377,12 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 	}
 
 	return SubTaskResult{
-		Role:    role,
-		Output:  finalOutput,
-		Tokens:  totalTokens,
-		Latency: time.Since(start),
-		Success: true,
+		Role:     role,
+		Output:   finalOutput,
+		Thinking: strings.Join(collectedThinking, "\n\n"),
+		Tokens:   totalTokens,
+		Latency:  time.Since(start),
+		Success:  true,
 	}
 }
 

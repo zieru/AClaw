@@ -63,6 +63,24 @@ type UserRequest struct {
 	OnStreamChunk  func(chunk provider.StreamChunk)
 }
 
+type progressKey struct{}
+
+// WithProgressReporter attaches an OnProgress callback to context
+func WithProgressReporter(ctx context.Context, fn func(string)) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, progressKey{}, fn)
+}
+
+// GetProgressReporter extracts OnProgress callback from context
+func GetProgressReporter(ctx context.Context) func(string) {
+	if fn, ok := ctx.Value(progressKey{}).(func(string)); ok {
+		return fn
+	}
+	return nil
+}
+
 type MediaAttachment struct {
 	FilePath string
 	Caption  string
@@ -460,7 +478,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 			if req.OnProgress != nil {
 				req.OnProgress(fmt.Sprintf("🔍 <i>Sedang menjalankan tool: <b>%s</b>...</i>", tc.Name))
 			}
-			toolOut, toolErr := o.toolRegistry.Execute(ctx, tc.Name, tc.Arguments)
+			toolCtx := WithProgressReporter(ctx, req.OnProgress)
+			toolOut, toolErr := o.toolRegistry.Execute(toolCtx, tc.Name, tc.Arguments)
 			if toolErr != nil {
 				toolOut = fmt.Sprintf("Error eksekusi tool %s: %v", tc.Name, toolErr)
 			}
