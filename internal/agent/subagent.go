@@ -206,10 +206,11 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 		role = "general"
 	}
 
-	// Get timeout from config
+	// Get timeout and default provider/model from config
 	cfg := config.Get()
-	timeout := 90 * time.Second
+	timeout := 35 * time.Second
 	tokenBudget := 2048
+	preferredProv := ""
 	if cfg != nil {
 		if cfg.SubAgent.TimeoutSeconds > 0 {
 			timeout = time.Duration(cfg.SubAgent.TimeoutSeconds) * time.Second
@@ -217,6 +218,10 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 		if cfg.SubAgent.TokenBudgetPerTask > 0 {
 			tokenBudget = cfg.SubAgent.TokenBudgetPerTask
 		}
+		if modelOverride == "" {
+			modelOverride = cfg.Defaults.DefaultModel
+		}
+		preferredProv = cfg.Defaults.DefaultProvider
 	}
 
 	// 1. Build Isolated Subagent System Prompt
@@ -270,7 +275,7 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 			MaxTokens:   tokenBudget,
 		}
 
-		resp, err := s.providerManager.GenerateWithFallback(subCtx, "", chatReq)
+		resp, err := s.providerManager.GenerateWithFallback(subCtx, preferredProv, chatReq)
 		if err != nil {
 			return SubTaskResult{
 				Role:    role,

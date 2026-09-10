@@ -42,8 +42,8 @@ timeouts:
 # Sub-Agent Multi-Task Delegation
 subagent:
   max_parallel: 3            # Max sub-agent berjalan bersamaan (3-5 direkomendasikan)
-  timeout_seconds: 90        # Batas waktu per sub-task (detik)
-  auto_delegate: true        # Otomatis pecah prompt kompleks ke sub-agent
+  timeout_seconds: 30        # Batas waktu per sub-task (detik)
+  auto_delegate: false       # Matikan auto-delegate agar prompt analitik/query dieksekusi langsung
   token_budget_per_task: 2048 # Budget token per sub-agent task
 
 # GoAssist HTTP Server Configuration
