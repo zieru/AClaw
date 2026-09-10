@@ -224,13 +224,19 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 		preferredProv = cfg.Defaults.DefaultProvider
 	}
 
-	// 1. Build Isolated Subagent System Prompt
-	sysPrompt, err := s.promptBuilder.BuildSubagentPrompt(role)
+	// 1. Resolve tools for subagent (prevent recursive delegate_task)
+	subagentAllowedMap := map[string]bool{
+		"delegate_task": false, // Disallow nested subagent delegation
+	}
+	allowedTools := s.toolRegistry.ListAllowed(subagentAllowedMap)
+
+	// 2. Build Isolated Subagent System Prompt (with tool guidelines for allowed tools)
+	sysPrompt, err := s.promptBuilder.BuildSubagentPrompt(role, allowedTools)
 	if err != nil || sysPrompt == "" {
 		sysPrompt = fmt.Sprintf("Kamu adalah Sub-Agen Ahli dengan spesialisasi peran: %s.\nFokus hanya pada instruksi tugas yang didelegasikan kepadamu secara ringkas, akurat, dan langsung pada inti tugas.", role)
 	}
 
-	// 2. Prepare subagent user prompt with isolated context
+	// 3. Prepare subagent user prompt with isolated context
 	var userPromptBuilder strings.Builder
 	userPromptBuilder.WriteString(fmt.Sprintf("### TUGAS SUB-AGEN (@%s):\n%s\n", role, task.Instruction))
 	if strings.TrimSpace(task.ContextData) != "" {
@@ -249,12 +255,6 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 			Content: userPromptBuilder.String(),
 		},
 	}
-
-	// 3. Resolve tools for subagent (prevent recursive delegate_task)
-	subagentAllowedMap := map[string]bool{
-		"delegate_task": false, // Disallow nested subagent delegation
-	}
-	allowedTools := s.toolRegistry.ListAllowed(subagentAllowedMap)
 
 	// 4. Execute subagent inference loop (up to 3 turns)
 	maxTurns := 3

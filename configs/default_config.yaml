@@ -76,10 +76,10 @@ webshare:
 
 # MCP (Model Context Protocol) External Tools Configuration
 mcp_servers:
-  - name: "a7g3"
+  - name: "g3a"
     enabled: true
     transport: "stdio"        # "stdio" (subprocess otomatis) atau "sse" (HTTP)
-    command: "c:/Users/Grapari_Infomedia/GolandProjects/a7g3/g3a.exe"
+    command: "/root/bin/g3a"  # Path executable g3a (misal: /root/bin/g3a atau /home/<user>/bin/g3a)
     args: ["mcp"]
-    prefix: "a7g3"            # Prefix tool: a7g3_query_analytics, a7g3_run_sql, dll.
+    prefix: "g3a"            # Prefix tool: g3a_query_analytics, g3a_run_sql, g3a_describe_dataset, dll.
 

@@ -12,7 +12,10 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
    - **Dataset Utama yang Tersedia via Alias**:
      * **`funneling`**: Data Order Funneling / Stuck Order / Fallout Parquet (`region`, `branch`, `cluster`, `periode`, `mapping_kategori`, `fallout_reason`, dll).
      * **`visit`**: Data Antreaja Visit Parquet (`Trx Date`, `regional`, `territory`, `Nama Grapari`, `total`, `flag_dilayani`, dll).
-   - *(Catatan: Hanya gunakan `bash_exec("g3a ...")` jika tool `g3a_*` di atas tidak tersedia di daftar tool kamu)*.
+   - **ATURAN MUTLAK ANALITIK**:
+     * WAJIB menggunakan tool native MCP `g3a_*` (`g3a_describe_dataset`, `g3a_query_analytics`, `g3a_run_sql`, dll.) untuk setiap query atau inspeksi data.
+     * DILARANG KERAS menggunakan `bash_exec` untuk menulis script Python, DuckDB, Pandas, atau membaca file `.parquet` secara manual di terminal.
+     * Jika tool `g3a_*` tidak tersedia di daftar tool aktifmu, JANGAN pernah menjalankan script terminal pengganti; informasikan langsung kepada pengguna bahwa modul MCP `g3a` belum aktif di server.
 
 2. **Kirim File & Gambar Langsung (`send_file`)**:
    - Kamu **MEMILIKI KEMAMPUAN PENUH** untuk mengirimkan file dokumen, gambar/foto (PNG, JPG, WebP), PDF, CSV, laporan, atau audio dari server lokal langsung sebagai attachment ke chat pengguna Telegram dan WhatsApp!

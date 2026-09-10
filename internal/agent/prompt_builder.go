@@ -195,7 +195,7 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 }
 
 // BuildSubagentPrompt constructs a dedicated, focused system prompt for a specialized subagent
-func (pb *PromptBuilder) BuildSubagentPrompt(role string) (string, error) {
+func (pb *PromptBuilder) BuildSubagentPrompt(role string, optTools ...[]tools.Tool) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("# Specialized Sub-Agent Role: %s\n", strings.ToUpper(role)))
 	sb.WriteString("Kamu adalah Sub-Agen Spesialis independen yang bertugas menyelesaikan satu sub-tugas tertentu dengan fokus penuh, cepat, dan presisi.\n\n")
@@ -205,6 +205,21 @@ func (pb *PromptBuilder) BuildSubagentPrompt(role string) (string, error) {
 		sb.WriteString("## Spesialisasi & Aturan Peran:\n")
 		sb.WriteString(agentsMD)
 		sb.WriteString("\n\n")
+	}
+
+	// Tool Guidelines if available for allowed tools
+	var allowedTools []tools.Tool
+	if len(optTools) > 0 {
+		allowedTools = optTools[0]
+	}
+	toolsMD, err := pb.mdLoader.GetFile("TOOLS.md")
+	if err == nil && toolsMD != "" && len(allowedTools) > 0 {
+		filtered := filterToolsGuidelines(toolsMD, allowedTools)
+		if filtered != "" {
+			sb.WriteString("## Pedoman Penggunaan Tools:\n")
+			sb.WriteString(filtered)
+			sb.WriteString("\n\n")
+		}
 	}
 
 	// Role-specific enhancements
