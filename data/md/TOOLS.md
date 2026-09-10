@@ -2,15 +2,15 @@
 
 Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomatis:
 
-1. **Analitik Data & Query Engine (`a7g3_query_analytics`, `a7g3_run_sql`, `a7g3_list_datasets`, `a7g3_describe_dataset`, `a7g3_export_chart_image`, atau `g3a` via `bash_exec`)**:
-   - Kamu memiliki akses langsung ke **Engine Analitik Vectorized DuckDB `g3a` (a7g3)** melalui Native MCP Tools (`a7g3_query_analytics`, `a7g3_run_sql`, `a7g3_describe_dataset`, `a7g3_list_datasets`, `a7g3_export_chart_image`) ataupun via `bash_exec`.
-   - **ATURAN PROAKTIF (WAJIB)**: Jika pengguna meminta analisis data, rekapitulasi, atau ringkasan (misalnya order fallout, stuck order, visit, funneling), **JANGAN PERNAH BERTANYA KONFIRMASI** atau meminta detail parameter ke pengguna! **SEGERA EKSEKUSI** query menggunakan tool `a7g3_query_analytics` atau `a7g3_run_sql`.
-   - **Panduan Pemilihan MCP Tools a7g3**:
-     * Gunakan `a7g3_list_datasets` untuk mengecek alias dataset apa saja yang terdaftar di konfigurasi sistem.
-     * Gunakan `a7g3_describe_dataset` untuk menginspeksi skema kolom dan tipe data dari dataset atau file Parquet/CSV.
-     * Gunakan `a7g3_query_analytics` untuk query agregasi terstruktur (`select`, `where`, `group_by`, `order_by`, `limit`, `pivot`).
-     * Gunakan `a7g3_run_sql` untuk SQL tingkat lanjut seperti JOIN kompleks, Window functions, atau CTE di DuckDB.
-     * Gunakan `a7g3_export_chart_image` untuk mengekspor visualisasi tabel/grafik PNG secara langsung, lalu panggil `send_file` untuk mengirimkannya ke chat pengguna.
+1. **Analitik Data & Query Engine (`g3a_query_analytics`, `g3a_run_sql`, `g3a_list_datasets`, `g3a_describe_dataset`, `g3a_export_chart_image`, `a7g3_query_analytics`, `a7g3_run_sql` atau `g3a` via `bash_exec`)**:
+   - Kamu memiliki akses langsung ke **Engine Analitik Vectorized DuckDB `g3a` (a7g3)** melalui Native MCP Tools (`g3a_query_analytics` / `a7g3_query_analytics`, `g3a_run_sql` / `a7g3_run_sql`, `g3a_describe_dataset`, `g3a_list_datasets`, `g3a_export_chart_image`) ataupun via `bash_exec`.
+   - **ATURAN PROAKTIF (WAJIB)**: Jika pengguna meminta analisis data, rekapitulasi, atau ringkasan (misalnya order fallout, stuck order, visit, funneling), **JANGAN PERNAH BERTANYA KONFIRMASI** atau meminta detail parameter ke pengguna! **SEGERA EKSEKUSI** query menggunakan tool `g3a_query_analytics` / `a7g3_query_analytics` atau `g3a_run_sql` / `a7g3_run_sql`.
+   - **Panduan Pemilihan MCP Tools g3a / a7g3**:
+     * Gunakan `g3a_list_datasets` / `a7g3_list_datasets` untuk mengecek alias dataset apa saja yang terdaftar di konfigurasi sistem (`~/.g3a.config`).
+     * Gunakan `g3a_describe_dataset` / `a7g3_describe_dataset` untuk menginspeksi skema kolom dan tipe data dari dataset atau file Parquet/CSV.
+     * Gunakan `g3a_query_analytics` / `a7g3_query_analytics` untuk query agregasi terstruktur (`select`, `where`, `group_by`, `order_by`, `limit`, `pivot`).
+     * Gunakan `g3a_run_sql` / `a7g3_run_sql` untuk SQL tingkat lanjut seperti JOIN kompleks, Window functions, atau CTE di DuckDB.
+     * Gunakan `g3a_export_chart_image` / `a7g3_export_chart_image` untuk mengekspor visualisasi tabel/grafik PNG secara langsung, lalu panggil `send_file` untuk mengirimkannya ke chat pengguna.
    - **Dataset Utama yang Tersedia via Alias**:
      * **`funneling`** (Data Order Funneling / Stuck Order / Fallout Parquet):
        - Kolom penting: `region`, `branch`, `cluster`, `kabupaten`, `sto_co`, `periode` (angka bulan: `6`=Juni, `7`=Juli, `8`=Agustus, dst), `mapping_kategori` (`'PENDING'`, `'COMPLETED'`, `'CANCELLED'`), `mapping_order_new` (`'DO'`, `'MO'`, `'PDA'`), `fallout_reason`, `order_status_desc`, `mapping_resolver`.

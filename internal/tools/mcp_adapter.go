@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,19 @@ import (
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 )
+
+func expandCommandPath(p string) string {
+	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, p[2:])
+		}
+	} else if p == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = home
+		}
+	}
+	return os.ExpandEnv(p)
+}
 
 // MCPToolWrapper wraps an MCP server tool to satisfy the goassistant tools.Tool interface
 type MCPToolWrapper struct {
@@ -192,7 +206,8 @@ func (m *MCPManager) StartAndRegister(ctx context.Context, reg *Registry) error 
 			for k, v := range srvCfg.Env {
 				envList = append(envList, fmt.Sprintf("%s=%s", k, v))
 			}
-			stdioTrans := transport.NewStdio(srvCfg.Command, envList, srvCfg.Args...)
+			resolvedCmd := expandCommandPath(srvCfg.Command)
+			stdioTrans := transport.NewStdio(resolvedCmd, envList, srvCfg.Args...)
 			client = mcpclient.NewClient(stdioTrans)
 		default:
 			log.Printf("⚠️ [MCP] Transport tidak didukung '%s' untuk server '%s'", srvCfg.Transport, srvCfg.Name)
