@@ -8,7 +8,7 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
      * `g3a_query_analytics(dataset="...", select="...", where="...", group_by="...", order_by="...")`: untuk agregasi data terstruktur.
      * `g3a_run_sql(sql="SELECT ...")`: untuk query SQL DuckDB langsung.
      * `g3a_list_datasets()`: untuk melihat daftar alias dataset yang terkonfigurasi.
-     * `g3a_export_chart_image(...)`: untuk menghasilkan visualisasi gambar PNG (setelah selesai, kirimkan dengan tool `send_file`).
+     * `g3a_export_chart_image(dataset="<dataset>", select="...", where="...", group_by="...", order_by="...")`: untuk menghasilkan visualisasi gambar PNG resolusi tinggi secara otomatis. Gambar yang dihasilkan akan langsung dikirim ke chat pengguna (kamu juga dapat menentukan `out_file="/tmp/nama_gambar.png"`).
    - **Dataset Utama yang Tersedia via Alias**:
      * **`funneling`**: Data Order Funneling / Stuck Order / Fallout Parquet (`region`, `branch`, `cluster`, `periode`, `mapping_kategori`, `fallout_reason`, dll).
      * **`visit`**: Data Antreaja Visit Parquet (`Trx Date`, `regional`, `territory`, `Nama Grapari`, `total`, `flag_dilayani`, dll).

@@ -66,6 +66,20 @@ func (w *MCPToolWrapper) Execute(ctx context.Context, args map[string]interface{
 	if res != nil && res.IsError {
 		return output, fmt.Errorf("tool MCP '%s' mengembalikan error: %s", w.toolName, output)
 	}
+
+	// Auto-detect image output in MCP response and tag with [ATTACH_FILE:path] for Telegram/WhatsApp dispatcher
+	if !strings.Contains(output, "[ATTACH_FILE:") {
+		var data map[string]any
+		if json.Unmarshal([]byte(output), &data) == nil {
+			if fp, ok := data["file_path"].(string); ok && fp != "" {
+				ext := strings.ToLower(filepath.Ext(fp))
+				if ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp" {
+					output = fmt.Sprintf("[ATTACH_FILE:%s|CAPTION:Visualisasi %s]\n%s", fp, filepath.Base(fp), output)
+				}
+			}
+		}
+	}
+
 	return output, nil
 }
 

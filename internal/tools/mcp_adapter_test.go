@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +102,9 @@ func TestMCPToolWrapperInterface(t *testing.T) {
 }
 
 func TestLiveA7G3Connection(t *testing.T) {
+	if os.Getenv("TEST_LIVE_MCP") != "1" {
+		t.Skip("skipping live MCP test; set TEST_LIVE_MCP=1 to run")
+	}
 	cmdPath := "c:/Users/Grapari_Infomedia/GolandProjects/a7g3/g3a.exe"
 	if _, err := os.Stat(cmdPath); err != nil {
 		t.Skipf("g3a.exe not found at %s, skipping live test", cmdPath)
@@ -163,6 +167,40 @@ func TestLiveA7G3Connection(t *testing.T) {
 		t.Errorf("expected sql result to contain '42' and 'DuckDB', got: %s", sqlRes)
 	}
 	t.Logf("a7g3_run_sql live response:\n%s", sqlRes)
+
+	// Test executing a7g3_export_chart_image
+	imgTool, ok := reg.Get("a7g3_export_chart_image")
+	if !ok {
+		t.Fatalf("a7g3_export_chart_image not found")
+	}
+
+	tmpCSV, err := os.CreateTemp("", "dummy_chart_*.csv")
+	if err != nil {
+		t.Fatalf("create temp csv: %v", err)
+	}
+	defer os.Remove(tmpCSV.Name())
+	tmpCSV.WriteString("region,visits\nSumbagut,100\nSumbagteng,200\n")
+	tmpCSV.Close()
+
+	outImgPath := filepath.Join(os.TempDir(), "test_chart_out.png")
+	defer os.Remove(outImgPath)
+
+	imgRes, err := imgTool.Execute(ctx, map[string]interface{}{
+		"dataset":  tmpCSV.Name(),
+		"out_file": outImgPath,
+		"select":   "region, sum(visits) as total_visits",
+		"group_by": "region",
+	})
+	if err != nil {
+		t.Fatalf("execute a7g3_export_chart_image failed: %v", err)
+	}
+	if !strings.Contains(imgRes, "[ATTACH_FILE:") {
+		t.Errorf("expected [ATTACH_FILE:] in response, got: %s", imgRes)
+	}
+	if _, err := os.Stat(outImgPath); err != nil {
+		t.Errorf("expected output image file %s to exist, err: %v", outImgPath, err)
+	}
+	t.Logf("a7g3_export_chart_image live response:\n%s", imgRes)
 }
 
 
