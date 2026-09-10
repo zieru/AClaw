@@ -93,6 +93,20 @@ type AppConfig struct {
 		SyncIntervalMinutes int      `yaml:"sync_interval_minutes"`
 		GroupName           string   `yaml:"group_name"`
 	} `yaml:"webshare"`
+
+	MCPServers []MCPServerConfig `yaml:"mcp_servers"`
+}
+
+// MCPServerConfig defines an external Model Context Protocol (MCP) server
+type MCPServerConfig struct {
+	Name      string            `yaml:"name"`
+	Enabled   bool              `yaml:"enabled"`
+	Transport string            `yaml:"transport"` // "stdio" or "sse"
+	Command   string            `yaml:"command"`   // Path or command for stdio
+	Args      []string          `yaml:"args"`      // Arguments for stdio
+	Env       map[string]string `yaml:"env"`       // Extra environment variables
+	URL       string            `yaml:"url"`       // URL for SSE transport
+	Prefix    string            `yaml:"prefix"`    // Tool name prefix (e.g. "a7g3")
 }
 
 var (

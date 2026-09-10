@@ -83,6 +83,13 @@ func main() {
 	mdLoader := agent.NewMDLoader(cfg.Server.MDDir)
 	promptBld := agent.NewPromptBuilder(mdLoader)
 
+	// Initialize External MCP Servers (e.g. a7g3 DuckDB analytics engine)
+	mcpManager := tools.NewMCPManager(cfg.MCPServers)
+	if err := mcpManager.StartAndRegister(context.Background(), toolReg); err != nil {
+		log.Printf("⚠️ Gagal inisialisasi MCP servers: %v", err)
+	}
+	defer mcpManager.Close()
+
 	// Initialize Proxy Pool (Built-in 9Router Engine)
 	initialPoolEnabled := cfg.ProxyPool.Enabled
 	if globPol, err := db.GetPolicy("global", "system"); err == nil && globPol != nil {

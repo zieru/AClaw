@@ -74,3 +74,12 @@ webshare:
   sync_interval_minutes: 60   # Interval pembaruan otomatis (menit)
   group_name: "webshare"      # Nama grup proxy di database
 
+# MCP (Model Context Protocol) External Tools Configuration
+mcp_servers:
+  - name: "a7g3"
+    enabled: true
+    transport: "stdio"        # "stdio" (subprocess otomatis) atau "sse" (HTTP)
+    command: "c:/Users/Grapari_Infomedia/GolandProjects/a7g3/g3a.exe"
+    args: ["mcp"]
+    prefix: "a7g3"            # Prefix tool: a7g3_query_analytics, a7g3_run_sql, dll.
+
