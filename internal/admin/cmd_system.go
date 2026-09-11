@@ -36,15 +36,16 @@ func (a *AdminBot) handleNew(c tele.Context) error {
 	a.tavilyUI.CancelSession(userID)
 	a.modelUI.CancelSession(userID)
 	a.checkinUI.CancelSession(userID)
+	a.topicUI.CancelSession(userID)
 
-	// 3. Reset database session history for this chat
+	// 3. Reset database session history for active topic in this chat
 	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
-	_ = a.sessManager.ResetChatSessions(chatIDStr)
+	_ = a.sessManager.ResetActiveTopic("admin", chatIDStr)
 
-	text := "✨ <b>SESI PERCAKAPAN BARU DIMULAI</b>\n\n" +
-		"Konteks percakapan dan riwayat pesan sebelumnya telah dibersihkan.\n" +
-		"Anda sekarang berada di sesi percakapan baru yang segar.\n\n" +
-		"💡 <i>Kirim pesan atau pertanyaan apa saja untuk mulai berinteraksi dengan AI Assistant.</i>"
+	text := "✨ <b>RIWAYAT TOPIK AKTIF DIBERSIHKAN</b>\n\n" +
+		"Konteks percakapan pada topik aktif Anda telah direset.\n" +
+		"Topik Anda yang lain tetap aman tersimpan.\n\n" +
+		"💡 <i>Kirim pesan apa saja untuk melanjutkan, atau gunakan <code>/topic</code> untuk beralih topik.</i>"
 
 	return c.Send(text, tele.ModeHTML)
 }

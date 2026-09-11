@@ -70,6 +70,11 @@ func (a *AdminBot) handleTextMessage(c tele.Context) error {
 		return err
 	}
 
+	// 8c. Check Topic Wizard dialog (New topic title / Rename)
+	if handled, err := a.topicUI.HandleTextMessage(c); handled {
+		return err
+	}
+
 	// 9. Direct Chat with Assistant from Admin PM
 	msg := c.Message().Text
 	if msg == "" || msg[0] == '/' {
@@ -85,6 +90,11 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		return nil
 	}
 	data := strings.TrimPrefix(cb.Data, "\f")
+
+	// Topic Callbacks
+	if strings.HasPrefix(data, "top_") {
+		return a.topicUI.HandleCallback(c, data)
+	}
 
 	if strings.HasPrefix(data, "cancel_task") {
 		_ = c.Respond(&tele.CallbackResponse{Text: "Membatalkan proses AI..."})

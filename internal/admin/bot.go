@@ -51,6 +51,7 @@ type AdminBot struct {
 	updateUI     *UpdateUI
 	tavilyUI     *TavilyUI
 	checkinUI    *CheckinUI
+	topicUI      *TopicUI
 }
 
 func NewAdminBot(
@@ -117,6 +118,7 @@ func NewAdminBot(
 		updateUI:     NewUpdateUI(cfg, bot),
 		tavilyUI:     NewTavilyUI(db, cfg),
 		checkinUI:    NewCheckinUI(db, checkinSvc),
+		topicUI:      NewTopicUI(db, sm, bot),
 	}
 
 	a.registerRoutes()

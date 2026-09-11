@@ -118,10 +118,12 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     user_id TEXT NOT NULL,
     title TEXT NOT NULL DEFAULT '',
     summary TEXT NOT NULL DEFAULT '',
+    is_active INTEGER NOT NULL DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(channel_id, chat_id)
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_lookup ON chat_sessions(channel_id, chat_id, is_active, updated_at);
 
 CREATE TABLE IF NOT EXISTS chat_messages (
     id TEXT PRIMARY KEY,

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -456,6 +457,10 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 	}
 
 	// 3. Handle Interactive Commands
+	if a.handleTopicCommand(chatID, senderID, cleanText, lowerText) {
+		return
+	}
+
 	if lowerText == "/stop" || lowerText == "!stop" || lowerText == "/cancel" || lowerText == "stop" || lowerText == "batal" {
 		if cancelVal, loaded := a.activeTasks.LoadAndDelete(chatID); loaded {
 			if cancel, ok := cancelVal.(context.CancelFunc); ok {
@@ -478,12 +483,9 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 				cancel()
 			}
 		}
-		session, err := a.db.GetOrCreateSession(a.channelID, chatID, senderID)
-		if err == nil && session != nil {
-			_ = a.db.ClearSessionMessages(session.ID)
-		}
+		_ = a.db.ClearActiveSessionMessages(a.channelID, chatID)
 		go func() {
-			_ = a.SendMessage(chatID, "✨ *SESI BARU DIMULAI*\n\nRiwayat dan konteks percakapan telah direset.\nSilakan ajukan pertanyaan atau instruksi baru!")
+			_ = a.SendMessage(chatID, "✨ *SESI BARU DIMULAI*\n\nRiwayat dan konteks percakapan topik aktif telah direset.\nSilakan ajukan pertanyaan atau instruksi baru!")
 		}()
 		return
 	}
@@ -504,9 +506,16 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 		go func() {
 			helpText := "👋 *PANDUAN ASISTEN AI (WHATSAPP)*\n\n" +
 				"Silakan kirimkan pertanyaan atau perintah langsung di chat ini.\n\n" +
-				"📌 *Daftar Perintah:*\n" +
+				"📂 *Pengelolaan Multi-Topik:*\n" +
+				"• */topic* - Daftar & status topik percakapan\n" +
+				"• */newtopic [nama]* - Buat & aktifkan topik baru\n" +
+				"• */switchtopic <no/ID>* - Pindah ke topik lain\n" +
+				"• */renametopic <nama>* - Ganti nama topik aktif\n" +
+				"• */deltopic <no/ID>* - Hapus topik obrolan\n" +
+				"• */resettopic* - Reset riwayat topik aktif\n\n" +
+				"📌 *Perintah Umum:*\n" +
 				"• */retry* - Coba lagi permintaan atau pesan terakhir\n" +
-				"• */new* - Mulai sesi baru & reset riwayat percakapan\n" +
+				"• */new* / */reset* - Reset sesi percakapan topik aktif\n" +
 				"• */stop* - Batalkan/hentikan proses respon AI\n" +
 				"• */status* - Cek status sesi & kebijakan limit\n" +
 				"• */help* - Buka panduan ini"
@@ -910,3 +919,228 @@ func (a *NativeAdapter) isPhoneMatching(trustedPattern string, senderJID, chatJI
 
 	return false
 }
+
+func (a *NativeAdapter) handleTopicCommand(chatID, senderID, cleanText, lowerText string) bool {
+	cmd := strings.Fields(cleanText)
+	if len(cmd) == 0 {
+		return false
+	}
+	baseCmd := strings.ToLower(cmd[0])
+
+	switch {
+	case baseCmd == "/topic" || baseCmd == "/topics" || baseCmd == "!topic" || baseCmd == "!topics":
+		sessions, err := a.db.ListChatSessions(a.channelID, chatID)
+		if err != nil || len(sessions) == 0 {
+			_, _ = a.db.GetOrCreateSession(a.channelID, chatID, senderID)
+			sessions, _ = a.db.ListChatSessions(a.channelID, chatID)
+		}
+
+		var sb strings.Builder
+		sb.WriteString("📂 *DAFTAR TOPIK OBROLAN (WHATSAPP)*\n\n")
+		sb.WriteString(fmt.Sprintf("Total %d topik percakapan di chat ini:\n\n", len(sessions)))
+
+		for i, s := range sessions {
+			badge := "⚪"
+			status := ""
+			if s.IsActive {
+				badge = "🟢"
+				status = " *[AKTIF]*"
+			}
+			msgCount, _ := a.db.CountSessionMessages(s.ID)
+			sb.WriteString(fmt.Sprintf("%d. %s *%s*%s\n   • Pesan: `%d` | ID: `%s`\n", i+1, badge, s.Title, status, msgCount, s.ID))
+		}
+
+		sb.WriteString("\n💡 *Perintah Topik:*\n")
+		sb.WriteString("• */newtopic [nama]* - Buat & aktifkan topik baru\n")
+		sb.WriteString("• */switchtopic <nomor/ID>* - Pindah topik aktif\n")
+		sb.WriteString("• */renametopic <nama baru>* - Ubah judul topik aktif\n")
+		sb.WriteString("• */deltopic <nomor/ID>* - Hapus topik percakapan\n")
+		sb.WriteString("• */resettopic* - Reset riwayat topik aktif")
+
+		outMsg := sb.String()
+		go func() {
+			_ = a.SendMessage(chatID, outMsg)
+		}()
+		return true
+
+	case baseCmd == "/newtopic" || baseCmd == "!newtopic":
+		title := strings.TrimSpace(strings.TrimPrefix(cleanText, cmd[0]))
+		if title == "" {
+			title = "Topik Baru"
+		}
+		sess, err := a.db.CreateChatSession(a.channelID, chatID, senderID, title, true)
+		if err != nil {
+			errMsg := fmt.Sprintf("❌ *Gagal membuat topik baru:* %v", err)
+			go func() {
+				_ = a.SendMessage(chatID, errMsg)
+			}()
+			return true
+		}
+		msg := fmt.Sprintf("✨ *TOPIK BARU DIBUAT & DIAKTIFKAN*\n\n📌 *Judul:* %s\n🆔 *ID:* `%s`\n\nTopik ini sekarang aktif. Pertanyaan berikutnya akan disimpan secara terpisah di topik ini.", sess.Title, sess.ID)
+		go func() {
+			_ = a.SendMessage(chatID, msg)
+		}()
+		return true
+
+	case baseCmd == "/switchtopic" || baseCmd == "!switchtopic":
+		arg := strings.TrimSpace(strings.TrimPrefix(cleanText, cmd[0]))
+		if arg == "" {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ *Format perintah salah.*\nGunakan: `/switchtopic <nomor atau ID>`\nKetik `/topic` untuk melihat daftar topik.")
+			}()
+			return true
+		}
+		sessions, err := a.db.ListChatSessions(a.channelID, chatID)
+		if err != nil || len(sessions) == 0 {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ Belum ada topik yang terdaftar.")
+			}()
+			return true
+		}
+
+		var targetID string
+		var targetTitle string
+
+		if idx, parseErr := strconv.Atoi(arg); parseErr == nil {
+			if idx >= 1 && idx <= len(sessions) {
+				targetID = sessions[idx-1].ID
+				targetTitle = sessions[idx-1].Title
+			}
+		} else {
+			for _, s := range sessions {
+				if s.ID == arg || strings.HasPrefix(s.ID, arg) {
+					targetID = s.ID
+					targetTitle = s.Title
+					break
+				}
+			}
+		}
+
+		if targetID == "" {
+			errMsg := fmt.Sprintf("⚠️ Topik dengan nomor atau ID `%s` tidak ditemukan.\nKetik `/topic` untuk melihat daftar topik.", arg)
+			go func() {
+				_ = a.SendMessage(chatID, errMsg)
+			}()
+			return true
+		}
+
+		if _, err := a.db.SwitchChatSession(a.channelID, chatID, targetID); err != nil {
+			errMsg := fmt.Sprintf("❌ *Gagal berpindah topik:* %v", err)
+			go func() {
+				_ = a.SendMessage(chatID, errMsg)
+			}()
+			return true
+		}
+
+		msg := fmt.Sprintf("🔀 *TOPIK AKTIF DIPINDAHKAN*\n\n📌 *Topik Sekarang:* %s\n🆔 *ID:* `%s`\n\nRiwayat percakapan untuk topik ini sekarang aktif.", targetTitle, targetID)
+		go func() {
+			_ = a.SendMessage(chatID, msg)
+		}()
+		return true
+
+	case baseCmd == "/renametopic" || baseCmd == "!renametopic":
+		newTitle := strings.TrimSpace(strings.TrimPrefix(cleanText, cmd[0]))
+		if newTitle == "" {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ *Format perintah salah.*\nGunakan: `/renametopic <nama topik baru>`")
+			}()
+			return true
+		}
+		curr, err := a.db.GetOrCreateSession(a.channelID, chatID, senderID)
+		if err != nil || curr == nil {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ Gagal menemukan topik aktif.")
+			}()
+			return true
+		}
+		if err := a.db.RenameChatSession(curr.ID, newTitle); err != nil {
+			errMsg := fmt.Sprintf("❌ *Gagal mengubah nama topik:* %v", err)
+			go func() {
+				_ = a.SendMessage(chatID, errMsg)
+			}()
+			return true
+		}
+		msg := fmt.Sprintf("✏️ *NAMA TOPIK BERHASIL DIUBAH*\n\n📌 *Judul Baru:* %s\n🆔 *ID:* `%s`", newTitle, curr.ID)
+		go func() {
+			_ = a.SendMessage(chatID, msg)
+		}()
+		return true
+
+	case baseCmd == "/deltopic" || baseCmd == "!deltopic":
+		arg := strings.TrimSpace(strings.TrimPrefix(cleanText, cmd[0]))
+		if arg == "" {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ *Format perintah salah.*\nGunakan: `/deltopic <nomor atau ID>`\nKetik `/topic` untuk melihat nomor topik.")
+			}()
+			return true
+		}
+		sessions, err := a.db.ListChatSessions(a.channelID, chatID)
+		if err != nil || len(sessions) == 0 {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ Belum ada topik yang terdaftar.")
+			}()
+			return true
+		}
+		if len(sessions) <= 1 {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ Tidak dapat menghapus topik satu-satunya di chat ini. Gunakan `/reset` jika ingin membersihkan riwayat pesan.")
+			}()
+			return true
+		}
+
+		var targetID string
+		var targetTitle string
+
+		if idx, parseErr := strconv.Atoi(arg); parseErr == nil {
+			if idx >= 1 && idx <= len(sessions) {
+				targetID = sessions[idx-1].ID
+				targetTitle = sessions[idx-1].Title
+			}
+		} else {
+			for _, s := range sessions {
+				if s.ID == arg || strings.HasPrefix(s.ID, arg) {
+					targetID = s.ID
+					targetTitle = s.Title
+					break
+				}
+			}
+		}
+
+		if targetID == "" {
+			errMsg := fmt.Sprintf("⚠️ Topik dengan nomor atau ID `%s` tidak ditemukan.", arg)
+			go func() {
+				_ = a.SendMessage(chatID, errMsg)
+			}()
+			return true
+		}
+
+		if _, err := a.db.DeleteChatSession(a.channelID, chatID, targetID); err != nil {
+			errMsg := fmt.Sprintf("❌ *Gagal menghapus topik:* %v", err)
+			go func() {
+				_ = a.SendMessage(chatID, errMsg)
+			}()
+			return true
+		}
+
+		msg := fmt.Sprintf("🗑️ *TOPIK BERHASIL DIHAPUS*\n\nTopik *%s* telah dihapus beserta seluruh riwayat pesannya.\nJika topik tersebut sedang aktif, sistem otomatis beralih ke topik yang tersisa.", targetTitle)
+		go func() {
+			_ = a.SendMessage(chatID, msg)
+		}()
+		return true
+
+	case baseCmd == "/resettopic" || baseCmd == "!resettopic":
+		if cancelVal, loaded := a.activeTasks.LoadAndDelete(chatID); loaded {
+			if cancel, ok := cancelVal.(context.CancelFunc); ok {
+				cancel()
+			}
+		}
+		_ = a.db.ClearActiveSessionMessages(a.channelID, chatID)
+		go func() {
+			_ = a.SendMessage(chatID, "✨ *TOPIK DIRESET*\n\nRiwayat dan konteks percakapan pada topik aktif telah dibersihkan.")
+		}()
+		return true
+	}
+
+	return false
+}
+

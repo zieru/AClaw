@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"goassistant/internal/provider"
@@ -54,6 +55,60 @@ func (sm *SessionManager) GetLastPrompt(channelID, chatID, userID string) string
 // GetOrCreate gets an existing session or creates a new one
 func (sm *SessionManager) GetOrCreate(channelID, chatID, userID string) (*storage.ChatSessionRecord, error) {
 	return sm.db.GetOrCreateSession(channelID, chatID, userID)
+}
+
+// ListSessions retrieves all sessions/topics for a channel and chat
+func (sm *SessionManager) ListSessions(channelID, chatID string) ([]*storage.ChatSessionRecord, error) {
+	return sm.db.ListChatSessions(channelID, chatID)
+}
+
+// CreateNewTopic creates a new topic in the chat and sets it active
+func (sm *SessionManager) CreateNewTopic(channelID, chatID, userID, title string) (*storage.ChatSessionRecord, error) {
+	return sm.db.CreateChatSession(channelID, chatID, userID, title, true)
+}
+
+// SwitchTopic switches the active topic in the chat
+func (sm *SessionManager) SwitchTopic(channelID, chatID, sessionID string) (*storage.ChatSessionRecord, error) {
+	return sm.db.SwitchChatSession(channelID, chatID, sessionID)
+}
+
+// DeleteTopic deletes a topic and its messages, activating a remaining topic if needed
+func (sm *SessionManager) DeleteTopic(channelID, chatID, sessionID string) (*storage.ChatSessionRecord, error) {
+	return sm.db.DeleteChatSession(channelID, chatID, sessionID)
+}
+
+// RenameTopic renames a topic
+func (sm *SessionManager) RenameTopic(sessionID, newTitle string) error {
+	return sm.db.RenameChatSession(sessionID, newTitle)
+}
+
+// ResetActiveTopic clears messages only in the current active topic of the chat
+func (sm *SessionManager) ResetActiveTopic(channelID, chatID string) error {
+	return sm.db.ClearActiveSessionMessages(channelID, chatID)
+}
+
+// MaybeAutoTitleTopic sets a clean topic title from the first user prompt if the topic still has the default title
+func (sm *SessionManager) MaybeAutoTitleTopic(session *storage.ChatSessionRecord, firstPrompt string) {
+	if session == nil {
+		return
+	}
+	cleanPrompt := strings.TrimSpace(firstPrompt)
+	if cleanPrompt == "" {
+		return
+	}
+	// Only auto-title if the current title is default
+	if session.Title == "Topik Utama" || session.Title == "Topik Baru" || session.Title == "New Conversation" || session.Title == "" {
+		firstLine := strings.Split(cleanPrompt, "\n")[0]
+		firstLine = strings.TrimPrefix(firstLine, ">")
+		firstLine = strings.TrimSpace(firstLine)
+		if len(firstLine) > 35 {
+			firstLine = firstLine[:35] + "..."
+		}
+		if firstLine != "" {
+			_ = sm.db.RenameChatSession(session.ID, firstLine)
+			session.Title = firstLine
+		}
+	}
 }
 
 // AddMessage appends a message to session

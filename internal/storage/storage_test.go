@@ -246,3 +246,104 @@ func TestProviderModelToggle(t *testing.T) {
 		t.Fatalf("expected all 4 models enabled, got %v", loaded.EnabledModels())
 	}
 }
+
+func TestMultiTopicChatSessions(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_topics.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	channelID := "chan_tg"
+	chatID := "chat_123"
+	userID := "user_456"
+
+	// 1. Initial GetOrCreateSession creates default active session
+	s1, err := db.GetOrCreateSession(channelID, chatID, userID)
+	if err != nil {
+		t.Fatalf("failed to create initial session: %v", err)
+	}
+	if !s1.IsActive || s1.Title != "Topik Utama" {
+		t.Fatalf("unexpected initial session: %+v", s1)
+	}
+
+	_ = db.AddMessage(s1.ID, "user", "pesan topik 1", 5)
+
+	// 2. Create Topic 2 (setActive = true)
+	s2, err := db.CreateChatSession(channelID, chatID, userID, "Analisis Server", true)
+	if err != nil {
+		t.Fatalf("failed to create topic 2: %v", err)
+	}
+	if !s2.IsActive || s2.Title != "Analisis Server" {
+		t.Fatalf("unexpected topic 2: %+v", s2)
+	}
+	_ = db.AddMessage(s2.ID, "user", "pesan topik 2", 10)
+
+	// Verify s1 is now inactive and s2 is active
+	activeSess, err := db.GetOrCreateSession(channelID, chatID, userID)
+	if err != nil || activeSess.ID != s2.ID {
+		t.Fatalf("expected s2 to be active, got: %+v", activeSess)
+	}
+
+	// 3. ListChatSessions
+	topics, err := db.ListChatSessions(channelID, chatID)
+	if err != nil {
+		t.Fatalf("failed to list sessions: %v", err)
+	}
+	if len(topics) != 2 {
+		t.Fatalf("expected 2 topics, got %d", len(topics))
+	}
+
+	// 4. Verify message isolation
+	msgsS1, _ := db.GetRecentMessages(s1.ID, 10)
+	msgsS2, _ := db.GetRecentMessages(s2.ID, 10)
+	if len(msgsS1) != 1 || msgsS1[0].Content != "pesan topik 1" {
+		t.Fatalf("topic 1 messages corrupted: %+v", msgsS1)
+	}
+	if len(msgsS2) != 1 || msgsS2[0].Content != "pesan topik 2" {
+		t.Fatalf("topic 2 messages corrupted: %+v", msgsS2)
+	}
+
+	// 5. Switch back to Topic 1
+	switched, err := db.SwitchChatSession(channelID, chatID, s1.ID)
+	if err != nil || !switched.IsActive || switched.ID != s1.ID {
+		t.Fatalf("failed to switch to s1: %v, %+v", err, switched)
+	}
+	activeNow, _ := db.GetOrCreateSession(channelID, chatID, userID)
+	if activeNow.ID != s1.ID {
+		t.Fatalf("expected s1 to be active now, got: %s", activeNow.ID)
+	}
+
+	// 6. Rename Topic
+	err = db.RenameChatSession(s2.ID, "Investigasi Error")
+	if err != nil {
+		t.Fatalf("failed to rename topic: %v", err)
+	}
+	renamed, _ := db.GetSessionByID(s2.ID)
+	if renamed.Title != "Investigasi Error" {
+		t.Fatalf("expected renamed title 'Investigasi Error', got '%s'", renamed.Title)
+	}
+
+	// 7. ClearActiveSessionMessages resets only active session (s1)
+	err = db.ClearActiveSessionMessages(channelID, chatID)
+	if err != nil {
+		t.Fatalf("failed to clear active messages: %v", err)
+	}
+	msgsS1After, _ := db.GetRecentMessages(s1.ID, 10)
+	msgsS2After, _ := db.GetRecentMessages(s2.ID, 10)
+	if len(msgsS1After) != 0 {
+		t.Fatalf("expected s1 messages cleared, got %d", len(msgsS1After))
+	}
+	if len(msgsS2After) != 1 {
+		t.Fatalf("s2 messages should remain untouched, got %d", len(msgsS2After))
+	}
+
+	// 8. Delete active session (s1), should fallback to s2 as active
+	nextActive, err := db.DeleteChatSession(channelID, chatID, s1.ID)
+	if err != nil || nextActive == nil || nextActive.ID != s2.ID || !nextActive.IsActive {
+		t.Fatalf("expected fallback to s2 after deleting s1, got: %v, %+v", err, nextActive)
+	}
+}
+

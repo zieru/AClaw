@@ -106,11 +106,24 @@ func (a *BotAdapter) registerHandlers() {
 	a.bot.Handle("/retry", a.handleRetry)
 	a.bot.Handle("/stop", a.handleStop)
 	a.bot.Handle("/cancel", a.handleStop)
+
+	// Topic Management Commands
+	a.bot.Handle("/topic", a.handleTopic)
+	a.bot.Handle("/topics", a.handleTopic)
+	a.bot.Handle("/threads", a.handleTopic)
+	a.bot.Handle("/newtopic", a.handleNewTopic)
+	a.bot.Handle("/switchtopic", a.handleSwitchTopic)
+	a.bot.Handle("/renametopic", a.handleRenameTopic)
+	a.bot.Handle("/deltopic", a.handleDeleteTopic)
+
 	a.bot.Handle(tele.OnCallback, func(c tele.Context) error {
 		if c.Callback() == nil {
 			return nil
 		}
 		data := strings.TrimPrefix(c.Callback().Data, "\f")
+		if strings.HasPrefix(data, "top_") {
+			return a.handleTopicCallback(c, data)
+		}
 		if strings.HasPrefix(data, "cancel_task") {
 			_ = c.Respond(&tele.CallbackResponse{Text: "Membatalkan proses AI..."})
 			return a.handleStop(c)
@@ -523,12 +536,288 @@ func (a *BotAdapter) handleHelp(c tele.Context) error {
 	text := "👋 <b>HALO! SAYA ASISTEN AI GOASSISTANT</b>\n\n" +
 		"Silakan kirimkan pertanyaan atau permintaan Anda langsung di chat ini.\n\n" +
 		"📌 <b>Daftar Perintah:</b>\n" +
+		"• <code>/topic</code> - Kelola & ganti topik percakapan\n" +
+		"• <code>/newtopic [nama]</code> - Mulai topik percakapan baru\n" +
 		"• <code>/retry</code> - Coba lagi permintaan atau pesan terakhir\n" +
-		"• <code>/new</code> - Mulai sesi baru & reset riwayat percakapan\n" +
+		"• <code>/new</code> - Mulai sesi baru & reset riwayat percakapan aktif\n" +
 		"• <code>/stop</code> - Batalkan atau hentikan proses respon AI\n" +
 		"• <code>/status</code> - Cek status percakapan dan konfigurasi sesi\n" +
 		"• <code>/help</code> - Tampilkan panduan ini"
 	return c.Send(text, tele.ModeHTML)
+}
+
+func (a *BotAdapter) renderTopicDashboard(chatID, userID string) (string, *tele.ReplyMarkup, error) {
+	topics, err := a.db.ListChatSessions(a.channelID, chatID)
+	if err != nil {
+		return "", nil, err
+	}
+
+	if len(topics) == 0 {
+		initSess, err := a.db.GetOrCreateSession(a.channelID, chatID, userID)
+		if err != nil {
+			return "", nil, err
+		}
+		topics = []*storage.ChatSessionRecord{initSess}
+	}
+
+	var activeTopic *storage.ChatSessionRecord
+	for _, t := range topics {
+		if t.IsActive {
+			activeTopic = t
+			break
+		}
+	}
+	if activeTopic == nil && len(topics) > 0 {
+		topics[0].IsActive = true
+		activeTopic = topics[0]
+		_, _ = a.db.SwitchChatSession(a.channelID, chatID, activeTopic.ID)
+	}
+
+	activeMsgCount := 0
+	if activeTopic != nil {
+		activeMsgCount, _ = a.db.CountSessionMessages(activeTopic.ID)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🧵 <b>MANAJEMEN TOPIK PERCAKAPAN</b>\n\n")
+
+	if activeTopic != nil {
+		sb.WriteString("📌 <b>Topik Aktif Saat Ini:</b>\n")
+		sb.WriteString(fmt.Sprintf("🟢 <b>%s</b>\n", html.EscapeString(activeTopic.Title)))
+		sb.WriteString(fmt.Sprintf("   • Riwayat: <code>%d pesan</code>\n", activeMsgCount))
+		sb.WriteString(fmt.Sprintf("   • Terakhir aktif: <code>%s</code>\n\n", activeTopic.UpdatedAt.Format("02 Jan 15:04 WIB")))
+	}
+
+	sb.WriteString(fmt.Sprintf("🗂️ <b>Daftar Topik di Chat Ini (%d topik):</b>\n", len(topics)))
+	for i, t := range topics {
+		statusMarker := "⚪️"
+		activeLabel := ""
+		if t.IsActive {
+			statusMarker = "🟢"
+			activeLabel = " <i>[AKTIF]</i>"
+		}
+		msgCount, _ := a.db.CountSessionMessages(t.ID)
+		sb.WriteString(fmt.Sprintf("<b>#%d.</b> %s <b>%s</b> (<code>%d pesan</code>)%s\n",
+			i+1, statusMarker, html.EscapeString(t.Title), msgCount, activeLabel))
+	}
+
+	sb.WriteString("\n💡 <i>Gunakan tombol di bawah untuk beralih atau membuat topik baru:</i>")
+
+	menu := &tele.ReplyMarkup{}
+	var allRows []tele.Row
+
+	var switchBtns []tele.Btn
+	for i, t := range topics {
+		btnText := fmt.Sprintf("#%d", i+1)
+		if t.IsActive {
+			btnText = fmt.Sprintf("🔘 #%d", i+1)
+		} else {
+			btnText = fmt.Sprintf("🔄 #%d", i+1)
+		}
+		btn := menu.Data(btnText, fmt.Sprintf("top_sw_%s", t.ID))
+		switchBtns = append(switchBtns, btn)
+		if len(switchBtns) == 4 {
+			allRows = append(allRows, menu.Row(switchBtns...))
+			switchBtns = nil
+		}
+	}
+	if len(switchBtns) > 0 {
+		allRows = append(allRows, menu.Row(switchBtns...))
+	}
+
+	btnNew := menu.Data("➕ Topik Baru", "top_new")
+	btnRefresh := menu.Data("🔄 Refresh", "top_refresh")
+	allRows = append(allRows, menu.Row(btnNew, btnRefresh))
+
+	menu.Inline(allRows...)
+	return sb.String(), menu, nil
+}
+
+func (a *BotAdapter) handleTopic(c tele.Context) error {
+	chatID := strconv.FormatInt(c.Chat().ID, 10)
+	userID := strconv.FormatInt(c.Sender().ID, 10)
+	text, menu, err := a.renderTopicDashboard(chatID, userID)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal memuat daftar topik: %v", err))
+	}
+	if c.Callback() != nil && c.Message() != nil {
+		_, _ = a.bot.Edit(c.Message(), text, tele.ModeHTML, menu)
+		return nil
+	}
+	return c.Send(text, tele.ModeHTML, menu)
+}
+
+func (a *BotAdapter) handleNewTopic(c tele.Context) error {
+	chatID := strconv.FormatInt(c.Chat().ID, 10)
+	userID := strconv.FormatInt(c.Sender().ID, 10)
+	title := strings.TrimSpace(c.Message().Payload)
+	if title == "" {
+		topics, _ := a.db.ListChatSessions(a.channelID, chatID)
+		title = fmt.Sprintf("Topik #%d (%s)", len(topics)+1, time.Now().Format("02/01 15:04"))
+	}
+
+	newTopic, err := a.db.CreateChatSession(a.channelID, chatID, userID, title, true)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal membuat topik baru: %v", err))
+	}
+
+	text := fmt.Sprintf("✨ <b>TOPIK BARU DIMULAI: %s</b>\n\n"+
+		"Riwayat percakapan topik sebelumnya tersimpan rapi.\n"+
+		"Silakan ajukan pertanyaan atau perintah baru!",
+		html.EscapeString(newTopic.Title))
+
+	menu := &tele.ReplyMarkup{}
+	btnList := menu.Data("🗂️ Lihat Daftar Topik", "top_refresh")
+	menu.Inline(menu.Row(btnList))
+	return c.Send(text, tele.ModeHTML, menu)
+}
+
+func (a *BotAdapter) handleSwitchTopic(c tele.Context) error {
+	chatID := strconv.FormatInt(c.Chat().ID, 10)
+	payload := strings.TrimSpace(c.Message().Payload)
+	if payload == "" {
+		return a.handleTopic(c)
+	}
+
+	topics, err := a.db.ListChatSessions(a.channelID, chatID)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal memuat topik: %v", err))
+	}
+
+	var targetTopic *storage.ChatSessionRecord
+	if idx, err := strconv.Atoi(payload); err == nil && idx >= 1 && idx <= len(topics) {
+		targetTopic = topics[idx-1]
+	} else {
+		pLower := strings.ToLower(payload)
+		for _, t := range topics {
+			if strings.Contains(strings.ToLower(t.Title), pLower) {
+				targetTopic = t
+				break
+			}
+		}
+	}
+
+	if targetTopic == nil {
+		return c.Reply(fmt.Sprintf("⚠️ Topik <i>%q</i> tidak ditemukan.\nGunakan <code>/topic</code> untuk melihat daftar topik yang tersedia.", html.EscapeString(payload)), tele.ModeHTML)
+	}
+
+	switched, err := a.db.SwitchChatSession(a.channelID, chatID, targetTopic.ID)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal beralih topik: %v", err))
+	}
+
+	msgCount, _ := a.db.CountSessionMessages(switched.ID)
+	text := fmt.Sprintf("🔄 <b>BERALIH KE TOPIK: %s</b>\n\n"+
+		"• Riwayat Topik Ini: <code>%d pesan</code>\n"+
+		"• Status: 🟢 <b>Aktif</b>\n\n"+
+		"Percakapan selanjutnya akan menggunakan konteks topik ini.",
+		html.EscapeString(switched.Title), msgCount)
+
+	menu := &tele.ReplyMarkup{}
+	btnTopics := menu.Data("🗂️ Menu Topik", "top_refresh")
+	menu.Inline(menu.Row(btnTopics))
+	return c.Send(text, tele.ModeHTML, menu)
+}
+
+func (a *BotAdapter) handleRenameTopic(c tele.Context) error {
+	chatID := strconv.FormatInt(c.Chat().ID, 10)
+	userID := strconv.FormatInt(c.Sender().ID, 10)
+	newTitle := strings.TrimSpace(c.Message().Payload)
+	if newTitle == "" {
+		return c.Reply("⚠️ Format perintah: <code>/renametopic &lt;nama_baru&gt;</code>", tele.ModeHTML)
+	}
+
+	activeTopic, err := a.db.GetOrCreateSession(a.channelID, chatID, userID)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal mendapatkan topik aktif: %v", err))
+	}
+
+	if err := a.db.RenameChatSession(activeTopic.ID, newTitle); err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal mengubah nama topik: %v", err))
+	}
+
+	return c.Reply(fmt.Sprintf("✅ Judul topik aktif berhasil diubah menjadi: <b>%s</b>", html.EscapeString(newTitle)), tele.ModeHTML)
+}
+
+func (a *BotAdapter) handleDeleteTopic(c tele.Context) error {
+	chatID := strconv.FormatInt(c.Chat().ID, 10)
+	topics, err := a.db.ListChatSessions(a.channelID, chatID)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal memuat topik: %v", err))
+	}
+	if len(topics) <= 1 {
+		return c.Reply("⚠️ Chat ini hanya memiliki 1 topik aktif. Gunakan <code>/new</code> jika ingin membersihkan riwayatnya.", tele.ModeHTML)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🗑️ <b>PILIH TOPIK YANG AKAN DIHAPUS:</b>\n\n")
+
+	menu := &tele.ReplyMarkup{}
+	var rows []tele.Row
+	for i, t := range topics {
+		label := fmt.Sprintf("#%d. %s", i+1, t.Title)
+		if len(label) > 25 {
+			label = label[:25] + "..."
+		}
+		if t.IsActive {
+			label += " [Aktif]"
+		}
+		btnDel := menu.Data(fmt.Sprintf("🗑️ %s", label), fmt.Sprintf("top_del_%s", t.ID))
+		rows = append(rows, menu.Row(btnDel))
+	}
+	btnBack := menu.Data("⬅️ Kembali", "top_refresh")
+	rows = append(rows, menu.Row(btnBack))
+	menu.Inline(rows...)
+
+	return c.Send(sb.String(), tele.ModeHTML, menu)
+}
+
+func (a *BotAdapter) handleTopicCallback(c tele.Context, data string) error {
+	chatID := strconv.FormatInt(c.Chat().ID, 10)
+	userID := strconv.FormatInt(c.Sender().ID, 10)
+
+	switch {
+	case data == "top_refresh":
+		_ = c.Respond(&tele.CallbackResponse{})
+		return a.handleTopic(c)
+
+	case strings.HasPrefix(data, "top_sw_"):
+		targetID := strings.TrimPrefix(data, "top_sw_")
+		switched, err := a.db.SwitchChatSession(a.channelID, chatID, targetID)
+		if err != nil {
+			_ = c.Respond(&tele.CallbackResponse{Text: "❌ Gagal beralih topik"})
+			return err
+		}
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🟢 Beralih ke: %s", switched.Title)})
+		return a.handleTopic(c)
+
+	case data == "top_new":
+		topics, _ := a.db.ListChatSessions(a.channelID, chatID)
+		newTitle := fmt.Sprintf("Topik #%d (%s)", len(topics)+1, time.Now().Format("02/01 15:04"))
+		newTopic, err := a.db.CreateChatSession(a.channelID, chatID, userID, newTitle, true)
+		if err != nil {
+			_ = c.Respond(&tele.CallbackResponse{Text: "❌ Gagal membuat topik"})
+			return err
+		}
+		_ = c.Respond(&tele.CallbackResponse{Text: "✨ Topik baru dibuat & aktif!"})
+		return c.Send(fmt.Sprintf("✨ <b>TOPIK BARU AKTIF: %s</b>\n\nRiwayat sebelumnya tersimpan rapi. Silakan kirim pesan baru!", html.EscapeString(newTopic.Title)), tele.ModeHTML)
+
+	case strings.HasPrefix(data, "top_del_"):
+		targetID := strings.TrimPrefix(data, "top_del_")
+		nextActive, err := a.db.DeleteChatSession(a.channelID, chatID, targetID)
+		if err != nil {
+			_ = c.Respond(&tele.CallbackResponse{Text: "❌ Gagal menghapus topik"})
+			return err
+		}
+		activeInfo := ""
+		if nextActive != nil {
+			activeInfo = fmt.Sprintf(" Topik aktif sekarang: %s", nextActive.Title)
+		}
+		_ = c.Respond(&tele.CallbackResponse{Text: "🗑️ Topik dihapus." + activeInfo})
+		return a.handleTopic(c)
+	}
+
+	return nil
 }
 
 func sendOrEditResponse(c tele.Context, thinkingMsg *tele.Message, text string, mediaFiles []agent.MediaAttachment) error {

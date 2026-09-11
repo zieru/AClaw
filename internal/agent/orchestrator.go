@@ -321,6 +321,9 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 	if err != nil {
 		return nil, fmt.Errorf("gagal inisialisasi sesi percakapan: %w", err)
 	}
+	if o.sessionManager != nil {
+		o.sessionManager.MaybeAutoTitleTopic(session, req.UserPrompt)
+	}
 
 	// 6. Auto-Compaction Check
 	msgCount, _ := o.db.CountSessionMessages(session.ID)

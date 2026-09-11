@@ -19,6 +19,7 @@ func MainMenuKeyboard() *tele.ReplyMarkup {
 	btnMDFiles := menu.Data("📝 Manage .MD Bot", "menu_md")
 	btnCron := menu.Data("⏰ Cron Scheduler", "menu_cron")
 	btnMemory := menu.Data("🧠 Memory & Session", "menu_memory")
+	btnTopic := menu.Data("🧵 Kelola Topik Chat", "menu_topic")
 	btnStats := menu.Data("📊 Audit Log & Stats", "menu_stats")
 	btnTools := menu.Data("🧰 Tool Permissions", "menu_tools")
 	btnTavily := menu.Data("🌐 Tavily AI Search", "menu_tavily")
@@ -30,13 +31,14 @@ func MainMenuKeyboard() *tele.ReplyMarkup {
 	menu.Inline(
 		menu.Row(btnStatus, btnModel),
 		menu.Row(btnProviders, btnCombos),
-		menu.Row(btnChannels, btnTools),
-		menu.Row(btnProxy, btnTokenSaver),
-		menu.Row(btnTavily, btnLimits),
+		menu.Row(btnChannels, btnTokenSaver),
+		menu.Row(btnProxy, btnLimits),
+		menu.Row(btnTavily, btnTools),
 		menu.Row(btnMDFiles, btnCron),
-		menu.Row(btnMemory, btnStats),
-		menu.Row(btnCheckin, btnBackup),
-		menu.Row(btnUpdate, btnHelp),
+		menu.Row(btnMemory, btnTopic),
+		menu.Row(btnCheckin, btnStats),
+		menu.Row(btnBackup, btnUpdate),
+		menu.Row(btnHelp),
 	)
 
 	return menu

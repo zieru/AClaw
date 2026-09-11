@@ -38,8 +38,19 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle("/stop", a.handleStop)
 	a.bot.Handle("/cancel", a.handleStop)
 
+	// Topic / Multi-Chat Commands
+	a.bot.Handle("/topic", a.topicUI.HandleTopicDashboard)
+	a.bot.Handle("/topics", a.topicUI.HandleTopicDashboard)
+	a.bot.Handle("/threads", a.topicUI.HandleTopicDashboard)
+	a.bot.Handle("/newtopic", a.topicUI.HandleNewTopicCmd)
+	a.bot.Handle("/switchtopic", a.topicUI.HandleSwitchTopicCmd)
+	a.bot.Handle("/renametopic", a.topicUI.HandleRenameTopicCmd)
+	a.bot.Handle("/deltopic", a.topicUI.HandleDeleteTopicCmd)
+	a.bot.Handle("/resettopic", a.topicUI.HandleResetTopicCmd)
+
 	// Main Menu Inline Callbacks
 	a.bot.Handle(&tele.Btn{Unique: "menu_main"}, a.handleMenu)
+	a.bot.Handle(&tele.Btn{Unique: "menu_topic"}, a.topicUI.HandleTopicDashboard)
 	a.bot.Handle(&tele.Btn{Unique: "menu_status"}, a.handleStatus)
 	a.bot.Handle(&tele.Btn{Unique: "btn_refresh_status"}, func(c tele.Context) error {
 		_ = c.Respond(&tele.CallbackResponse{Text: "🔄 Memperbarui status..."})

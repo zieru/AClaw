@@ -47,6 +47,35 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to run schema migrations: %w", err)
 	}
 
+	// Check and migrate chat_sessions if it has old UNIQUE(channel_id, chat_id) constraint or lacks is_active
+	var tableSQL string
+	_ = db.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='chat_sessions'").Scan(&tableSQL)
+	if strings.Contains(tableSQL, "UNIQUE(channel_id, chat_id)") || (tableSQL != "" && !strings.Contains(tableSQL, "is_active")) {
+		migrationSQL := `
+		PRAGMA foreign_keys = OFF;
+		CREATE TABLE IF NOT EXISTS chat_sessions_v2 (
+			id TEXT PRIMARY KEY,
+			channel_id TEXT NOT NULL,
+			chat_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			is_active INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+		INSERT OR IGNORE INTO chat_sessions_v2 (id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at)
+			SELECT id, channel_id, chat_id, user_id, title, summary, 1, created_at, updated_at FROM chat_sessions;
+		DROP TABLE chat_sessions;
+		ALTER TABLE chat_sessions_v2 RENAME TO chat_sessions;
+		CREATE INDEX IF NOT EXISTS idx_chat_sessions_lookup ON chat_sessions(channel_id, chat_id, is_active, updated_at);
+		PRAGMA foreign_keys = ON;
+		`
+		_, _ = db.Exec(migrationSQL)
+	}
+	_, _ = db.Exec("ALTER TABLE chat_sessions ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_chat_sessions_lookup ON chat_sessions(channel_id, chat_id, is_active, updated_at)")
+
 	// Auto-upgrade columns if upgrading from earlier version
 	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN client_request TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''")
@@ -286,6 +315,7 @@ type ChatSessionRecord struct {
 	UserID    string    `json:"user_id"`
 	Title     string    `json:"title"`
 	Summary   string    `json:"summary"`
+	IsActive  bool      `json:"is_active"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -1061,15 +1091,26 @@ func (d *DB) GetOrCreateSession(channelID, chatID, userID string) (*ChatSessionR
 	defer d.mu.Unlock()
 
 	var s ChatSessionRecord
-	err := d.db.QueryRow("SELECT id, channel_id, chat_id, user_id, title, summary, created_at, updated_at FROM chat_sessions WHERE channel_id = ? AND chat_id = ?", channelID, chatID).
-		Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &s.CreatedAt, &s.UpdatedAt)
+	var isActiveInt int
+	err := d.db.QueryRow("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE channel_id = ? AND chat_id = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1", channelID, chatID).
+		Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt)
 
 	if err == nil {
+		s.IsActive = (isActiveInt == 1)
 		return &s, nil
 	}
 
 	if err != sql.ErrNoRows {
 		return nil, err
+	}
+
+	// If no session is active, check if any session exists for this chat and activate it
+	err = d.db.QueryRow("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE channel_id = ? AND chat_id = ? ORDER BY updated_at DESC LIMIT 1", channelID, chatID).
+		Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt)
+	if err == nil {
+		_, _ = d.db.Exec("UPDATE chat_sessions SET is_active = 1 WHERE id = ?", s.ID)
+		s.IsActive = true
+		return &s, nil
 	}
 
 	// Create new session
@@ -1078,18 +1119,192 @@ func (d *DB) GetOrCreateSession(channelID, chatID, userID string) (*ChatSessionR
 		ChannelID: channelID,
 		ChatID:    chatID,
 		UserID:    userID,
-		Title:     "New Conversation",
+		Title:     "Topik Utama",
 		Summary:   "",
+		IsActive:  true,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
 
-	_, err = d.db.Exec("INSERT INTO chat_sessions (id, channel_id, chat_id, user_id, title, summary) VALUES (?, ?, ?, ?, ?, ?)",
+	_, err = d.db.Exec("INSERT INTO chat_sessions (id, channel_id, chat_id, user_id, title, summary, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)",
 		s.ID, s.ChannelID, s.ChatID, s.UserID, s.Title, s.Summary)
 	if err != nil {
 		return nil, err
 	}
 	return &s, nil
+}
+
+// ListChatSessions returns all topics/sessions for a channel and chat
+func (d *DB) ListChatSessions(channelID, chatID string) ([]*ChatSessionRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE channel_id = ? AND chat_id = ? ORDER BY is_active DESC, updated_at DESC", channelID, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []*ChatSessionRecord
+	for rows.Next() {
+		var s ChatSessionRecord
+		var isActiveInt int
+		if err := rows.Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt); err == nil {
+			s.IsActive = (isActiveInt == 1)
+			list = append(list, &s)
+		}
+	}
+	return list, nil
+}
+
+// CreateChatSession creates a new session/topic for a chat. If setActive is true, marks others as inactive.
+func (d *DB) CreateChatSession(channelID, chatID, userID, title string, setActive bool) (*ChatSessionRecord, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if strings.TrimSpace(title) == "" {
+		title = "Topik Baru"
+	}
+
+	activeInt := 0
+	if setActive {
+		activeInt = 1
+		_, _ = d.db.Exec("UPDATE chat_sessions SET is_active = 0 WHERE channel_id = ? AND chat_id = ?", channelID, chatID)
+	}
+
+	s := &ChatSessionRecord{
+		ID:        uuid.New().String(),
+		ChannelID: channelID,
+		ChatID:    chatID,
+		UserID:    userID,
+		Title:     title,
+		Summary:   "",
+		IsActive:  setActive,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	_, err := d.db.Exec("INSERT INTO chat_sessions (id, channel_id, chat_id, user_id, title, summary, is_active) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		s.ID, s.ChannelID, s.ChatID, s.UserID, s.Title, s.Summary, activeInt)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// SwitchChatSession sets the specified session as active and deactivates others in the chat
+func (d *DB) SwitchChatSession(channelID, chatID, sessionID string) (*ChatSessionRecord, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var s ChatSessionRecord
+	var isActiveInt int
+	err := d.db.QueryRow("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE id = ? AND channel_id = ? AND chat_id = ?", sessionID, channelID, chatID).
+		Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("sesi tidak ditemukan: %w", err)
+	}
+
+	_, _ = d.db.Exec("UPDATE chat_sessions SET is_active = 0 WHERE channel_id = ? AND chat_id = ?", channelID, chatID)
+	_, _ = d.db.Exec("UPDATE chat_sessions SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", sessionID)
+	s.IsActive = true
+	s.UpdatedAt = time.Now()
+	return &s, nil
+}
+
+// DeleteChatSession deletes a session and all its messages. If it was active, activates the most recent remaining session.
+func (d *DB) DeleteChatSession(channelID, chatID, sessionID string) (*ChatSessionRecord, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Delete messages and session
+	_, _ = d.db.Exec("DELETE FROM chat_messages WHERE session_id = ?", sessionID)
+	_, err := d.db.Exec("DELETE FROM chat_sessions WHERE id = ?", sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find active or activate remaining session
+	var nextActive *ChatSessionRecord
+	var nextActiveInt int
+	var s ChatSessionRecord
+	err = d.db.QueryRow("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE channel_id = ? AND chat_id = ? ORDER BY is_active DESC, updated_at DESC LIMIT 1", channelID, chatID).
+		Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &nextActiveInt, &s.CreatedAt, &s.UpdatedAt)
+
+	if err == nil {
+		if nextActiveInt == 0 {
+			_, _ = d.db.Exec("UPDATE chat_sessions SET is_active = 1 WHERE id = ?", s.ID)
+			s.IsActive = true
+		} else {
+			s.IsActive = (nextActiveInt == 1)
+		}
+		nextActive = &s
+	} else if err == sql.ErrNoRows {
+		// If no sessions remain, create a fresh default active session
+		newSess := &ChatSessionRecord{
+			ID:        uuid.New().String(),
+			ChannelID: channelID,
+			ChatID:    chatID,
+			UserID:    "",
+			Title:     "Topik Utama",
+			Summary:   "",
+			IsActive:  true,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		_, _ = d.db.Exec("INSERT INTO chat_sessions (id, channel_id, chat_id, user_id, title, summary, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)",
+			newSess.ID, newSess.ChannelID, newSess.ChatID, newSess.UserID, newSess.Title, newSess.Summary)
+		nextActive = newSess
+	}
+
+	return nextActive, nil
+}
+
+// RenameChatSession updates the title of a session
+func (d *DB) RenameChatSession(sessionID, newTitle string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	newTitle = strings.TrimSpace(newTitle)
+	if newTitle == "" {
+		return fmt.Errorf("judul topik tidak boleh kosong")
+	}
+	_, err := d.db.Exec("UPDATE chat_sessions SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", newTitle, sessionID)
+	return err
+}
+
+// GetSessionByID retrieves a session record by its primary key ID
+func (d *DB) GetSessionByID(sessionID string) (*ChatSessionRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var s ChatSessionRecord
+	var isActiveInt int
+	err := d.db.QueryRow("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE id = ?", sessionID).
+		Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	s.IsActive = (isActiveInt == 1)
+	return &s, nil
+}
+
+// ClearActiveSessionMessages deletes messages only in the current active session
+func (d *DB) ClearActiveSessionMessages(channelID, chatID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var sessionID string
+	err := d.db.QueryRow("SELECT id FROM chat_sessions WHERE channel_id = ? AND chat_id = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1", channelID, chatID).Scan(&sessionID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	_, _ = d.db.Exec("DELETE FROM chat_messages WHERE session_id = ?", sessionID)
+	_, _ = d.db.Exec("UPDATE chat_sessions SET summary = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?", sessionID)
+	return nil
 }
 
 func (d *DB) AddMessage(sessionID, role, content string, tokens int) error {
