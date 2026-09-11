@@ -59,6 +59,7 @@ type UserRequest struct {
 	AttachedImages []string // Base64 data URLs for vision models
 	PreferredRole  string
 	PreferredProv  string
+	PreferredModel string
 	OnProgress     func(status string)
 	OnStreamChunk  func(chunk provider.StreamChunk)
 }
@@ -298,6 +299,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		isStreaming := policy.StreamingEnabled && req.OnStreamChunk != nil
 		chatReq := provider.ChatRequest{
 			Model:           policy.ModelOverride,
+			PreferredModel:  req.PreferredModel,
 			Messages:        compressedMsgs,
 			Tools:           allowedTools,
 			Temperature:     0.7,
@@ -351,12 +353,13 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 				totalTokensSaved += retrySaverReport.TokensSaved
 
 				retryChatReq := provider.ChatRequest{
-					Model:       policy.ModelOverride,
-					Messages:    retryCompressedMsgs,
-					Tools:       allowedTools,
-					Temperature: 0.7,
-					MaxTokens:   policy.MaxTokens,
-					OnProgress:  req.OnProgress,
+					Model:          policy.ModelOverride,
+					PreferredModel: req.PreferredModel,
+					Messages:       retryCompressedMsgs,
+					Tools:          allowedTools,
+					Temperature:    0.7,
+					MaxTokens:      policy.MaxTokens,
+					OnProgress:     req.OnProgress,
 				}
 
 				// Fresh 2-minute context if original ctx was timed out
@@ -521,6 +524,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 
 		synthReq := provider.ChatRequest{
 			Model:           policy.ModelOverride,
+			PreferredModel:  req.PreferredModel,
 			Messages:        synthCompressedMsgs,
 			Tools:           nil, // Paksa hasil berupa teks (tanpa pemanggilan tool lagi)
 			Temperature:     0.7,

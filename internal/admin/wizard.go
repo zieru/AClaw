@@ -34,6 +34,7 @@ type WizardSession struct {
 	Step              WizardStep
 	IsEditing         bool
 	EditingProviderID string
+	ModelPage         int
 	ID                string
 	Name              string
 	Type              string
@@ -81,6 +82,7 @@ func (w *ProviderWizard) StartWizard(c tele.Context) error {
 
 	menu := &tele.ReplyMarkup{}
 	btn9Router := menu.Data("⚡ 9Router Gateway", "wiz_type_9router")
+	btnDahl := menu.Data("🌐 Dahl Inference", "wiz_type_dahl")
 	btnOpenAI := menu.Data("🟢 OpenAI Official", "wiz_type_openai")
 	btnDeepSeek := menu.Data("🤖 DeepSeek Official", "wiz_type_deepseek")
 	btnGroq := menu.Data("🚀 Groq (Llama 3.3)", "wiz_type_groq")
@@ -92,11 +94,11 @@ func (w *ProviderWizard) StartWizard(c tele.Context) error {
 	btnCancel := menu.Data("❌ Batal", "wiz_cancel")
 
 	menu.Inline(
-		menu.Row(btn9Router, btnOpenAI),
-		menu.Row(btnDeepSeek, btnGroq),
-		menu.Row(btnGemini, btnGeminiWeb),
-		menu.Row(btnClaude, btnOllama),
-		menu.Row(btnCustom),
+		menu.Row(btn9Router, btnDahl),
+		menu.Row(btnOpenAI, btnDeepSeek),
+		menu.Row(btnGroq, btnGemini),
+		menu.Row(btnGeminiWeb, btnClaude),
+		menu.Row(btnOllama, btnCustom),
 		menu.Row(btnCancel),
 	)
 
@@ -186,7 +188,7 @@ func (w *ProviderWizard) RenderProviderEditDashboard(c tele.Context, p *storage.
 	sb.WriteString(fmt.Sprintf("• <b>Status:</b> %s\n", statusText))
 	sb.WriteString(fmt.Sprintf("• <b>Tipe:</b> <code>%s</code>\n", html.EscapeString(p.Type)))
 	sb.WriteString(fmt.Sprintf("• <b>Default Model:</b> <code>%s</code>\n", html.EscapeString(p.DefaultModel)))
-	sb.WriteString(fmt.Sprintf("• <b>Model Terdaftar:</b> %d model\n", len(p.Models)))
+	sb.WriteString(fmt.Sprintf("• <b>Model:</b> %d model (%d aktif | %d nonaktif)\n", len(p.Models), len(p.EnabledModels()), len(p.DisabledModels)))
 	sb.WriteString(fmt.Sprintf("• <b>Key Pool:</b> %d key (Strategi: <code>%s</code>)\n", keyCount, html.EscapeString(p.KeyStrategy)))
 	sb.WriteString(fmt.Sprintf("• <b>Proxy Upstream:</b> %s\n", proxyStatus))
 	if p.BaseURL != "" {
@@ -197,6 +199,7 @@ func (w *ProviderWizard) RenderProviderEditDashboard(c tele.Context, p *storage.
 	menu := &tele.ReplyMarkup{}
 	btnDetect := menu.Data("🔄 Auto-Detect Models", "wiz_ed_detect")
 	btnDefMod := menu.Data("⭐ Ganti Default Model", "wiz_ed_defmod")
+	btnModels := menu.Data("🎛️ On/Off Model", "wiz_ed_models")
 	btnKeysRep := menu.Data("🔑 Ganti Semua Key", "wiz_ed_keys_rep")
 	btnKeysAdd := menu.Data("➕ Tambah Key", "wiz_ed_keys_add")
 	btnKeyStrat := menu.Data("🔀 Strategi Key", "wiz_ed_keystrat")
@@ -208,10 +211,10 @@ func (w *ProviderWizard) RenderProviderEditDashboard(c tele.Context, p *storage.
 
 	menu.Inline(
 		menu.Row(btnDetect, btnDefMod),
+		menu.Row(btnModels, btnKeyStrat),
 		menu.Row(btnKeysRep, btnKeysAdd),
-		menu.Row(btnKeyStrat, btnBaseURL),
-		menu.Row(btnProxy, btnToggle),
-		menu.Row(btnDel),
+		menu.Row(btnBaseURL, btnProxy),
+		menu.Row(btnToggle, btnDel),
 		menu.Row(btnBack),
 	)
 
@@ -239,6 +242,15 @@ func (w *ProviderWizard) HandleTypeSelect(c tele.Context, pType string) error {
 		sess.ID = "9router"
 		sess.Name = "9Router Gateway"
 		sess.BaseURL = "https://api.9router.com/v1"
+		sess.Step = StepEnterAPIKey
+		return w.promptAPIKey(c, sess)
+
+	case "dahl":
+		sess.ID = "dahl"
+		sess.Name = "Dahl Inference"
+		sess.BaseURL = "https://inference.dahl.global/v1"
+		sess.DefaultModel = "MiniMaxAI/MiniMax-M2.7"
+		sess.DetectedModels = []string{"MiniMaxAI/MiniMax-M2.7", "deepseek-ai/DeepSeek-V4-Flash-0731"}
 		sess.Step = StepEnterAPIKey
 		return w.promptAPIKey(c, sess)
 
@@ -329,10 +341,14 @@ func (w *ProviderWizard) promptGeminiWebAuth(c tele.Context, sess *WizardSession
 }
 
 func (w *ProviderWizard) promptAPIKey(c tele.Context, sess *WizardSession) error {
+	tip := "💡 <i>Tips: Anda dapat mengirim lebih dari 1 key (pisahkan dengan koma atau baris baru) untuk mengaktifkan fitur rotasi & failover otomatis.</i>"
+	if sess.Type == "dahl" {
+		tip = "💡 <i>Tips Dahl: Dapatkan API Key di <a href=\"https://inference.dahl.global/account\">https://inference.dahl.global/account</a> dan pastikan saldo/token telah dialokasikan di <a href=\"https://inference.dahl.global/docs/tokens/\">Token Pool</a>.</i>"
+	}
 	text := fmt.Sprintf("🔑 <b>MASUKKAN API KEY</b> (%s)\n\n"+
 		"Silakan kirimkan API Key untuk <b>%s</b>.\n\n"+
-		"💡 <i>Tips 9Router: Anda dapat mengirim lebih dari 1 key (pisahkan dengan koma atau baris baru) untuk mengaktifkan fitur rotasi & failover otomatis.</i>",
-		html.EscapeString(sess.Name), html.EscapeString(sess.Name))
+		"%s",
+		html.EscapeString(sess.Name), html.EscapeString(sess.Name), tip)
 
 	menu := &tele.ReplyMarkup{}
 	btnCancel := menu.Data("❌ Batal Setup", "wiz_cancel")
@@ -976,7 +992,7 @@ func (w *ProviderWizard) syncProviderToManager(p *storage.ProviderRecord) {
 		keys = []string{p.APIKey}
 	}
 
-	models := p.Models
+	models := p.EnabledModels()
 	if len(models) == 0 && p.DefaultModel != "" {
 		models = []string{p.DefaultModel}
 	}
@@ -1039,4 +1055,215 @@ func contains(slice []string, val string) bool {
 	}
 	return false
 }
+
+const modelsTogglePerPage = 6
+
+// RenderModelToggleDashboard displays interactive on/off toggle buttons for all models of a provider
+func (w *ProviderWizard) RenderModelToggleDashboard(c tele.Context, p *storage.ProviderRecord, page int) error {
+	if p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	allModels := p.Models
+	if len(allModels) == 0 && p.DefaultModel != "" {
+		allModels = []string{p.DefaultModel}
+	}
+	totalModels := len(allModels)
+	totalPages := (totalModels + modelsTogglePerPage - 1) / modelsTogglePerPage
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page < 0 {
+		page = 0
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+
+	if c.Sender() != nil {
+		w.mu.Lock()
+		sess, ok := w.sessions[c.Sender().ID]
+		if !ok {
+			sess = &WizardSession{
+				IsEditing:         true,
+				EditingProviderID: p.ID,
+				UpdatedAt:         time.Now(),
+			}
+			w.sessions[c.Sender().ID] = sess
+		}
+		sess.EditingProviderID = p.ID
+		sess.ModelPage = page
+		w.mu.Unlock()
+	}
+
+	startIdx := page * modelsTogglePerPage
+	endIdx := startIdx + modelsTogglePerPage
+	if endIdx > totalModels {
+		endIdx = totalModels
+	}
+
+	enabledCount := len(p.EnabledModels())
+	disabledCount := totalModels - enabledCount
+	if disabledCount < 0 {
+		disabledCount = 0
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🎛️ <b>KELOLA ON/OFF MODEL: %s</b> (<code>%s</code>)\n\n", html.EscapeString(p.Name), html.EscapeString(p.ID)))
+	sb.WriteString(fmt.Sprintf("• <b>Total Model:</b> %d model\n", totalModels))
+	sb.WriteString(fmt.Sprintf("• <b>Status:</b> 🟢 %d Aktif | 🔴 %d Nonaktif\n", enabledCount, disabledCount))
+	sb.WriteString(fmt.Sprintf("• <b>Default Model:</b> <code>%s</code> ⭐\n\n", html.EscapeString(p.DefaultModel)))
+	sb.WriteString("💡 <i>Klik tombol model untuk On (🟢) / Off (🔴).\nModel yang di-OFF-kan tidak akan muncul di combo wizard, switchmodel (/model), maupun failover resilient cycle.</i>\n\n")
+
+	menu := &tele.ReplyMarkup{}
+	var rows []tele.Row
+
+	for i := startIdx; i < endIdx; i++ {
+		mName := allModels[i]
+		isEnabled := p.IsModelEnabled(mName)
+		icon := "🟢"
+		if !isEnabled {
+			icon = "🔴"
+		}
+		label := fmt.Sprintf("%s %s", icon, mName)
+		if strings.EqualFold(mName, p.DefaultModel) {
+			label += " ⭐"
+		}
+		if len(label) > 40 {
+			label = label[:37] + "..."
+		}
+		btn := menu.Data(label, fmt.Sprintf("wiz_mod_tog_%d", i))
+		rows = append(rows, menu.Row(btn))
+	}
+
+	// Bulk actions: Aktifkan Semua / Nonaktifkan Semua
+	btnAllOn := menu.Data("🟢 Aktifkan Semua", "wiz_mod_allon")
+	btnAllOff := menu.Data("🔴 Nonaktifkan Semua", "wiz_mod_alloff")
+	rows = append(rows, menu.Row(btnAllOn, btnAllOff))
+
+	// Pagination
+	if totalPages > 1 {
+		var navBtns []tele.Btn
+		if page > 0 {
+			navBtns = append(navBtns, menu.Data("◀️ Sebelumnya", fmt.Sprintf("wiz_mod_p_%d", page-1)))
+		}
+		navBtns = append(navBtns, menu.Data(fmt.Sprintf("📄 %d/%d", page+1, totalPages), "wiz_mod_noop"))
+		if page < totalPages-1 {
+			navBtns = append(navBtns, menu.Data("Berikutnya ▶️", fmt.Sprintf("wiz_mod_p_%d", page+1)))
+		}
+		rows = append(rows, menu.Row(navBtns...))
+	}
+
+	// Back to provider edit dashboard
+	btnBack := menu.Data("⬅️ Kembali ke Edit Provider", fmt.Sprintf("wiz_ed_pick_%s", p.ID))
+	rows = append(rows, menu.Row(btnBack))
+
+	menu.Inline(rows...)
+	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
+}
+
+// HandleEditModelsMenu opens the model toggle dashboard
+func (w *ProviderWizard) HandleEditModelsMenu(c tele.Context) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	userID := c.Sender().ID
+	w.mu.RLock()
+	sess, exists := w.sessions[userID]
+	w.mu.RUnlock()
+
+	if !exists || sess.EditingProviderID == "" {
+		return c.Reply("⚠️ Sesi edit telah berakhir. Gunakan <code>/editprovider</code>.", tele.ModeHTML)
+	}
+
+	p, err := w.db.GetProvider(sess.EditingProviderID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	return w.RenderModelToggleDashboard(c, p, 0)
+}
+
+// HandleEditToggleModel toggles the enabled state of a model from its index in p.Models
+func (w *ProviderWizard) HandleEditToggleModel(c tele.Context, modelIndex int) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	userID := c.Sender().ID
+	w.mu.RLock()
+	sess, exists := w.sessions[userID]
+	w.mu.RUnlock()
+
+	if !exists || sess.EditingProviderID == "" {
+		return c.Reply("⚠️ Sesi edit telah berakhir. Gunakan <code>/editprovider</code>.", tele.ModeHTML)
+	}
+
+	p, err := w.db.GetProvider(sess.EditingProviderID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	allModels := p.Models
+	if len(allModels) == 0 && p.DefaultModel != "" {
+		allModels = []string{p.DefaultModel}
+	}
+
+	if modelIndex >= 0 && modelIndex < len(allModels) {
+		targetModel := allModels[modelIndex]
+		p.ToggleModel(targetModel)
+		_ = w.db.SaveProvider(p)
+		w.syncProviderToManager(p)
+	}
+
+	return w.RenderModelToggleDashboard(c, p, sess.ModelPage)
+}
+
+// HandleEditAllModelsState bulk enables or disables all models
+func (w *ProviderWizard) HandleEditAllModelsState(c tele.Context, enableAll bool) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	userID := c.Sender().ID
+	w.mu.RLock()
+	sess, exists := w.sessions[userID]
+	w.mu.RUnlock()
+
+	if !exists || sess.EditingProviderID == "" {
+		return c.Reply("⚠️ Sesi edit telah berakhir. Gunakan <code>/editprovider</code>.", tele.ModeHTML)
+	}
+
+	p, err := w.db.GetProvider(sess.EditingProviderID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	p.SetAllModelsState(enableAll)
+	_ = w.db.SaveProvider(p)
+	w.syncProviderToManager(p)
+
+	return w.RenderModelToggleDashboard(c, p, sess.ModelPage)
+}
+
+// HandleEditModelsPage handles pagination in model toggle dashboard
+func (w *ProviderWizard) HandleEditModelsPage(c tele.Context, page int) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	userID := c.Sender().ID
+	w.mu.RLock()
+	sess, exists := w.sessions[userID]
+	w.mu.RUnlock()
+
+	if !exists || sess.EditingProviderID == "" {
+		return c.Reply("⚠️ Sesi edit telah berakhir. Gunakan <code>/editprovider</code>.", tele.ModeHTML)
+	}
+
+	p, err := w.db.GetProvider(sess.EditingProviderID)
+	if err != nil || p == nil {
+		return c.Reply("❌ Provider tidak ditemukan.")
+	}
+
+	return w.RenderModelToggleDashboard(c, p, page)
+}
+
 

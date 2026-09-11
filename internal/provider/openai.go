@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -39,6 +40,8 @@ func NewOpenAIProviderWithKeys(name, providerType, baseURL string, keys []string
 		switch providerType {
 		case "9router":
 			baseURL = "https://api.9router.com/v1"
+		case "dahl":
+			baseURL = "https://inference.dahl.global/v1"
 		case "groq":
 			baseURL = "https://api.groq.com/openai/v1"
 		case "deepseek":
@@ -58,6 +61,8 @@ func NewOpenAIProviderWithKeys(name, providerType, baseURL string, keys []string
 		switch providerType {
 		case "9router":
 			defaultModel = "gpt-4o-mini"
+		case "dahl":
+			defaultModel = "MiniMaxAI/MiniMax-M2.7"
 		case "groq":
 			defaultModel = "llama-3.3-70b-versatile"
 		case "deepseek":
@@ -70,7 +75,11 @@ func NewOpenAIProviderWithKeys(name, providerType, baseURL string, keys []string
 	}
 
 	if len(models) == 0 {
-		models = []string{defaultModel}
+		if providerType == "dahl" {
+			models = []string{"MiniMaxAI/MiniMax-M2.7", "deepseek-ai/DeepSeek-V4-Flash-0731"}
+		} else {
+			models = []string{defaultModel}
+		}
 	}
 
 	return &OpenAIProvider{
@@ -94,6 +103,94 @@ func (p *OpenAIProvider) SetHTTPClient(client interface{}) {
 	if c, ok := client.(*http.Client); ok && c != nil {
 		p.client = c
 	}
+}
+
+func (p *OpenAIProvider) formatHTTPError(statusCode int, bodyBytes []byte, apiKey string) error {
+	bodyStr := strings.TrimSpace(string(bodyBytes))
+	isDahl := p.providerType == "dahl" || strings.Contains(strings.ToLower(p.baseURL), "dahl.global")
+	if isDahl {
+		switch statusCode {
+		case 401:
+			if apiKey == "" {
+				return fmt.Errorf("dahl error (401 Missing API token): No Authorization header. Add Authorization: Bearer (%s)", bodyStr)
+			}
+			return fmt.Errorf("dahl error (401 Invalid/Expired): Wrong or revoked key. New key at https://inference.dahl.global/account (%s)", bodyStr)
+		case 402:
+			return fmt.Errorf("dahl error (402 Exhausted): Nothing allocated on the key. Allocate from the pool (https://inference.dahl.global/docs/tokens/) or top up (%s)", bodyStr)
+		case 502:
+			return fmt.Errorf("dahl error (502 Stale model id): Stale model id. Refresh GET /v1/models (cek https://inference.dahl.global/status) dan gunakan live id seperti 'MiniMaxAI/MiniMax-M2.7' atau 'deepseek-ai/DeepSeek-V4-Flash-0731' (%s)", bodyStr)
+		case 503:
+			return fmt.Errorf("dahl error (503 Network Overload): Network overload. Short backoff and retry (%s)", bodyStr)
+		default:
+			if statusCode >= 400 && statusCode < 500 && (strings.Contains(strings.ToLower(bodyStr), "model") || strings.Contains(strings.ToLower(bodyStr), "not found")) {
+				return fmt.Errorf("dahl error (%d Stale model id): Stale model id. Refresh GET /v1/models (cek https://inference.dahl.global/status) dan gunakan live id seperti 'MiniMaxAI/MiniMax-M2.7' atau 'deepseek-ai/DeepSeek-V4-Flash-0731' (%s)", statusCode, bodyStr)
+			}
+		}
+	}
+	return fmt.Errorf("api error (%d): %s", statusCode, bodyStr)
+}
+
+func isStaleModelError(statusCode int, bodyStr string) bool {
+	if statusCode == 502 {
+		return true
+	}
+	bLower := strings.ToLower(bodyStr)
+	if (statusCode >= 400 && statusCode < 500) && (strings.Contains(bLower, "model") || strings.Contains(bLower, "not found") || strings.Contains(bLower, "invalid model") || strings.Contains(bLower, "unknown model") || strings.Contains(bLower, "stale")) {
+		return true
+	}
+	return false
+}
+
+func (p *OpenAIProvider) getResilientModelCandidates(requestedModel string) []string {
+	isDahl := p.providerType == "dahl" || strings.Contains(strings.ToLower(p.baseURL), "dahl.global")
+	if !isDahl {
+		if requestedModel != "" && !strings.HasPrefix(strings.ToLower(requestedModel), "combo:") {
+			return []string{requestedModel}
+		}
+		if p.defaultModel != "" {
+			return []string{p.defaultModel}
+		}
+		return []string{"gpt-4o-mini"}
+	}
+
+	var candidates []string
+	reqTrim := strings.TrimSpace(requestedModel)
+	if reqTrim != "" && !strings.HasPrefix(strings.ToLower(reqTrim), "combo:") {
+		for _, m := range p.models {
+			if strings.EqualFold(m, reqTrim) {
+				candidates = append(candidates, m)
+				break
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		for _, m := range p.models {
+			if strings.EqualFold(m, p.defaultModel) {
+				candidates = append(candidates, m)
+				break
+			}
+		}
+	}
+	for _, m := range p.models {
+		found := false
+		for _, c := range candidates {
+			if strings.EqualFold(c, m) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			candidates = append(candidates, m)
+		}
+	}
+	if len(candidates) == 0 {
+		if p.defaultModel != "" {
+			candidates = []string{p.defaultModel}
+		} else {
+			candidates = []string{"MiniMaxAI/MiniMax-M2.7"}
+		}
+	}
+	return candidates
 }
 
 type openAIToolCall struct {
@@ -230,10 +327,7 @@ type openAIRespBody struct {
 
 func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	start := time.Now()
-	model := req.Model
-	if model == "" {
-		model = p.defaultModel
-	}
+	candidateModels := p.getResilientModelCandidates(req.Model)
 
 	msgs := buildOpenAIMessages(req.Messages)
 
@@ -249,27 +343,6 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		})
 	}
 
-	reqPayload := openAIReqBody{
-		Model:       model,
-		Messages:    msgs,
-		Tools:       toolDefs,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-		Stream:      req.Stream && req.StreamCallback != nil,
-	}
-
-	// Enable stream_options for usage in stream mode
-	if reqPayload.Stream {
-		reqPayload.StreamOptions = &struct {
-			IncludeUsage bool `json:"include_usage"`
-		}{IncludeUsage: true}
-	}
-
-	payloadBytes, err := json.Marshal(reqPayload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
 	endpoint := fmt.Sprintf("%s/chat/completions", p.baseURL)
 
 	keyCount := p.keyPool.Count()
@@ -278,96 +351,154 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		maxAttempts = 2
 	}
 
+	isDahl := p.providerType == "dahl" || strings.Contains(strings.ToLower(p.baseURL), "dahl.global")
 	var lastErr error
 	var bodyBytes []byte
 	var successfulKey string
+	var selectedModel string
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	for modelIdx, model := range candidateModels {
+		selectedModel = model
+		reqPayload := openAIReqBody{
+			Model:       model,
+			Messages:    msgs,
+			Tools:       toolDefs,
+			Temperature: req.Temperature,
+			MaxTokens:   req.MaxTokens,
+			Stream:      req.Stream && req.StreamCallback != nil,
 		}
 
-		apiKey := p.keyPool.GetNextKey()
+		// Enable stream_options for usage in stream mode
+		if reqPayload.Stream {
+			reqPayload.StreamOptions = &struct {
+				IncludeUsage bool `json:"include_usage"`
+			}{IncludeUsage: true}
+		}
 
-		// Per-attempt timeout to prevent single key from hanging the entire request
-		attemptTimeout := 35 * time.Second
-		if deadline, ok := ctx.Deadline(); ok {
-			remaining := time.Until(deadline)
-			if remaining > 0 && remaining < attemptTimeout {
-				attemptTimeout = remaining
+		payloadBytes, err := json.Marshal(reqPayload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request: %w", err)
+		}
+
+		modelSucceeded := false
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
-		}
-		attemptCtx, cancelAttempt := context.WithTimeout(ctx, attemptTimeout)
 
-		httpReq, err := http.NewRequestWithContext(attemptCtx, "POST", endpoint, bytes.NewBuffer(payloadBytes))
-		if err != nil {
-			cancelAttempt()
-			return nil, err
-		}
+			apiKey := p.keyPool.GetNextKey()
 
-		httpReq.Header.Set("Content-Type", "application/json")
-		if apiKey != "" {
-			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-
-		httpResp, err := p.client.Do(httpReq)
-		if err != nil {
-			cancelAttempt()
-			if apiKey != "" {
-				if attemptCtx.Err() == context.DeadlineExceeded || ctx.Err() != nil {
-					p.keyPool.MarkTimeout(apiKey)
-				} else {
-					p.keyPool.MarkError(apiKey, false)
+			// Per-attempt timeout to prevent single key from hanging the entire request
+			attemptTimeout := 35 * time.Second
+			if deadline, ok := ctx.Deadline(); ok {
+				remaining := time.Until(deadline)
+				if remaining > 0 && remaining < attemptTimeout {
+					attemptTimeout = remaining
 				}
 			}
-			lastErr = fmt.Errorf("http call failed: %w", err)
-			continue
-		}
+			attemptCtx, cancelAttempt := context.WithTimeout(ctx, attemptTimeout)
 
-		bodyBytes, err = io.ReadAll(httpResp.Body)
-		httpResp.Body.Close()
-		cancelAttempt()
-
-		if err != nil {
-			lastErr = fmt.Errorf("failed to read response: %w", err)
-			continue
-		}
-
-		if httpResp.StatusCode == 429 {
-			if apiKey != "" {
-				p.keyPool.MarkRateLimit(apiKey)
+			httpReq, err := http.NewRequestWithContext(attemptCtx, "POST", endpoint, bytes.NewBuffer(payloadBytes))
+			if err != nil {
+				cancelAttempt()
+				return nil, err
 			}
-			lastErr = fmt.Errorf("rate limit error (429): %s", string(bodyBytes))
-			continue // retry with next key
-		}
 
-		if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
+			httpReq.Header.Set("Content-Type", "application/json")
 			if apiKey != "" {
-				p.keyPool.MarkAuthError(apiKey)
+				httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 			}
-			lastErr = fmt.Errorf("auth error (%d): %s", httpResp.StatusCode, string(bodyBytes))
-			continue // retry with next key
-		}
 
-		if httpResp.StatusCode >= 500 {
+			httpResp, err := p.client.Do(httpReq)
+			if err != nil {
+				cancelAttempt()
+				if apiKey != "" {
+					if attemptCtx.Err() == context.DeadlineExceeded || ctx.Err() != nil {
+						p.keyPool.MarkTimeout(apiKey)
+					} else {
+						p.keyPool.MarkError(apiKey, false)
+					}
+				}
+				lastErr = fmt.Errorf("http call failed: %w", err)
+				continue
+			}
+
+			bodyBytes, err = io.ReadAll(httpResp.Body)
+			httpResp.Body.Close()
+			cancelAttempt()
+
+			if err != nil {
+				lastErr = fmt.Errorf("failed to read response: %w", err)
+				continue
+			}
+
+			if httpResp.StatusCode == 429 {
+				if apiKey != "" {
+					p.keyPool.MarkRateLimit(apiKey)
+				}
+				lastErr = fmt.Errorf("rate limit error (429): %s", string(bodyBytes))
+				continue // retry with next key
+			}
+
+			if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
+				if apiKey != "" {
+					p.keyPool.MarkAuthError(apiKey)
+				}
+				lastErr = p.formatHTTPError(httpResp.StatusCode, bodyBytes, apiKey)
+				continue // retry with next key
+			}
+
+			if httpResp.StatusCode == 402 {
+				if apiKey != "" {
+					p.keyPool.MarkRateLimit(apiKey)
+				}
+				lastErr = p.formatHTTPError(httpResp.StatusCode, bodyBytes, apiKey)
+				continue // retry with next key
+			}
+
+			if httpResp.StatusCode == 503 {
+				if apiKey != "" {
+					p.keyPool.MarkTimeout(apiKey)
+				}
+				lastErr = p.formatHTTPError(httpResp.StatusCode, bodyBytes, apiKey)
+				time.Sleep(600 * time.Millisecond)
+				continue
+			}
+
+			if isDahl && isStaleModelError(httpResp.StatusCode, string(bodyBytes)) {
+				lastErr = p.formatHTTPError(httpResp.StatusCode, bodyBytes, apiKey)
+				if modelIdx < len(candidateModels)-1 {
+					log.Printf("[Dahl Resilience] Model '%s' gagal (stale %d). Cycling ke model berikutnya: '%s'...", model, httpResp.StatusCode, candidateModels[modelIdx+1])
+					break // break key loop to try next model candidate
+				}
+				continue
+			}
+
+			if httpResp.StatusCode >= 500 {
+				if apiKey != "" {
+					p.keyPool.MarkTimeout(apiKey)
+				}
+				lastErr = p.formatHTTPError(httpResp.StatusCode, bodyBytes, apiKey)
+				continue // retry with next key
+			}
+
+			if httpResp.StatusCode >= 400 {
+				return nil, p.formatHTTPError(httpResp.StatusCode, bodyBytes, apiKey)
+			}
+
 			if apiKey != "" {
-				p.keyPool.MarkTimeout(apiKey)
+				p.keyPool.MarkSuccess(apiKey)
 			}
-			lastErr = fmt.Errorf("upstream server error (%d): %s", httpResp.StatusCode, string(bodyBytes))
-			continue // retry with next key
+			successfulKey = apiKey
+			_ = successfulKey
+			modelSucceeded = true
+			lastErr = nil
+			break
 		}
 
-		if httpResp.StatusCode >= 400 {
-			return nil, fmt.Errorf("api error (%d): %s", httpResp.StatusCode, string(bodyBytes))
+		if modelSucceeded {
+			break
 		}
-
-		if apiKey != "" {
-			p.keyPool.MarkSuccess(apiKey)
-		}
-		successfulKey = apiKey
-		_ = successfulKey
-		lastErr = nil
-		break
 	}
 
 	if lastErr != nil {
@@ -396,7 +527,7 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 
 			actualModel := respBody.Model
 			if actualModel == "" {
-				actualModel = model
+				actualModel = selectedModel
 			}
 
 			// Extract thinking/reasoning tokens
@@ -427,7 +558,7 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 	if strings.Contains(bodyStr, "data:") {
 		var combinedContent strings.Builder
 		var totalTokens int
-		actualModel := model
+		actualModel := selectedModel
 		lines := strings.Split(bodyStr, "\n")
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
@@ -482,10 +613,7 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 // GenerateChatStream implements StreamingProvider with real-time SSE streaming
 func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	start := time.Now()
-	model := req.Model
-	if model == "" {
-		model = p.defaultModel
-	}
+	candidateModels := p.getResilientModelCandidates(req.Model)
 
 	msgs := buildOpenAIMessages(req.Messages)
 
@@ -501,23 +629,6 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		})
 	}
 
-	reqPayload := openAIReqBody{
-		Model:       model,
-		Messages:    msgs,
-		Tools:       toolDefs,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-		Stream:      true,
-		StreamOptions: &struct {
-			IncludeUsage bool `json:"include_usage"`
-		}{IncludeUsage: true},
-	}
-
-	payloadBytes, err := json.Marshal(reqPayload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal stream request: %w", err)
-	}
-
 	endpoint := fmt.Sprintf("%s/chat/completions", p.baseURL)
 
 	keyCount := p.keyPool.Count()
@@ -526,74 +637,141 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		maxAttempts = 2
 	}
 
+	isDahl := p.providerType == "dahl" || strings.Contains(strings.ToLower(p.baseURL), "dahl.global")
 	var httpResp *http.Response
 	var apiKey string
 	var lastErr error
+	var selectedModel string
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	for modelIdx, model := range candidateModels {
+		selectedModel = model
+		reqPayload := openAIReqBody{
+			Model:       model,
+			Messages:    msgs,
+			Tools:       toolDefs,
+			Temperature: req.Temperature,
+			MaxTokens:   req.MaxTokens,
+			Stream:      true,
+			StreamOptions: &struct {
+				IncludeUsage bool `json:"include_usage"`
+			}{IncludeUsage: true},
 		}
 
-		apiKey = p.keyPool.GetNextKey()
-
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(payloadBytes))
+		payloadBytes, err := json.Marshal(reqPayload)
 		if err != nil {
-			return nil, err
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		if apiKey != "" {
-			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+			return nil, fmt.Errorf("failed to marshal stream request: %w", err)
 		}
 
-		resp, err := p.client.Do(httpReq)
-		if err != nil {
-			if apiKey != "" {
-				p.keyPool.MarkTimeout(apiKey)
+		modelSucceeded := false
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
-			lastErr = fmt.Errorf("stream request failed: %w", err)
-			continue
-		}
 
-		if resp.StatusCode == 429 {
-			if apiKey != "" {
-				p.keyPool.MarkRateLimit(apiKey)
+			apiKey = p.keyPool.GetNextKey()
+
+			httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(payloadBytes))
+			if err != nil {
+				return nil, err
 			}
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			lastErr = fmt.Errorf("stream rate limit error (429): %s", string(bodyBytes))
-			continue
-		}
-
-		if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			httpReq.Header.Set("Content-Type", "application/json")
 			if apiKey != "" {
-				p.keyPool.MarkAuthError(apiKey)
+				httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 			}
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			lastErr = fmt.Errorf("stream auth error (%d): %s", resp.StatusCode, string(bodyBytes))
-			continue
-		}
 
-		if resp.StatusCode >= 500 {
-			if apiKey != "" {
-				p.keyPool.MarkTimeout(apiKey)
+			resp, err := p.client.Do(httpReq)
+			if err != nil {
+				if apiKey != "" {
+					p.keyPool.MarkTimeout(apiKey)
+				}
+				lastErr = fmt.Errorf("stream request failed: %w", err)
+				continue
 			}
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			lastErr = fmt.Errorf("stream server error (%d): %s", resp.StatusCode, string(bodyBytes))
-			continue
+
+			if resp.StatusCode == 429 {
+				if apiKey != "" {
+					p.keyPool.MarkRateLimit(apiKey)
+				}
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				lastErr = fmt.Errorf("stream rate limit error (429): %s", string(bodyBytes))
+				continue
+			}
+
+			if resp.StatusCode == 401 || resp.StatusCode == 403 {
+				if apiKey != "" {
+					p.keyPool.MarkAuthError(apiKey)
+				}
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				lastErr = p.formatHTTPError(resp.StatusCode, bodyBytes, apiKey)
+				continue
+			}
+
+			if resp.StatusCode == 402 {
+				if apiKey != "" {
+					p.keyPool.MarkRateLimit(apiKey)
+				}
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				lastErr = p.formatHTTPError(resp.StatusCode, bodyBytes, apiKey)
+				continue
+			}
+
+			if resp.StatusCode == 503 {
+				if apiKey != "" {
+					p.keyPool.MarkTimeout(apiKey)
+				}
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				lastErr = p.formatHTTPError(resp.StatusCode, bodyBytes, apiKey)
+				time.Sleep(600 * time.Millisecond)
+				continue
+			}
+
+			if isDahl && isStaleModelError(resp.StatusCode, "") {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				lastErr = p.formatHTTPError(resp.StatusCode, bodyBytes, apiKey)
+				if modelIdx < len(candidateModels)-1 {
+					log.Printf("[Dahl Resilience] Model stream '%s' gagal (stale %d). Cycling ke model berikutnya: '%s'...", model, resp.StatusCode, candidateModels[modelIdx+1])
+					break
+				}
+				continue
+			}
+
+			if resp.StatusCode >= 500 {
+				if apiKey != "" {
+					p.keyPool.MarkTimeout(apiKey)
+				}
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				lastErr = p.formatHTTPError(resp.StatusCode, bodyBytes, apiKey)
+				continue
+			}
+
+			if resp.StatusCode >= 400 {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if isDahl && isStaleModelError(resp.StatusCode, string(bodyBytes)) {
+					lastErr = p.formatHTTPError(resp.StatusCode, bodyBytes, apiKey)
+					if modelIdx < len(candidateModels)-1 {
+						log.Printf("[Dahl Resilience] Model stream '%s' gagal (stale %d). Cycling ke model berikutnya: '%s'...", model, resp.StatusCode, candidateModels[modelIdx+1])
+						break
+					}
+				}
+				return nil, p.formatHTTPError(resp.StatusCode, bodyBytes, apiKey)
+			}
+
+			httpResp = resp
+			modelSucceeded = true
+			lastErr = nil
+			break
 		}
 
-		if resp.StatusCode >= 400 {
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			return nil, fmt.Errorf("stream api error (%d): %s", resp.StatusCode, string(bodyBytes))
+		if modelSucceeded {
+			break
 		}
-
-		httpResp = resp
-		lastErr = nil
-		break
 	}
 
 	if lastErr != nil {
@@ -606,7 +784,7 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 	var thinkingBuilder strings.Builder
 	var toolCalls []ToolCall
 	var promptTokens, completionTokens, totalTokens, thinkingTokens int
-	actualModel := model
+	actualModel := selectedModel
 
 	// Read line by line from SSE stream
 	buf := make([]byte, 4096)

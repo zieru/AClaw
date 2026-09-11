@@ -286,3 +286,196 @@ func TestComboStrategies(t *testing.T) {
 	}
 }
 
+func TestDahlProviderErrorFormatting(t *testing.T) {
+	p := NewOpenAIProvider("dahl", "dahl", "", "dahl-key-123", "")
+	if p.baseURL != "https://inference.dahl.global/v1" {
+		t.Errorf("expected dahl baseURL 'https://inference.dahl.global/v1', got '%s'", p.baseURL)
+	}
+	if p.defaultModel != "MiniMaxAI/MiniMax-M2.7" {
+		t.Errorf("expected dahl defaultModel 'MiniMaxAI/MiniMax-M2.7', got '%s'", p.defaultModel)
+	}
+
+	// 401 Missing API Token
+	err401Missing := p.formatHTTPError(401, []byte(`{"error":"unauthorized"}`), "")
+	if !strings.Contains(err401Missing.Error(), "Missing API token") || !strings.Contains(err401Missing.Error(), "Authorization: Bearer") {
+		t.Errorf("unexpected 401 missing token error message: %v", err401Missing)
+	}
+
+	// 401 Invalid/Expired Key
+	err401Expired := p.formatHTTPError(401, []byte(`{"error":"invalid token"}`), "dahl-key-123")
+	if !strings.Contains(err401Expired.Error(), "Invalid/Expired") || !strings.Contains(err401Expired.Error(), "https://inference.dahl.global/account") {
+		t.Errorf("unexpected 401 invalid token error message: %v", err401Expired)
+	}
+
+	// 402 Exhausted
+	err402 := p.formatHTTPError(402, []byte(`{"error":"insufficient quota"}`), "dahl-key-123")
+	if !strings.Contains(err402.Error(), "Exhausted") || !strings.Contains(err402.Error(), "https://inference.dahl.global/docs/tokens/") {
+		t.Errorf("unexpected 402 exhausted error message: %v", err402)
+	}
+
+	// 502 Stale Model ID
+	err502 := p.formatHTTPError(502, []byte(`{"error":"bad gateway"}`), "dahl-key-123")
+	if !strings.Contains(err502.Error(), "Stale model id") || !strings.Contains(err502.Error(), "https://inference.dahl.global/status") {
+		t.Errorf("unexpected 502 stale model error message: %v", err502)
+	}
+
+	// 404 Model Not Found
+	err404 := p.formatHTTPError(404, []byte(`{"error":"model not found"}`), "dahl-key-123")
+	if !strings.Contains(err404.Error(), "Stale model id") {
+		t.Errorf("unexpected 404 stale model error message: %v", err404)
+	}
+
+	// 503 Network Overload
+	err503 := p.formatHTTPError(503, []byte(`{"error":"service unavailable"}`), "dahl-key-123")
+	if !strings.Contains(err503.Error(), "Network Overload") {
+		t.Errorf("unexpected 503 network overload error message: %v", err503)
+	}
+}
+
+func TestComboPreferredIfAvailable(t *testing.T) {
+	mgr := &Manager{
+		providers:     make(map[string]Provider),
+		providersByID: make(map[string]Provider),
+		combos:        make(map[string]*storage.ModelComboRecord),
+		comboCounters: make(map[string]*uint64),
+		comboLatency:  make(map[string]map[string]*comboLatencyEntry),
+	}
+
+	// Provider A supports gemini-2.0-flash (default) and gemini-1.5-pro
+	pA := &mockProvider{
+		name:         "gemini",
+		pType:        "gemini",
+		defaultModel: "gemini-2.0-flash",
+		models:       []string{"gemini-2.0-flash", "gemini-1.5-pro"},
+	}
+	mgr.Register(pA, 1)
+
+	comboRec := &storage.ModelComboRecord{
+		Name:     "smart_combo",
+		Strategy: "failsafe",
+		IsActive: true,
+		Targets: []storage.ComboTarget{
+			{
+				ProviderID:           "gemini",
+				Model:                "gemini-2.0-flash",
+				Priority:             1,
+				PreferredIfAvailable: true,
+			},
+		},
+	}
+	mgr.RegisterCombo(comboRec)
+
+	// Case 1: Caller requests preferred model "gemini-1.5-pro" which Provider A supports
+	reqSupported := ChatRequest{
+		Model:          "combo:smart_combo",
+		PreferredModel: "gemini-1.5-pro",
+		Messages: []ChatMessage{
+			{Role: RoleUser, Content: "halo"},
+		},
+	}
+	resp1, err := mgr.GenerateWithFallback(context.Background(), "", reqSupported)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(resp1.Content, "gemini-1.5-pro") {
+		t.Errorf("expected response using preferred model 'gemini-1.5-pro', got '%s'", resp1.Content)
+	}
+
+	// Case 2: Caller requests preferred model "claude-3-5-sonnet" which Provider A does NOT support
+	reqUnsupported := ChatRequest{
+		Model:          "combo:smart_combo",
+		PreferredModel: "claude-3-5-sonnet",
+		Messages: []ChatMessage{
+			{Role: RoleUser, Content: "halo"},
+		},
+	}
+	resp2, err := mgr.GenerateWithFallback(context.Background(), "", reqUnsupported)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(resp2.Content, "gemini-2.0-flash") {
+		t.Errorf("expected response fallback to target model 'gemini-2.0-flash', got '%s'", resp2.Content)
+	}
+}
+
+func TestComboSkipsDisabledModel(t *testing.T) {
+	mgr := &Manager{
+		providers: make(map[string]Provider),
+		combos:    make(map[string]*storage.ModelComboRecord),
+	}
+
+	// Provider 1 has only "model-1-b" enabled ("model-1-a" was disabled)
+	p1 := &mockProvider{
+		name:         "p1",
+		pType:        "openai",
+		defaultModel: "model-1-b",
+		models:       []string{"model-1-b"},
+	}
+	// Provider 2 has "model-2-a"
+	p2 := &mockProvider{
+		name:         "p2",
+		pType:        "anthropic",
+		defaultModel: "model-2-a",
+		models:       []string{"model-2-a"},
+	}
+
+	mgr.RegisterWithID("p1", p1, 1)
+	mgr.RegisterWithID("p2", p2, 2)
+
+	// Combo targets p1 with disabled "model-1-a", then p2 with "model-2-a"
+	mgr.RegisterCombo(&storage.ModelComboRecord{
+		Name:     "fallback_combo",
+		Strategy: "failsafe",
+		IsActive: true,
+		Targets: []storage.ComboTarget{
+			{ProviderID: "p1", Model: "model-1-a", Priority: 1},
+			{ProviderID: "p2", Model: "model-2-a", Priority: 2},
+		},
+	})
+
+	resp, err := mgr.GenerateWithFallback(context.Background(), "", ChatRequest{
+		Model: "combo:fallback_combo",
+		Messages: []ChatMessage{
+			{Role: RoleUser, Content: "test"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected fallback to succeed, got: %v", err)
+	}
+	if !strings.Contains(resp.Content, "p2 (model-2-a)") {
+		t.Fatalf("expected target #2 response, got: %s", resp.Content)
+	}
+}
+
+func TestDahlResilientCandidateSelection(t *testing.T) {
+	// Dahl provider with only active models
+	dahl := NewOpenAIProviderWithKeys(
+		"Dahl",
+		"dahl",
+		"https://inference.dahl.global/v1",
+		[]string{"key1"},
+		"round-robin",
+		"MiniMaxAI/MiniMax-M2.7",
+		[]string{"MiniMaxAI/MiniMax-M2.7", "deepseek-ai/DeepSeek-V4-Flash-0731"},
+	)
+
+	// Case 1: Default request -> starts with MiniMax, then DeepSeek
+	c1 := dahl.getResilientModelCandidates("")
+	if len(c1) != 2 || c1[0] != "MiniMaxAI/MiniMax-M2.7" || c1[1] != "deepseek-ai/DeepSeek-V4-Flash-0731" {
+		t.Fatalf("unexpected candidates for empty model: %v", c1)
+	}
+
+	// Case 2: Specific request for deepseek -> starts with DeepSeek, then MiniMax
+	c2 := dahl.getResilientModelCandidates("deepseek-ai/DeepSeek-V4-Flash-0731")
+	if len(c2) != 2 || c2[0] != "deepseek-ai/DeepSeek-V4-Flash-0731" || c2[1] != "MiniMaxAI/MiniMax-M2.7" {
+		t.Fatalf("unexpected candidates for deepseek request: %v", c2)
+	}
+
+	// Case 3: Request for a disabled/unlisted model -> does not include disabled model, uses active ones
+	c3 := dahl.getResilientModelCandidates("zai-org/GLM-5.3-Flash")
+	if len(c3) != 2 || c3[0] != "MiniMaxAI/MiniMax-M2.7" || c3[1] != "deepseek-ai/DeepSeek-V4-Flash-0731" {
+		t.Fatalf("unexpected candidates for disabled model: %v", c3)
+	}
+}
+
+

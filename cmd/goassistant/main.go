@@ -173,7 +173,7 @@ func main() {
 			if len(keys) == 0 && p.APIKey != "" {
 				keys = []string{p.APIKey}
 			}
-			models := p.Models
+			models := p.EnabledModels()
 			if len(models) == 0 && p.DefaultModel != "" {
 				models = []string{p.DefaultModel}
 			}

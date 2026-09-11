@@ -40,7 +40,11 @@ func (ui *ComboUI) RenderCombosList() string {
 
 			var targetsStr []string
 			for _, t := range c.Targets {
-				targetsStr = append(targetsStr, fmt.Sprintf("<code>%s/%s</code>", html.EscapeString(t.ProviderID), html.EscapeString(t.Model)))
+				targetLabel := fmt.Sprintf("<code>%s/%s</code>", html.EscapeString(t.ProviderID), html.EscapeString(t.Model))
+				if t.PreferredIfAvailable {
+					targetLabel += " ⭐"
+				}
+				targetsStr = append(targetsStr, targetLabel)
 			}
 
 			sb.WriteString(fmt.Sprintf("%d. %s <b>%s</b> (Strategi: <code>%s</code>)\n", i+1, statusIcon, html.EscapeString(c.Name), html.EscapeString(c.Strategy)))
@@ -61,7 +65,8 @@ func (ui *ComboUI) RenderCombosList() string {
 	sb.WriteString("• <code>/addcombo &lt;name&gt; &lt;prov1:model1,prov2:model2,...&gt; [deskripsi]</code>\n")
 	sb.WriteString("• <code>/delcombo &lt;name&gt;</code>\n\n")
 	sb.WriteString("💡 <b>Contoh Penggunaan:</b>\n")
-	sb.WriteString("<code>/addcombo smart openai:gpt-4o,anthropic:claude-3-5-sonnet,gemini:gemini-2.0-flash \"Smart Models Failsafe\"</code>\n")
+	sb.WriteString("<code>/addcombo smart openai:gpt-4o,anthropic:claude-3-5-sonnet,gemini:gemini-2.0-flash* \"Smart Models Failsafe\"</code>\n")
+	sb.WriteString("<i>(Gunakan tanda <code>*</code> di belakang model untuk mengaktifkan opsi 'preferred if available')</i>\n")
 	sb.WriteString("<code>/addcombo fast groq:llama-3.3-70b-versatile,9router:gpt-4o-mini \"Fast & Cheap\"</code>\n")
 	sb.WriteString("<i>Setelah dibuat, Anda dapat mengatur model chat ke <code>combo:smart</code> atau <code>smart</code>!</i>")
 
@@ -105,10 +110,21 @@ func (ui *ComboUI) HandleAddCombo(c tele.Context) error {
 		if len(parts) != 2 {
 			return c.Reply(fmt.Sprintf("⚠️ Target '%s' tidak valid. Format harus <code>provider_id:model_name</code>", html.EscapeString(rt)), tele.ModeHTML)
 		}
+		pID := strings.TrimSpace(parts[0])
+		mName := strings.TrimSpace(parts[1])
+		isPref := false
+		if strings.HasSuffix(mName, "*") {
+			isPref = true
+			mName = strings.TrimSuffix(mName, "*")
+		} else if strings.HasSuffix(strings.ToLower(mName), ":preferred") {
+			isPref = true
+			mName = mName[:len(mName)-len(":preferred")]
+		}
 		targets = append(targets, storage.ComboTarget{
-			ProviderID: strings.TrimSpace(parts[0]),
-			Model:      strings.TrimSpace(parts[1]),
-			Priority:   i + 1,
+			ProviderID:           pID,
+			Model:                mName,
+			Priority:             i + 1,
+			PreferredIfAvailable: isPref,
 		})
 	}
 

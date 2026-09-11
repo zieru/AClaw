@@ -61,6 +61,7 @@ func Open(dbPath string) (*DB, error) {
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN proxy_pool_enabled INTEGER NOT NULL DEFAULT 1")
 	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN api_keys TEXT NOT NULL DEFAULT '[]'")
 	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN models TEXT NOT NULL DEFAULT '[]'")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN disabled_models TEXT NOT NULL DEFAULT '[]'")
 	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN strategy TEXT NOT NULL DEFAULT 'failsafe'")
 	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN key_strategy TEXT NOT NULL DEFAULT 'round-robin'")
 	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN proxy_enabled INTEGER NOT NULL DEFAULT 0")
@@ -149,29 +150,96 @@ type ProxyNodeRecord struct {
 }
 
 type ProviderRecord struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Type         string    `json:"type"` // 9router, openai, anthropic, gemini, groq, deepseek, ollama, custom
-	BaseURL      string    `json:"base_url"`
-	APIKey       string    `json:"api_key"`
-	APIKeys      []string  `json:"api_keys"`
-	DefaultModel string    `json:"default_model"`
-	Models       []string  `json:"models"`
-	Strategy     string    `json:"strategy"`     // failsafe, round-robin, random
-	KeyStrategy  string    `json:"key_strategy"` // round-robin, random, failover
-	ProxyEnabled bool      `json:"proxy_enabled"`
-	ProxyGroup   string    `json:"proxy_group"`
-	IsActive     bool      `json:"is_active"`
-	Priority     int       `json:"priority"`
-	SettingsJSON string    `json:"settings_json"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Type           string    `json:"type"` // 9router, openai, anthropic, gemini, groq, deepseek, ollama, custom, dahl
+	BaseURL        string    `json:"base_url"`
+	APIKey         string    `json:"api_key"`
+	APIKeys        []string  `json:"api_keys"`
+	DefaultModel   string    `json:"default_model"`
+	Models         []string  `json:"models"`
+	DisabledModels []string  `json:"disabled_models,omitempty"`
+	Strategy       string    `json:"strategy"`     // failsafe, round-robin, random
+	KeyStrategy    string    `json:"key_strategy"` // round-robin, random, failover
+	ProxyEnabled   bool      `json:"proxy_enabled"`
+	ProxyGroup     string    `json:"proxy_group"`
+	IsActive       bool      `json:"is_active"`
+	Priority       int       `json:"priority"`
+	SettingsJSON   string    `json:"settings_json"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// IsModelEnabled returns true if the model is active (not disabled)
+func (p *ProviderRecord) IsModelEnabled(model string) bool {
+	if p == nil {
+		return false
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	for _, dm := range p.DisabledModels {
+		if strings.EqualFold(strings.TrimSpace(dm), model) {
+			return false
+		}
+	}
+	return true
+}
+
+// EnabledModels returns all models from Models that are not disabled
+func (p *ProviderRecord) EnabledModels() []string {
+	if p == nil {
+		return nil
+	}
+	var list []string
+	for _, m := range p.Models {
+		if p.IsModelEnabled(m) {
+			list = append(list, m)
+		}
+	}
+	// Fallback to default model if all models are disabled
+	if len(list) == 0 && p.DefaultModel != "" {
+		list = []string{p.DefaultModel}
+	}
+	return list
+}
+
+// ToggleModel toggles the enabled state of a model. Returns true if now enabled, false if disabled
+func (p *ProviderRecord) ToggleModel(model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return true
+	}
+	for i, dm := range p.DisabledModels {
+		if strings.EqualFold(strings.TrimSpace(dm), model) {
+			p.DisabledModels = append(p.DisabledModels[:i], p.DisabledModels[i+1:]...)
+			return true
+		}
+	}
+	p.DisabledModels = append(p.DisabledModels, model)
+	return false
+}
+
+// SetAllModelsState enables or disables all models (excluding default model if disabling)
+func (p *ProviderRecord) SetAllModelsState(enabled bool) {
+	if enabled {
+		p.DisabledModels = nil
+		return
+	}
+	p.DisabledModels = nil
+	for _, m := range p.Models {
+		if !strings.EqualFold(m, p.DefaultModel) {
+			p.DisabledModels = append(p.DisabledModels, m)
+		}
+	}
 }
 
 type ComboTarget struct {
-	ProviderID string `json:"provider_id"`
-	Model      string `json:"model"`
-	Priority   int    `json:"priority"`
+	ProviderID           string `json:"provider_id"`
+	Model                string `json:"model"`
+	Priority             int    `json:"priority"`
+	PreferredIfAvailable bool   `json:"preferred_if_available,omitempty"`
 }
 
 type ModelComboRecord struct {
@@ -564,6 +632,7 @@ func (d *DB) ListProviders() ([]ProviderRecord, error) {
 
 	rows, err := d.db.Query(`
 		SELECT id, name, type, base_url, api_key, COALESCE(api_keys, '[]'), default_model, COALESCE(models, '[]'), 
+		       COALESCE(disabled_models, '[]'),
 		       COALESCE(strategy, 'failsafe'), COALESCE(key_strategy, 'round-robin'), 
 		       COALESCE(proxy_enabled, 0), COALESCE(proxy_group, ''),
 		       is_active, priority, settings_json, created_at, updated_at 
@@ -577,14 +646,15 @@ func (d *DB) ListProviders() ([]ProviderRecord, error) {
 	for rows.Next() {
 		var p ProviderRecord
 		var activeInt, proxyEnabledInt int
-		var apiKeysJSON, modelsJSON string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &apiKeysJSON, &p.DefaultModel, &modelsJSON, &p.Strategy, &p.KeyStrategy, &proxyEnabledInt, &p.ProxyGroup, &activeInt, &p.Priority, &p.SettingsJSON, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		var apiKeysJSON, modelsJSON, disabledModelsJSON string
+		if err := rows.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &apiKeysJSON, &p.DefaultModel, &modelsJSON, &disabledModelsJSON, &p.Strategy, &p.KeyStrategy, &proxyEnabledInt, &p.ProxyGroup, &activeInt, &p.Priority, &p.SettingsJSON, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		p.IsActive = activeInt == 1
 		p.ProxyEnabled = proxyEnabledInt == 1
 		_ = json.Unmarshal([]byte(apiKeysJSON), &p.APIKeys)
 		_ = json.Unmarshal([]byte(modelsJSON), &p.Models)
+		_ = json.Unmarshal([]byte(disabledModelsJSON), &p.DisabledModels)
 		if len(p.APIKeys) == 0 && p.APIKey != "" {
 			p.APIKeys = []string{p.APIKey}
 		}
@@ -599,14 +669,15 @@ func (d *DB) GetProvider(id string) (*ProviderRecord, error) {
 
 	var p ProviderRecord
 	var activeInt, proxyEnabledInt int
-	var apiKeysJSON, modelsJSON string
+	var apiKeysJSON, modelsJSON, disabledModelsJSON string
 	err := d.db.QueryRow(`
 		SELECT id, name, type, base_url, api_key, COALESCE(api_keys, '[]'), default_model, COALESCE(models, '[]'), 
+		       COALESCE(disabled_models, '[]'),
 		       COALESCE(strategy, 'failsafe'), COALESCE(key_strategy, 'round-robin'), 
 		       COALESCE(proxy_enabled, 0), COALESCE(proxy_group, ''),
 		       is_active, priority, settings_json, created_at, updated_at 
 		FROM providers WHERE id = ?`, id).
-		Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &apiKeysJSON, &p.DefaultModel, &modelsJSON, &p.Strategy, &p.KeyStrategy, &proxyEnabledInt, &p.ProxyGroup, &activeInt, &p.Priority, &p.SettingsJSON, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &apiKeysJSON, &p.DefaultModel, &modelsJSON, &disabledModelsJSON, &p.Strategy, &p.KeyStrategy, &proxyEnabledInt, &p.ProxyGroup, &activeInt, &p.Priority, &p.SettingsJSON, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -617,6 +688,7 @@ func (d *DB) GetProvider(id string) (*ProviderRecord, error) {
 	p.ProxyEnabled = proxyEnabledInt == 1
 	_ = json.Unmarshal([]byte(apiKeysJSON), &p.APIKeys)
 	_ = json.Unmarshal([]byte(modelsJSON), &p.Models)
+	_ = json.Unmarshal([]byte(disabledModelsJSON), &p.DisabledModels)
 	if len(p.APIKeys) == 0 && p.APIKey != "" {
 		p.APIKeys = []string{p.APIKey}
 	}
@@ -645,6 +717,7 @@ func (d *DB) SaveProvider(p *ProviderRecord) error {
 
 	apiKeysBytes, _ := json.Marshal(p.APIKeys)
 	modelsBytes, _ := json.Marshal(p.Models)
+	disabledModelsBytes, _ := json.Marshal(p.DisabledModels)
 
 	activeInt := 0
 	if p.IsActive {
@@ -656,8 +729,8 @@ func (d *DB) SaveProvider(p *ProviderRecord) error {
 	}
 
 	query := `
-	INSERT INTO providers (id, name, type, base_url, api_key, api_keys, default_model, models, strategy, key_strategy, proxy_enabled, proxy_group, is_active, priority, settings_json, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	INSERT INTO providers (id, name, type, base_url, api_key, api_keys, default_model, models, disabled_models, strategy, key_strategy, proxy_enabled, proxy_group, is_active, priority, settings_json, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 	ON CONFLICT(id) DO UPDATE SET
 		name=excluded.name,
 		type=excluded.type,
@@ -666,6 +739,7 @@ func (d *DB) SaveProvider(p *ProviderRecord) error {
 		api_keys=excluded.api_keys,
 		default_model=excluded.default_model,
 		models=excluded.models,
+		disabled_models=excluded.disabled_models,
 		strategy=excluded.strategy,
 		key_strategy=excluded.key_strategy,
 		proxy_enabled=excluded.proxy_enabled,
@@ -675,7 +749,7 @@ func (d *DB) SaveProvider(p *ProviderRecord) error {
 		settings_json=excluded.settings_json,
 		updated_at=CURRENT_TIMESTAMP
 	`
-	_, err := d.db.Exec(query, p.ID, p.Name, p.Type, p.BaseURL, p.APIKey, string(apiKeysBytes), p.DefaultModel, string(modelsBytes), p.Strategy, p.KeyStrategy, proxyEnabledInt, p.ProxyGroup, activeInt, p.Priority, p.SettingsJSON)
+	_, err := d.db.Exec(query, p.ID, p.Name, p.Type, p.BaseURL, p.APIKey, string(apiKeysBytes), p.DefaultModel, string(modelsBytes), string(disabledModelsBytes), p.Strategy, p.KeyStrategy, proxyEnabledInt, p.ProxyGroup, activeInt, p.Priority, p.SettingsJSON)
 	return err
 }
 

@@ -448,8 +448,14 @@ func (ui *ModelUI) getAllModelsForProvider(p provider.Provider) []string {
 	seen := make(map[string]bool)
 	var rest []string
 
+	enabledMap := make(map[string]bool)
+	for _, m := range p.Models() {
+		enabledMap[strings.ToLower(strings.TrimSpace(m))] = true
+	}
+
 	def := strings.TrimSpace(p.DefaultModel())
-	if def != "" {
+	defEnabled := def != "" && (len(enabledMap) == 0 || enabledMap[strings.ToLower(def)])
+	if defEnabled {
 		seen[strings.ToLower(def)] = true
 	}
 
@@ -464,10 +470,13 @@ func (ui *ModelUI) getAllModelsForProvider(p provider.Provider) []string {
 	sort.Strings(rest)
 
 	var list []string
-	if def != "" {
+	if defEnabled {
 		list = append(list, def)
 	}
 	list = append(list, rest...)
+	if len(list) == 0 && def != "" {
+		list = []string{def}
+	}
 	return list
 }
 

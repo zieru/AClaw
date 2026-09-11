@@ -53,11 +53,11 @@ func (ui *ProviderUI) RenderProvidersList() string {
 
 			provEntry := fmt.Sprintf("%d. %s <b>%s</b> (<code>%s</code> | Tipe: <code>%s</code>)\n"+
 				"   • Default Model: <code>%s</code>\n"+
-				"   • Models (%d): <code>%s</code>\n"+
+				"   • Models: <b>%d aktif</b> / %d total (<code>%s</code>)\n"+
 				"   • Key Pool: <b>%d key</b> (Strategi: <code>%s</code>)\n",
 				i+1, statusIcon, html.EscapeString(p.Name), html.EscapeString(p.ID), html.EscapeString(p.Type),
 				html.EscapeString(p.DefaultModel),
-				len(p.Models), html.EscapeString(modelsStr),
+				len(p.EnabledModels()), len(p.Models), html.EscapeString(modelsStr),
 				keyCount, html.EscapeString(p.KeyStrategy))
 
 			if p.ProxyEnabled {
@@ -691,7 +691,7 @@ func (ui *ProviderUI) syncProviderToManager(p *storage.ProviderRecord) {
 		keys = []string{p.APIKey}
 	}
 
-	models := p.Models
+	models := p.EnabledModels()
 	if len(models) == 0 && p.DefaultModel != "" {
 		models = []string{p.DefaultModel}
 	}
@@ -702,7 +702,7 @@ func (ui *ProviderUI) syncProviderToManager(p *storage.ProviderRecord) {
 		inst = provider.NewGeminiProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
 	case "anthropic":
 		inst = provider.NewAnthropicProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
-	default: // 9router, openai, groq, deepseek, ollama, custom
+	default: // 9router, openai, groq, deepseek, ollama, custom, dahl
 		inst = provider.NewOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
 	}
 
@@ -712,6 +712,86 @@ func (ui *ProviderUI) syncProviderToManager(p *storage.ProviderRecord) {
 	}
 
 	ui.providerManager.RegisterWithID(p.ID, inst, p.Priority)
+}
+
+// HandleToggleModelCommand processes `/togglemodel <provider_id> <model_name>`
+func (ui *ProviderUI) HandleToggleModelCommand(c tele.Context) error {
+	args := c.Args()
+	if len(args) < 2 {
+		return c.Reply("⚠️ Format salah!\nContoh: <code>/togglemodel dahl MiniMaxAI/MiniMax-M2.7</code>", tele.ModeHTML)
+	}
+
+	id := args[0]
+	modelName := strings.Join(args[1:], " ")
+
+	p, err := ui.db.GetProvider(id)
+	if err != nil || p == nil {
+		return c.Reply(fmt.Sprintf("❌ Provider dengan ID '%s' tidak ditemukan", html.EscapeString(id)))
+	}
+
+	found := false
+	for _, m := range p.Models {
+		if strings.EqualFold(m, modelName) {
+			modelName = m
+			found = true
+			break
+		}
+	}
+	if !found && strings.EqualFold(p.DefaultModel, modelName) {
+		modelName = p.DefaultModel
+		found = true
+	}
+
+	if !found {
+		return c.Reply(fmt.Sprintf("❌ Model <code>%s</code> tidak terdaftar pada provider <b>%s</b>.", html.EscapeString(modelName), html.EscapeString(p.Name)), tele.ModeHTML)
+	}
+
+	enabled := p.ToggleModel(modelName)
+	if err := ui.db.SaveProvider(p); err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan status model: %v", html.EscapeString(err.Error())))
+	}
+	ui.syncProviderToManager(p)
+
+	statusStr := "🟢 <b>DIAKTIFKAN</b>"
+	if !enabled {
+		statusStr = "🔴 <b>DINONAKTIFKAN</b>"
+	}
+	return c.Reply(fmt.Sprintf("🎛️ Model <code>%s</code> pada provider <b>%s</b> sekarang %s!\n\n• Sisa model aktif: %d/%d",
+		html.EscapeString(modelName), html.EscapeString(p.Name), statusStr, len(p.EnabledModels()), len(p.Models)), tele.ModeHTML)
+}
+
+// HandleModelStatusCommand processes `/modelstatus <provider_id>`
+func (ui *ProviderUI) HandleModelStatusCommand(c tele.Context) error {
+	args := c.Args()
+	if len(args) < 1 {
+		return c.Reply("⚠️ Format salah!\nContoh: <code>/modelstatus dahl</code>", tele.ModeHTML)
+	}
+
+	id := args[0]
+	p, err := ui.db.GetProvider(id)
+	if err != nil || p == nil {
+		return c.Reply(fmt.Sprintf("❌ Provider dengan ID '%s' tidak ditemukan", html.EscapeString(id)))
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🎛️ <b>STATUS MODEL: %s</b> (<code>%s</code>)\n\n", html.EscapeString(p.Name), html.EscapeString(p.ID)))
+	sb.WriteString(fmt.Sprintf("• Default Model: <code>%s</code> ⭐\n", html.EscapeString(p.DefaultModel)))
+	sb.WriteString(fmt.Sprintf("• Total: %d model (%d aktif | %d nonaktif)\n\n", len(p.Models), len(p.EnabledModels()), len(p.DisabledModels)))
+
+	for i, m := range p.Models {
+		icon := "🟢"
+		if !p.IsModelEnabled(m) {
+			icon = "🔴"
+		}
+		defTag := ""
+		if strings.EqualFold(m, p.DefaultModel) {
+			defTag = " ⭐ (Default)"
+		}
+		sb.WriteString(fmt.Sprintf("%d. %s <code>%s</code>%s\n", i+1, icon, html.EscapeString(m), defTag))
+	}
+
+	sb.WriteString("\n<i>Gunakan <code>/togglemodel <provider> <model></code> atau menu <code>/editprovider</code> untuk on/off model.</i>")
+	return c.Reply(sb.String(), tele.ModeHTML)
 }
 
 func formatModelsSummary(models []string, maxDisplay int) string {

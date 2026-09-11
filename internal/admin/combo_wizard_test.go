@@ -55,6 +55,18 @@ func TestComboWizard_GetModelsForProvider(t *testing.T) {
 			t.Errorf("expected models[%d] to be '%s', got '%s'", i+1, exp, models[i+1])
 		}
 	}
+
+	// 3. Test with disabled models: disabled models should not be returned
+	p.DisabledModels = []string{"alpha-model", "z-model"}
+	filteredModels := cw.getModelsForProvider(p)
+	if len(filteredModels) != 3 {
+		t.Fatalf("expected 3 models after disabling 2, got %d: %v", len(filteredModels), filteredModels)
+	}
+	for _, m := range filteredModels {
+		if m == "alpha-model" || m == "z-model" {
+			t.Errorf("disabled model '%s' should not appear in combo wizard getModelsForProvider", m)
+		}
+	}
 }
 
 func TestComboWizard_TargetAddition(t *testing.T) {
@@ -96,5 +108,25 @@ func TestComboWizard_TargetAddition(t *testing.T) {
 	}
 	if sess.Targets[0].ProviderID != "prov_1" {
 		t.Errorf("expected target provider 'prov_1', got '%s'", sess.Targets[0].ProviderID)
+	}
+	if sess.Targets[0].PreferredIfAvailable {
+		t.Errorf("expected target PreferredIfAvailable to be false, got true")
+	}
+
+	// Test adding a second target with PreferredIfAvailable = true
+	sess.SelectedProvider = p
+	sess.PendingModel = "gpt-4o-mini"
+	err = cw.applyTargetWithPreference(nil, sess, true)
+	if err != nil {
+		t.Fatalf("failed to apply target with preference: %v", err)
+	}
+	if len(sess.Targets) != 2 {
+		t.Fatalf("expected 2 targets in session, got %d", len(sess.Targets))
+	}
+	if !sess.Targets[1].PreferredIfAvailable {
+		t.Errorf("expected target 2 PreferredIfAvailable to be true, got false")
+	}
+	if sess.Targets[1].Model != "gpt-4o-mini" {
+		t.Errorf("expected target 2 model 'gpt-4o-mini', got '%s'", sess.Targets[1].Model)
 	}
 }

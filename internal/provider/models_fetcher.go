@@ -34,6 +34,8 @@ func fetchOpenAICompatibleModels(ctx context.Context, pType, baseURL, apiKey str
 		switch pType {
 		case "9router":
 			baseURL = "https://api.9router.com/v1"
+		case "dahl":
+			baseURL = "https://inference.dahl.global/v1"
 		case "groq":
 			baseURL = "https://api.groq.com/openai/v1"
 		case "deepseek":
@@ -109,7 +111,11 @@ func fetchOpenAICompatibleModels(ctx context.Context, pType, baseURL, apiKey str
 	}
 
 	if len(models) == 0 {
-		return nil, fmt.Errorf("tidak ada model chat yang ditemukan dari /models")
+		if pType == "dahl" {
+			models = []string{"MiniMaxAI/MiniMax-M2.7", "deepseek-ai/DeepSeek-V4-Flash-0731"}
+		} else {
+			return nil, fmt.Errorf("tidak ada model chat yang ditemukan dari /models")
+		}
 	}
 
 	sort.Strings(models)

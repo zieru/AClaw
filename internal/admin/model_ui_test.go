@@ -135,3 +135,33 @@ func TestGetAllModelsForProviderDefaultFirst(t *testing.T) {
 	}
 }
 
+func TestGetAllModelsForProvider_DisabledExcluded(t *testing.T) {
+	ui, _, _ := setupTestModelUI(t)
+
+	// Provider with only enabled models passed (simulating syncProviderToManager with p.EnabledModels())
+	p := provider.NewOpenAIProviderWithKeys(
+		"dahl_provider",
+		"dahl",
+		"https://inference.dahl.global/v1",
+		[]string{"sk-test"},
+		"round-robin",
+		"MiniMaxAI/MiniMax-M2.7",
+		[]string{
+			"MiniMaxAI/MiniMax-M2.7",
+			"deepseek-ai/DeepSeek-V4-Flash-0731",
+			// zai-org/GLM-5.3-Flash is disabled and not passed
+		},
+	)
+
+	models := ui.getAllModelsForProvider(p)
+	if len(models) != 2 {
+		t.Fatalf("expected 2 enabled models, got %d: %v", len(models), models)
+	}
+
+	for _, m := range models {
+		if m == "zai-org/GLM-5.3-Flash" {
+			t.Errorf("disabled model 'zai-org/GLM-5.3-Flash' must not appear in switchmodel")
+		}
+	}
+}
+

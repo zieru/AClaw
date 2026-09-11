@@ -262,6 +262,7 @@ func (a *AdminBot) registerRoutes() {
 
 	// Wizard Type Selection Callbacks
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_9router"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "9router") })
+	a.bot.Handle(&tele.Btn{Unique: "wiz_type_dahl"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "dahl") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_openai"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "openai") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_deepseek"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "deepseek") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_groq"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "groq") })
@@ -410,6 +411,15 @@ func (a *AdminBot) registerRoutes() {
 		}
 		return a.wizard.HandleEditDeletePrompt(c, sess.EditingProviderID)
 	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_ed_models"}, func(c tele.Context) error {
+		return a.wizard.HandleEditModelsMenu(c)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_mod_allon"}, func(c tele.Context) error {
+		return a.wizard.HandleEditAllModelsState(c, true)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "wiz_mod_alloff"}, func(c tele.Context) error {
+		return a.wizard.HandleEditAllModelsState(c, false)
+	})
 
 	// Model & Combo Selection Commands
 	a.bot.Handle("/model", a.modelUI.HandleModelCommand)
@@ -430,6 +440,8 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle("/delkey", a.providerUI.HandleDelKey)
 	a.bot.Handle("/keystrategy", a.providerUI.HandleSetKeyStrategy)
 	a.bot.Handle("/setmodels", a.providerUI.HandleSetModels)
+	a.bot.Handle("/togglemodel", a.providerUI.HandleToggleModelCommand)
+	a.bot.Handle("/modelstatus", a.providerUI.HandleModelStatusCommand)
 	a.bot.Handle("/delprovider", a.providerUI.HandleDelProvider)
 
 	// Combo Commands & Wizard
@@ -462,6 +474,15 @@ func (a *AdminBot) registerRoutes() {
 	})
 	a.bot.Handle(&tele.Btn{Unique: "cwiz_back_prov"}, func(c tele.Context) error {
 		return a.comboWizard.HandleBackToProvider(c)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_pref_yes"}, func(c tele.Context) error {
+		return a.comboWizard.HandlePreferredOption(c, true)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_pref_no"}, func(c tele.Context) error {
+		return a.comboWizard.HandlePreferredOption(c, false)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "cwiz_pref_back"}, func(c tele.Context) error {
+		return a.comboWizard.HandlePreferredBack(c)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "cwiz_ed_add_target"}, func(c tele.Context) error {
 		if c.Sender() == nil {

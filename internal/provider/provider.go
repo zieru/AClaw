@@ -64,6 +64,7 @@ type StreamCallback func(chunk StreamChunk)
 // ChatRequest holds parameters for calling an LLM
 type ChatRequest struct {
 	Model           string
+	PreferredModel  string         // Optional caller-requested preferred model (used if combo target enables PreferredIfAvailable)
 	Messages        []ChatMessage
 	Tools           []tools.Tool
 	Temperature     float64
@@ -577,7 +578,42 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 			}
 
 			targetReq := req
-			targetReq.Model = target.Model
+			targetModel := target.Model
+			if target.PreferredIfAvailable {
+				pref := strings.TrimSpace(req.PreferredModel)
+				if pref != "" && !strings.HasPrefix(strings.ToLower(pref), "combo:") {
+					supportsPref := strings.EqualFold(p.DefaultModel(), pref)
+					if !supportsPref {
+						for _, mName := range p.Models() {
+							if strings.EqualFold(mName, pref) {
+								supportsPref = true
+								break
+							}
+						}
+					}
+					if supportsPref {
+						targetModel = pref
+					}
+				}
+			}
+			targetReq.Model = targetModel
+
+			// Verify if targetModel is enabled and supported on provider p
+			targetSupported := strings.EqualFold(p.DefaultModel(), targetModel)
+			if !targetSupported {
+				for _, mName := range p.Models() {
+					if strings.EqualFold(mName, targetModel) {
+						targetSupported = true
+						break
+					}
+				}
+			}
+			if !targetSupported {
+				errMsg := fmt.Sprintf("[%d/%d %s/%s]: model dinonaktifkan atau tidak didukung", idx+1, len(orderedTargets), target.ProviderID, targetModel)
+				attemptErrors = append(attemptErrors, errMsg)
+				log.Printf("[Combo:%s] Target #%d [%s/%s] model dinonaktifkan/tidak didukung", combo.Name, idx+1, target.ProviderID, targetModel)
+				continue
+			}
 
 			targetStart := time.Now()
 			resp, err := executeProviderCall(ctx, p, targetReq)

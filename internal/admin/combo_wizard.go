@@ -22,10 +22,12 @@ const (
 	StepComboEnterName
 	StepComboPickProvider
 	StepComboPickModel
+	StepComboPickPreferredOpt
 	StepComboPickStrategy
 	StepComboEditDesc
 	StepComboEditAddTargetPickProv
 	StepComboEditAddTargetPickMod
+	StepComboEditAddTargetPickPref
 )
 
 type ComboWizardSession struct {
@@ -36,6 +38,7 @@ type ComboWizardSession struct {
 	Description      string
 	Targets          []storage.ComboTarget
 	SelectedProvider *storage.ProviderRecord
+	PendingModel     string
 	Strategy         string
 	ProvPage         int
 	ModelPage        int
@@ -175,7 +178,11 @@ func (w *ComboWizard) RenderComboEditDashboard(c tele.Context, combo *storage.Mo
 		sb.WriteString("<i>(Rantai kosong - belum ada target)</i>\n")
 	} else {
 		for i, t := range combo.Targets {
-			sb.WriteString(fmt.Sprintf("  %d. <b>%s</b> ➔ <code>%s</code>\n", i+1, html.EscapeString(t.ProviderID), html.EscapeString(t.Model)))
+			prefTag := ""
+			if t.PreferredIfAvailable {
+				prefTag = " <i>(⭐ preferred if available)</i>"
+			}
+			sb.WriteString(fmt.Sprintf("  %d. <b>%s</b> ➔ <code>%s</code>%s\n", i+1, html.EscapeString(t.ProviderID), html.EscapeString(t.Model), prefTag))
 		}
 	}
 
@@ -321,6 +328,15 @@ func (w *ComboWizard) HandleTextMessage(c tele.Context) (bool, error) {
 			return true, w.applyEditAddTargetModel(c, sess, chosenModel)
 		}
 
+	case StepComboPickPreferredOpt, StepComboEditAddTargetPickPref:
+		lower := strings.ToLower(strings.TrimSpace(msgText))
+		if lower == "1" || lower == "ya" || lower == "yes" || lower == "y" || lower == "pref" || lower == "preferred" {
+			return true, w.HandlePreferredOption(c, true)
+		} else if lower == "2" || lower == "tidak" || lower == "no" || lower == "n" || lower == "kunci" || lower == "lock" {
+			return true, w.HandlePreferredOption(c, false)
+		}
+		return true, c.Reply("⚠️ Silakan pilih opsi:\n• Balas <code>1</code> atau klik <b>⭐ Gunakan Preferred if available</b>\n• Balas <code>2</code> atau klik <b>🔒 Kunci ke Model Ini</b>", tele.ModeHTML)
+
 	case StepComboEditDesc:
 		combo, err := w.db.GetCombo(sess.EditingComboName)
 		if err != nil || combo == nil {
@@ -351,11 +367,11 @@ func (w *ComboWizard) getModelsForProvider(p *storage.ProviderRecord) []string {
 	var rest []string
 
 	def := strings.TrimSpace(p.DefaultModel)
-	if def != "" {
+	if def != "" && p.IsModelEnabled(def) {
 		seen[strings.ToLower(def)] = true
 	}
 
-	for _, m := range p.Models {
+	for _, m := range p.EnabledModels() {
 		m = strings.TrimSpace(m)
 		if m != "" && !seen[strings.ToLower(m)] {
 			seen[strings.ToLower(m)] = true
@@ -366,12 +382,16 @@ func (w *ComboWizard) getModelsForProvider(p *storage.ProviderRecord) []string {
 	sort.Strings(rest)
 
 	var list []string
-	if def != "" {
+	if def != "" && p.IsModelEnabled(def) {
 		list = append(list, def)
 	}
 	list = append(list, rest...)
 	if len(list) == 0 {
-		list = []string{"default"}
+		if def != "" {
+			list = []string{def}
+		} else {
+			list = []string{"default"}
+		}
 	}
 	return list
 }
@@ -414,7 +434,11 @@ func (w *ComboWizard) promptPickProvider(c tele.Context, sess *ComboWizardSessio
 	if len(sess.Targets) > 0 {
 		sb.WriteString("📋 <b>Rantai Saat Ini:</b>\n")
 		for i, t := range sess.Targets {
-			sb.WriteString(fmt.Sprintf(" %d. <b>%s</b> ➔ <code>%s</code>\n", i+1, html.EscapeString(t.ProviderID), html.EscapeString(t.Model)))
+			prefTag := ""
+			if t.PreferredIfAvailable {
+				prefTag = " <i>(⭐ preferred if available)</i>"
+			}
+			sb.WriteString(fmt.Sprintf(" %d. <b>%s</b> ➔ <code>%s</code>%s\n", i+1, html.EscapeString(t.ProviderID), html.EscapeString(t.Model), prefTag))
 		}
 		sb.WriteString("\n")
 	}
@@ -422,7 +446,7 @@ func (w *ComboWizard) promptPickProvider(c tele.Context, sess *ComboWizardSessio
 	sb.WriteString("Pilih provider yang ingin ditambahkan ke rantai ini:\n")
 	for i, p := range pageProvs {
 		globalIdx := startIdx + i + 1
-		sb.WriteString(fmt.Sprintf("%d. 🤖 <b>%s</b> (<code>%s</code> | %d model)\n", globalIdx, html.EscapeString(p.Name), html.EscapeString(p.Type), len(p.Models)))
+		sb.WriteString(fmt.Sprintf("%d. 🤖 <b>%s</b> (<code>%s</code> | %d model aktif)\n", globalIdx, html.EscapeString(p.Name), html.EscapeString(p.Type), len(p.EnabledModels())))
 	}
 	sb.WriteString("\n💡 <i>Klik tombol di bawah atau balas chat dengan nomor/nama provider:</i>\n")
 
@@ -642,18 +666,148 @@ func (w *ComboWizard) applySelectedModel(c tele.Context, sess *ComboWizardSessio
 		selectedModel = "default"
 	}
 
+	sess.PendingModel = selectedModel
+	sess.Step = StepComboPickPreferredOpt
+	if c == nil {
+		// Headless or test environment: apply target directly
+		return w.applyTargetWithPreference(nil, sess, false)
+	}
+	return w.promptPickPreferredOption(c, sess)
+}
+
+func (w *ComboWizard) promptPickPreferredOption(c tele.Context, sess *ComboWizardSession) error {
+	if c == nil {
+		return nil
+	}
+	p := sess.SelectedProvider
+	provName := ""
+	if p != nil {
+		provName = p.Name
+	}
+	var sb strings.Builder
+	sb.WriteString("⚙️ <b>PILIHAN PREFERRED MODEL TARGET</b>\n\n")
+	sb.WriteString(fmt.Sprintf("• Provider: <b>%s</b>\n", html.EscapeString(provName)))
+	sb.WriteString(fmt.Sprintf("• Model Terpilih: <code>%s</code>\n\n", html.EscapeString(sess.PendingModel)))
+	sb.WriteString("Apakah Anda ingin mengaktifkan opsi <b>\"Gunakan preferred model if available\"</b> untuk target ini?\n\n")
+	sb.WriteString("• <b>⭐ Ya (Preferred if available):</b>\n")
+	sb.WriteString(fmt.Sprintf("  Jika user/chat meminta model tertentu dan provider <code>%s</code> mendukungnya, model tersebut yang akan dieksekusi. Jika tidak didukung atau tidak ada preferensi, otomatis fallback ke <code>%s</code>.\n\n", html.EscapeString(provName), html.EscapeString(sess.PendingModel)))
+	sb.WriteString("• <b>🔒 Kunci ke Model Ini:</b>\n")
+	sb.WriteString(fmt.Sprintf("  Target ini selalu dieksekusi menggunakan <code>%s</code> secara absolut.\n", html.EscapeString(sess.PendingModel)))
+
+	menu := &tele.ReplyMarkup{}
+	btnPrefYes := menu.Data("⭐ Gunakan Preferred if available", "cwiz_pref_yes")
+	btnPrefNo := menu.Data(fmt.Sprintf("🔒 Kunci ke %s", sess.PendingModel), "cwiz_pref_no")
+	btnBackMod := menu.Data("⬅️ Ganti Model", "cwiz_pref_back")
+	btnCancel := menu.Data("❌ Batal", "cwiz_cancel")
+
+	menu.Inline(
+		menu.Row(btnPrefYes),
+		menu.Row(btnPrefNo),
+		menu.Row(btnBackMod, btnCancel),
+	)
+
+	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
+}
+
+// HandlePreferredOption handles user choice for PreferredIfAvailable
+func (w *ComboWizard) HandlePreferredOption(c tele.Context, usePreferred bool) error {
+	if c == nil || c.Sender() == nil {
+		return nil
+	}
+	userID := c.Sender().ID
+	w.mu.RLock()
+	sess, exists := w.sessions[userID]
+	w.mu.RUnlock()
+	if !exists || sess.SelectedProvider == nil || sess.PendingModel == "" {
+		return c.Reply("⚠️ Sesi wizard telah berakhir. Ketik <code>/combowizard</code>.", tele.ModeHTML)
+	}
+
+	return w.applyTargetWithPreference(c, sess, usePreferred)
+}
+
+func (w *ComboWizard) applyTargetWithPreference(c tele.Context, sess *ComboWizardSession, usePreferred bool) error {
+	p := sess.SelectedProvider
+	if p == nil || sess.PendingModel == "" {
+		return nil
+	}
+	modelToUse := sess.PendingModel
+
+	if sess.IsEditing {
+		combo, err := w.db.GetCombo(sess.EditingComboName)
+		if err != nil || combo == nil {
+			if c != nil {
+				return c.Reply("❌ Combo tidak ditemukan.")
+			}
+			return fmt.Errorf("combo tidak ditemukan")
+		}
+
+		priority := len(combo.Targets) + 1
+		combo.Targets = append(combo.Targets, storage.ComboTarget{
+			ProviderID:           p.ID,
+			Model:                modelToUse,
+			Priority:             priority,
+			PreferredIfAvailable: usePreferred,
+		})
+
+		_ = w.db.SaveCombo(combo)
+		w.providerManager.RegisterCombo(combo)
+
+		w.mu.Lock()
+		sess.Step = StepComboNone
+		sess.SelectedProvider = nil
+		sess.PendingModel = ""
+		w.mu.Unlock()
+
+		if c != nil {
+			prefNote := "dikunci ke model ini"
+			if usePreferred {
+				prefNote = "⭐ preferred if available aktif"
+			}
+			_ = c.Reply(fmt.Sprintf("✅ Target baru (<b>%s</b> ➔ <code>%s</code> | %s) berhasil ditambahkan ke combo <b>%s</b>!",
+				html.EscapeString(p.ID), html.EscapeString(modelToUse), prefNote, html.EscapeString(combo.Name)), tele.ModeHTML)
+			return w.RenderComboEditDashboard(c, combo)
+		}
+		return nil
+	}
+
+	// New Combo creation mode
 	priority := len(sess.Targets) + 1
 	sess.Targets = append(sess.Targets, storage.ComboTarget{
-		ProviderID: p.ID,
-		Model:      selectedModel,
-		Priority:   priority,
+		ProviderID:           p.ID,
+		Model:                modelToUse,
+		Priority:             priority,
+		PreferredIfAvailable: usePreferred,
 	})
 
 	sess.SelectedProvider = nil
+	sess.PendingModel = ""
 	sess.Step = StepComboPickProvider
 	sess.ModelPage = 0
 
-	return w.promptPickProvider(c, sess, sess.ProvPage)
+	if c != nil {
+		return w.promptPickProvider(c, sess, sess.ProvPage)
+	}
+	return nil
+}
+
+// HandlePreferredBack returns to model selection from preferred option prompt
+func (w *ComboWizard) HandlePreferredBack(c tele.Context) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	w.mu.RLock()
+	sess, exists := w.sessions[c.Sender().ID]
+	w.mu.RUnlock()
+	if !exists || sess.SelectedProvider == nil {
+		return c.Reply("⚠️ Sesi wizard telah berakhir.")
+	}
+	sess.PendingModel = ""
+	if sess.IsEditing {
+		sess.Step = StepComboEditAddTargetPickMod
+		return w.promptEditAddTargetPickMod(c, sess, sess.ModelPage)
+	}
+	sess.Step = StepComboPickModel
+	return w.promptPickModel(c, sess, sess.ModelPage)
 }
 
 // HandleBackToProvider goes back to provider selection preserving targets
@@ -725,7 +879,11 @@ func (w *ComboWizard) HandleSaveCombo(c tele.Context) error {
 	sb.WriteString(fmt.Sprintf("• Strategi: <code>%s</code>\n", stratLabel))
 	sb.WriteString("• <b>Rantai Eksekusi:</b>\n")
 	for i, t := range comboRec.Targets {
-		sb.WriteString(fmt.Sprintf("   %d. Provider: <b>%s</b> ➔ Model: <code>%s</code>\n", i+1, html.EscapeString(t.ProviderID), html.EscapeString(t.Model)))
+		prefTag := ""
+		if t.PreferredIfAvailable {
+			prefTag = " <i>(⭐ preferred if available)</i>"
+		}
+		sb.WriteString(fmt.Sprintf("   %d. Provider: <b>%s</b> ➔ Model: <code>%s</code>%s\n", i+1, html.EscapeString(t.ProviderID), html.EscapeString(t.Model), prefTag))
 	}
 	sb.WriteString("\n💡 <b>Cara Menggunakan Combo Ini Sebagai Model Utama:</b>\n")
 	sb.WriteString(fmt.Sprintf("<code>/setlimit global system model combo:%s</code>\n\n", comboRec.Name))
@@ -794,7 +952,7 @@ func (w *ComboWizard) promptEditAddTargetPickProv(c tele.Context, sess *ComboWiz
 	sb.WriteString("Pilih provider untuk target baru ini:\n")
 	for i, p := range pageProvs {
 		globalIdx := startIdx + i + 1
-		sb.WriteString(fmt.Sprintf("%d. 🤖 <b>%s</b> (<code>%s</code> | %d model)\n", globalIdx, html.EscapeString(p.Name), html.EscapeString(p.Type), len(p.Models)))
+		sb.WriteString(fmt.Sprintf("%d. 🤖 <b>%s</b> (<code>%s</code> | %d model aktif)\n", globalIdx, html.EscapeString(p.Name), html.EscapeString(p.Type), len(p.EnabledModels())))
 	}
 	sb.WriteString("\n💡 <i>Klik tombol di bawah atau balas chat dengan nomor/nama provider:</i>\n")
 
@@ -1009,24 +1167,9 @@ func (w *ComboWizard) applyEditAddTargetModel(c tele.Context, sess *ComboWizardS
 		selectedModel = "default"
 	}
 
-	priority := len(combo.Targets) + 1
-	combo.Targets = append(combo.Targets, storage.ComboTarget{
-		ProviderID: p.ID,
-		Model:      selectedModel,
-		Priority:   priority,
-	})
-
-	_ = w.db.SaveCombo(combo)
-	w.providerManager.RegisterCombo(combo)
-
-	w.mu.Lock()
-	sess.Step = StepComboNone
-	sess.SelectedProvider = nil
-	w.mu.Unlock()
-
-	_ = c.Reply(fmt.Sprintf("✅ Target baru (<b>%s</b> ➔ <code>%s</code>) berhasil ditambahkan ke combo <b>%s</b>!",
-		html.EscapeString(p.ID), html.EscapeString(selectedModel), html.EscapeString(combo.Name)), tele.ModeHTML)
-	return w.RenderComboEditDashboard(c, combo)
+	sess.PendingModel = selectedModel
+	sess.Step = StepComboEditAddTargetPickPref
+	return w.promptPickPreferredOption(c, sess)
 }
 
 // HandleEditDelTargetMenu shows buttons to remove individual targets

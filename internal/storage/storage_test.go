@@ -163,3 +163,86 @@ func TestStorageAndPolicyResolver(t *testing.T) {
 		t.Fatalf("expected 5 logs remaining after rotation, got %d", countAfterRot)
 	}
 }
+
+func TestProviderModelToggle(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_toggle.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	prov := &ProviderRecord{
+		ID:           "test-prov",
+		Name:         "Test Provider",
+		Type:         "openai",
+		DefaultModel: "gpt-4o-mini",
+		Models:       []string{"gpt-4o-mini", "gpt-4o", "o3-mini", "claude-3-5-sonnet"},
+		IsActive:     true,
+	}
+
+	// 1. Initially, no disabled models, all models should be enabled
+	if len(prov.EnabledModels()) != 4 {
+		t.Fatalf("expected 4 enabled models, got %v", prov.EnabledModels())
+	}
+	if !prov.IsModelEnabled("gpt-4o") {
+		t.Fatalf("expected gpt-4o to be enabled initially")
+	}
+
+	// 2. Toggle gpt-4o -> disabled
+	enabled := prov.ToggleModel("gpt-4o")
+	if enabled {
+		t.Fatalf("expected gpt-4o to become disabled")
+	}
+	if prov.IsModelEnabled("gpt-4o") {
+		t.Fatalf("expected gpt-4o to be disabled")
+	}
+	if len(prov.EnabledModels()) != 3 {
+		t.Fatalf("expected 3 enabled models, got %v", prov.EnabledModels())
+	}
+
+	// 3. Save to database
+	if err := db.SaveProvider(prov); err != nil {
+		t.Fatalf("failed to save provider: %v", err)
+	}
+
+	// 4. Retrieve from database
+	loaded, err := db.GetProvider("test-prov")
+	if err != nil || loaded == nil {
+		t.Fatalf("failed to load provider: %v", err)
+	}
+	if loaded.IsModelEnabled("gpt-4o") {
+		t.Fatalf("expected gpt-4o to remain disabled after db load")
+	}
+	if !loaded.IsModelEnabled("gpt-4o-mini") {
+		t.Fatalf("expected gpt-4o-mini to be enabled")
+	}
+	if len(loaded.EnabledModels()) != 3 {
+		t.Fatalf("expected 3 enabled models from db, got %v", loaded.EnabledModels())
+	}
+
+	// 5. Toggle gpt-4o back on
+	enabled = loaded.ToggleModel("gpt-4o")
+	if !enabled {
+		t.Fatalf("expected gpt-4o to become enabled")
+	}
+	if !loaded.IsModelEnabled("gpt-4o") {
+		t.Fatalf("expected gpt-4o to be enabled now")
+	}
+
+	// 6. Test SetAllModelsState(false)
+	loaded.SetAllModelsState(false)
+	// should disable all except defaultModel
+	enabledList := loaded.EnabledModels()
+	if len(enabledList) != 1 || enabledList[0] != "gpt-4o-mini" {
+		t.Fatalf("expected only default model enabled, got %v", enabledList)
+	}
+
+	// 7. Test SetAllModelsState(true)
+	loaded.SetAllModelsState(true)
+	if len(loaded.EnabledModels()) != 4 {
+		t.Fatalf("expected all 4 models enabled, got %v", loaded.EnabledModels())
+	}
+}

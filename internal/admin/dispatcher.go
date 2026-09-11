@@ -171,7 +171,7 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 			return a.modelUI.HandleSetModelCallback(c, provName, modelIdx)
 		}
 	}
-	if data == "mod_noop" || data == "cwiz_noop" {
+	if data == "mod_noop" || data == "cwiz_noop" || data == "wiz_mod_noop" {
 		return c.Respond(&tele.CallbackResponse{})
 	}
 
@@ -231,6 +231,27 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 	if strings.HasPrefix(data, "wiz_ed_del_yes_") {
 		provID := strings.TrimPrefix(data, "wiz_ed_del_yes_")
 		return a.wizard.HandleEditDeleteConfirm(c, provID)
+	}
+	if strings.HasPrefix(data, "wiz_mod_p_") {
+		var page int
+		fmt.Sscanf(strings.TrimPrefix(data, "wiz_mod_p_"), "%d", &page)
+		return a.wizard.HandleEditModelsPage(c, page)
+	}
+	if strings.HasPrefix(data, "wiz_mod_tog_") {
+		var idx int
+		fmt.Sscanf(strings.TrimPrefix(data, "wiz_mod_tog_"), "%d", &idx)
+		return a.wizard.HandleEditToggleModel(c, idx)
+	}
+
+	// Combo Preferred Option Callbacks
+	if data == "cwiz_pref_yes" {
+		return a.comboWizard.HandlePreferredOption(c, true)
+	}
+	if data == "cwiz_pref_no" {
+		return a.comboWizard.HandlePreferredOption(c, false)
+	}
+	if data == "cwiz_pref_back" {
+		return a.comboWizard.HandlePreferredBack(c)
 	}
 
 	// Combo Edit Callbacks

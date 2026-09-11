@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS providers (
     api_keys TEXT NOT NULL DEFAULT '[]', -- JSON array of multiple API keys
     default_model TEXT NOT NULL DEFAULT '',
     models TEXT NOT NULL DEFAULT '[]', -- JSON array of supported model names
+    disabled_models TEXT NOT NULL DEFAULT '[]', -- JSON array of disabled model names
     strategy TEXT NOT NULL DEFAULT 'failsafe', -- failsafe, round-robin, random
     key_strategy TEXT NOT NULL DEFAULT 'round-robin', -- round-robin, random, failover
     proxy_enabled INTEGER NOT NULL DEFAULT 0,
