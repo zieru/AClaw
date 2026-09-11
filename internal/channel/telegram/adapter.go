@@ -420,7 +420,7 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 						if len(previewThink) > 3500 {
 							previewThink = previewThink[len(previewThink)-3500:]
 						}
-						text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote>%s ▌</blockquote>", html.EscapeString(previewThink))
+						text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s ▌</blockquote>", html.EscapeString(previewThink))
 					} else if curThinking != "" && curContent != "" {
 						// Thinking + content streaming
 						previewThink := curThinking
@@ -432,7 +432,7 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 							previewContent = previewContent[len(previewContent)-2000:]
 						}
 						formattedContent := tgformat.MarkdownToTelegramHTML(previewContent)
-						text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote>%s</blockquote>\n\n%s ▌", html.EscapeString(previewThink), formattedContent)
+						text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s</blockquote>\n\n%s ▌", html.EscapeString(previewThink), formattedContent)
 					} else {
 						// Only content
 						previewContent := curContent

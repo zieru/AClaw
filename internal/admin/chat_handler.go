@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"goassistant/internal/agent"
+	"goassistant/internal/provider"
 	"goassistant/internal/tgformat"
 	tele "gopkg.in/telebot.v3"
 )
@@ -30,7 +32,18 @@ func (a *AdminBot) handleDirectChatWithMedia(c tele.Context, msg string, images 
 
 	thinkingMsg, _ := a.bot.Reply(c.Message(), "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
 
-	stopUpdater, onProgressStatus := startAdminProgressiveThinking(a.bot, thinkingMsg)
+	policy := a.db.GetResolvedPolicy("admin", fmt.Sprintf("%d", c.Chat().ID))
+
+	var stopUpdater func()
+	var onProgressStatus func(string)
+	var onStreamChunk func(provider.StreamChunk)
+
+	if policy.StreamingEnabled {
+		stopUpdater, onProgressStatus, onStreamChunk = startAdminProgressiveThinking(a.bot, thinkingMsg)
+	} else {
+		stopUpdater, onProgressStatus, _ = startAdminProgressiveThinking(a.bot, thinkingMsg)
+		onStreamChunk = nil
+	}
 	defer stopUpdater()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -52,6 +65,11 @@ func (a *AdminBot) handleDirectChatWithMedia(c tele.Context, msg string, images 
 		AttachedImages: images,
 		OnProgress: func(status string) {
 			onProgressStatus(status)
+		},
+		OnStreamChunk: func(chunk provider.StreamChunk) {
+			if onStreamChunk != nil {
+				onStreamChunk(chunk)
+			}
 		},
 	})
 
@@ -286,10 +304,10 @@ func splitText(text string, maxLen int) []string {
 	return chunks
 }
 
-// startAdminProgressiveThinking periodically updates the thinking indicator with elapsed time & dynamic messages
-func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stopFunc func(), updateStatus func(string)) {
+// startAdminProgressiveThinking periodically updates the thinking indicator with elapsed time, tool progress & streaming thoughts
+func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stopFunc func(), updateStatus func(string), onChunk func(chunk provider.StreamChunk)) {
 	if targetMsg == nil {
-		return func() {}, func(string) {}
+		return func() {}, func(string) {}, func(provider.StreamChunk) {}
 	}
 
 	cancelMenu := &tele.ReplyMarkup{}
@@ -297,7 +315,10 @@ func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stop
 	cancelMenu.Inline(cancelMenu.Row(cancelBtn))
 
 	var mu sync.Mutex
+	var thinkingBuf strings.Builder
+	var contentBuf strings.Builder
 	customStatus := ""
+	lastSentText := ""
 	stopped := false
 	doneChan := make(chan struct{})
 	startTime := time.Now()
@@ -308,6 +329,17 @@ func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stop
 		mu.Unlock()
 		if targetMsg != nil {
 			_, _ = bot.Edit(targetMsg, status, tele.ModeHTML, cancelMenu)
+		}
+	}
+
+	onChunk = func(chunk provider.StreamChunk) {
+		mu.Lock()
+		defer mu.Unlock()
+		if chunk.Thinking != "" {
+			thinkingBuf.WriteString(chunk.Thinking)
+		}
+		if chunk.Content != "" {
+			contentBuf.WriteString(chunk.Content)
 		}
 	}
 
@@ -323,7 +355,7 @@ func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stop
 	}
 
 	go func() {
-		ticker := time.NewTicker(3 * time.Second)
+		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
 		for {
@@ -337,20 +369,51 @@ func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stop
 					return
 				}
 				elapsedSec := int(time.Since(startTime).Seconds())
+				curThinking := strings.TrimSpace(thinkingBuf.String())
+				curContent := strings.TrimSpace(contentBuf.String())
+				status := customStatus
+
 				var text string
-				if customStatus != "" {
-					text = fmt.Sprintf("%s <i>(%dd)</i>", customStatus, elapsedSec)
+				if curThinking != "" || curContent != "" {
+					if curContent == "" && curThinking != "" {
+						previewThink := curThinking
+						if len(previewThink) > 3500 {
+							previewThink = previewThink[len(previewThink)-3500:]
+						}
+						text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s ▌</blockquote>", html.EscapeString(previewThink))
+					} else if curThinking != "" && curContent != "" {
+						previewThink := curThinking
+						if len(previewThink) > 1500 {
+							previewThink = previewThink[:1500] + "..."
+						}
+						previewContent := curContent
+						if len(previewContent) > 2000 {
+							previewContent = previewContent[len(previewContent)-2000:]
+						}
+						formattedContent := tgformat.MarkdownToTelegramHTML(previewContent)
+						text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s</blockquote>\n\n%s ▌", html.EscapeString(previewThink), formattedContent)
+					} else {
+						previewContent := curContent
+						if len(previewContent) > 3800 {
+							previewContent = previewContent[len(previewContent)-3800:]
+						}
+						formattedContent := tgformat.MarkdownToTelegramHTML(previewContent)
+						text = fmt.Sprintf("%s ▌", formattedContent)
+					}
+				} else if status != "" {
+					text = fmt.Sprintf("%s <i>(%dd)</i>", status, elapsedSec)
 				} else {
-					text = fmt.Sprintf("💭 <i>Sedang berpikir... (%dd)</i>", elapsedSec)
+					text = fmt.Sprintf("🤔 <i>Sedang berpikir... (%dd)</i>", elapsedSec)
 				}
 				mu.Unlock()
 
-				if targetMsg != nil {
+				if targetMsg != nil && text != lastSentText {
+					lastSentText = text
 					_, _ = bot.Edit(targetMsg, text, tele.ModeHTML, cancelMenu)
 				}
 			}
 		}
 	}()
 
-	return stopFunc, updateStatus
+	return stopFunc, updateStatus, onChunk
 }

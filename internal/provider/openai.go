@@ -562,10 +562,29 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 				thinkingTokens = respBody.Usage.CompletionTokensDetails.ReasoningTokens
 			}
 
+			content := choice.Message.Content
+			thinking := choice.Message.ReasoningContent
+			if thinking == "" {
+				thinking = choice.Message.Reasoning
+			}
+			if thinking == "" {
+				thinking = choice.Message.Thought
+			}
+
+			if strings.Contains(content, "<think>") || strings.Contains(content, "<thought>") || strings.Contains(content, "<reasoning>") {
+				cleaned, extracted := ExtractThinkingTags(content)
+				if extracted != "" {
+					content = cleaned
+					if thinking == "" {
+						thinking = extracted
+					}
+				}
+			}
+
 			cost := (float64(respBody.Usage.PromptTokens)*0.00015 + float64(respBody.Usage.CompletionTokens)*0.0006) / 1000.0
 			return &ChatResponse{
-				Content:          choice.Message.Content,
-				Thinking:         choice.Message.ReasoningContent,
+				Content:          content,
+				Thinking:         thinking,
 				ToolCalls:        parsedToolCalls,
 				PromptTokens:     respBody.Usage.PromptTokens,
 				CompletionTokens: respBody.Usage.CompletionTokens,
@@ -615,11 +634,17 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 		}
 
 		if combinedContent.Len() > 0 {
+			resText := combinedContent.String()
+			var thinking string
+			if strings.Contains(resText, "<think>") || strings.Contains(resText, "<thought>") || strings.Contains(resText, "<reasoning>") {
+				resText, thinking = ExtractThinkingTags(resText)
+			}
 			if totalTokens == 0 {
-				totalTokens = combinedContent.Len() / 4
+				totalTokens = (len(resText) + len(thinking)) / 4
 			}
 			return &ChatResponse{
-				Content:      combinedContent.String(),
+				Content:      resText,
+				Thinking:     thinking,
 				TotalTokens:  totalTokens,
 				Latency:      time.Since(start),
 				Model:        actualModel,
@@ -830,8 +855,7 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 	defer httpResp.Body.Close()
 
 	// Parse SSE stream
-	var contentBuilder strings.Builder
-	var thinkingBuilder strings.Builder
+	thinkFilter := NewStreamingThinkingFilter(req.StreamCallback)
 	var toolCalls []ToolCall
 	var promptTokens, completionTokens, totalTokens, thinkingTokens int
 	actualModel := selectedModel
@@ -850,17 +874,16 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		n, readErr := httpResp.Body.Read(buf)
 		if n > 0 {
 			lineBuffer.Write(buf[:n])
-			// Process complete lines
-			text := lineBuffer.String()
-			lines := strings.Split(text, "\n")
 
-			// Keep incomplete last line in buffer
-			if !strings.HasSuffix(text, "\n") && len(lines) > 0 {
-				lineBuffer.Reset()
+			// Process complete lines
+			rawStr := lineBuffer.String()
+			lines := strings.Split(rawStr, "\n")
+
+			// Keep incomplete line in buffer
+			lineBuffer.Reset()
+			if !strings.HasSuffix(rawStr, "\n") && len(lines) > 0 {
 				lineBuffer.WriteString(lines[len(lines)-1])
 				lines = lines[:len(lines)-1]
-			} else {
-				lineBuffer.Reset()
 			}
 
 			for _, line := range lines {
@@ -885,13 +908,6 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 				if len(chunk.Choices) > 0 {
 					delta := chunk.Choices[0].Delta
 
-					if delta.Content != "" {
-						contentBuilder.WriteString(delta.Content)
-						if req.StreamCallback != nil {
-							req.StreamCallback(StreamChunk{Content: delta.Content})
-						}
-					}
-
 					thinkText := delta.ReasoningContent
 					if thinkText == "" {
 						thinkText = delta.Reasoning
@@ -900,12 +916,7 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 						thinkText = delta.Thought
 					}
 
-					if thinkText != "" {
-						thinkingBuilder.WriteString(thinkText)
-						if req.StreamCallback != nil {
-							req.StreamCallback(StreamChunk{Thinking: thinkText})
-						}
-					}
+					thinkFilter.Feed(delta.Content, thinkText)
 
 					// Accumulate tool calls from stream
 					for _, tc := range delta.ToolCalls {
@@ -939,6 +950,8 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		}
 	}
 
+	thinkFilter.Flush()
+
 	// Send done signal
 	if req.StreamCallback != nil {
 		req.StreamCallback(StreamChunk{Done: true})
@@ -948,15 +961,21 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		p.keyPool.MarkSuccess(apiKey)
 	}
 
+	finalContent := thinkFilter.Content()
+	finalThinking := thinkFilter.Thinking()
+
 	if totalTokens == 0 {
-		totalTokens = (contentBuilder.Len() + thinkingBuilder.Len()) / 4
+		totalTokens = (len(finalContent) + len(finalThinking)) / 4
+	}
+	if thinkingTokens == 0 && len(finalThinking) > 0 {
+		thinkingTokens = len(finalThinking) / 4
 	}
 
 	cost := (float64(promptTokens)*0.00015 + float64(completionTokens)*0.0006) / 1000.0
 
 	return &ChatResponse{
-		Content:          contentBuilder.String(),
-		Thinking:         thinkingBuilder.String(),
+		Content:          finalContent,
+		Thinking:         finalThinking,
 		ToolCalls:        toolCalls,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,

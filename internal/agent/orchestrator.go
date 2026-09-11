@@ -655,6 +655,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			MaxTokens:       policy.MaxTokens,
 			ThinkingEnabled: policy.ThinkingEnabled,
 			OnProgress:      req.OnProgress,
+			Stream:          policy.StreamingEnabled && req.OnStreamChunk != nil,
+			StreamCallback:  req.OnStreamChunk,
 		}
 
 		synthResp, synthErr := o.providerManager.GenerateWithFallback(ctx, provToCall, synthReq)
@@ -679,6 +681,17 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			lastModel = synthResp.Model
 			lastProviderName = synthResp.ProviderName
 			extractAttachments(finalContent)
+		}
+	}
+
+	// Strip thinking tags if any remained in finalContent
+	if strings.Contains(finalContent, "<think>") || strings.Contains(finalContent, "<thought>") || strings.Contains(finalContent, "<reasoning>") {
+		cleaned, extracted := provider.ExtractThinkingTags(finalContent)
+		if extracted != "" {
+			finalContent = cleaned
+			if finalThinking == "" {
+				finalThinking = extracted
+			}
 		}
 	}
 
@@ -745,7 +758,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				}
 				finalText = "💭 <i>" + thinkPreview + "</i>\n\n" + finalText
 			} else {
-				finalText = "💭 <b>Proses Berpikir:</b>\n<blockquote>" + strings.TrimSpace(finalThinking) + "</blockquote>\n\n" + finalText
+				finalText = "💭 <b>Proses Berpikir:</b>\n<blockquote expandable>" + strings.TrimSpace(finalThinking) + "</blockquote>\n\n" + finalText
 			}
 		case "summary":
 			// Truncate thinking to single-line preview (64 chars)

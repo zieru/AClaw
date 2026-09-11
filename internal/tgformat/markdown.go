@@ -66,8 +66,8 @@ func MarkdownToTelegramHTML(md string) string {
 		return fmt.Sprintf("___TG_INLINE_CODE_%d___", idx)
 	})
 
-	// 2b. Extract and protect pre-existing valid Telegram HTML tags (like <blockquote>, <b>, <i>, etc.)
-	validTagRegex := regexp.MustCompile(`(?i)</?(?:b|i|s|u|blockquote|expandable-blockquote|tg-spoiler|a(?:\s+href="[^"]*")?)\s*/?>`)
+	// 2b. Extract and protect pre-existing valid Telegram HTML tags (like <blockquote>, <blockquote expandable>, <b>, <i>, etc.)
+	validTagRegex := regexp.MustCompile(`(?i)</?(?:b|i|s|u|blockquote(?:\s+expandable)?|expandable-blockquote|tg-spoiler|a(?:\s+href="[^"]*")?)\s*/?>`)
 	text = validTagRegex.ReplaceAllStringFunc(text, func(match string) string {
 		idx := len(validTags)
 		validTags = append(validTags, match)
