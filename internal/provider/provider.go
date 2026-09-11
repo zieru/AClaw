@@ -638,11 +638,39 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 		}
 	}
 
+	// Parse provider prefix from req.Model if specified (e.g. "provider:dahl", "resilient:dahl", or "dahl:deepseek-ai/...")
+	if req.Model != "" && !strings.HasPrefix(strings.ToLower(req.Model), "combo:") {
+		lowerModel := strings.ToLower(req.Model)
+		if strings.HasPrefix(lowerModel, "provider:") || strings.HasPrefix(lowerModel, "resilient:") {
+			colonIdx := strings.Index(req.Model, ":")
+			provName := strings.TrimSpace(req.Model[colonIdx+1:])
+			if preferredName == "" {
+				preferredName = provName
+			}
+			req.Model = "" // Gunakan default model provider dan aktifkan auto resilient failback
+		} else if strings.Contains(req.Model, ":") {
+			parts := strings.SplitN(req.Model, ":", 2)
+			if p, ok := m.getLocked(parts[0]); ok && p != nil {
+				if preferredName == "" {
+					preferredName = parts[0]
+				}
+				req.Model = parts[1]
+			}
+		}
+	}
+
 	// 2. Build candidate provider list based on requested model and preference
 	var primaryCandidates []Provider
 	var secondaryCandidates []Provider
 
+	var prefProvider Provider
+	if preferredName != "" {
+		prefProvider, _ = m.getLocked(preferredName)
+	}
+
 	for _, p := range m.providers {
+		isPref := (prefProvider != nil && p == prefProvider) || strings.EqualFold(p.Name(), preferredName)
+
 		if req.Model != "" {
 			supportsModel := false
 			if strings.EqualFold(p.DefaultModel(), req.Model) {
@@ -656,7 +684,7 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 				}
 			}
 			if supportsModel {
-				if strings.EqualFold(p.Name(), preferredName) {
+				if isPref {
 					primaryCandidates = append([]Provider{p}, primaryCandidates...)
 				} else {
 					primaryCandidates = append(primaryCandidates, p)
@@ -665,7 +693,7 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 			}
 		}
 
-		if strings.EqualFold(p.Name(), preferredName) {
+		if isPref {
 			secondaryCandidates = append([]Provider{p}, secondaryCandidates...)
 		} else {
 			secondaryCandidates = append(secondaryCandidates, p)

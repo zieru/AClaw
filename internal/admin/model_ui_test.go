@@ -2,6 +2,7 @@ package admin
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"goassistant/internal/provider"
@@ -164,4 +165,77 @@ func TestGetAllModelsForProvider_DisabledExcluded(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatModelDesc_ProviderBindingAndResilient(t *testing.T) {
+	ui, _, pm := setupTestModelUI(t)
+
+	dahlProv := provider.NewOpenAIProviderWithKeys(
+		"dahl",
+		"dahl",
+		"https://inference.dahl.global/v1",
+		[]string{"sk-test"},
+		"round-robin",
+		"deepseek-ai/DeepSeek-V4-Flash-0731",
+		[]string{"deepseek-ai/DeepSeek-V4-Flash-0731", "MiniMaxAI/MiniMax-M2.7"},
+	)
+	pm.RegisterWithID("dahl", dahlProv, 1)
+
+	// 1. Resilient Provider format
+	resilientDesc := ui.formatModelDesc("provider:dahl")
+	if !strings.Contains(resilientDesc, "Provider Resilient") || !strings.Contains(resilientDesc, "dahl") {
+		t.Errorf("expected resilient description, got: %s", resilientDesc)
+	}
+
+	// 2. Specific Model Binding format
+	bindingDesc := ui.formatModelDesc("dahl:deepseek-ai/DeepSeek-V4-Flash-0731")
+	if !strings.Contains(bindingDesc, "deepseek-ai/DeepSeek-V4-Flash-0731") || !strings.Contains(bindingDesc, "dahl") {
+		t.Errorf("expected binding description with provider dahl, got: %s", bindingDesc)
+	}
+
+	// 3. Short desc
+	shortRes := ui.formatShortDesc("provider:dahl")
+	if !strings.Contains(shortRes, "Resilient") || !strings.Contains(shortRes, "dahl") {
+		t.Errorf("expected short resilient description, got: %s", shortRes)
+	}
+
+	shortBind := ui.formatShortDesc("dahl:deepseek-ai/DeepSeek-V4-Flash-0731")
+	if !strings.Contains(shortBind, "[dahl]") {
+		t.Errorf("expected short binding description with [dahl], got: %s", shortBind)
+	}
+}
+
+func TestSaveModelOverride_ProviderBindingAndResilient(t *testing.T) {
+	ui, db, _ := setupTestModelUI(t)
+	scope := "chat"
+	chatID := "2002"
+
+	// 1. Save provider resilient
+	msg, err := ui.saveModelOverride(scope, chatID, "provider:dahl")
+	if err != nil {
+		t.Fatalf("unexpected error saving resilient override: %v", err)
+	}
+	if !strings.Contains(msg, "Mode Resilient: dahl") {
+		t.Errorf("expected success message mentioning Mode Resilient: dahl, got: %s", msg)
+	}
+
+	pol := db.GetResolvedPolicy("admin", chatID)
+	if pol.ModelOverride != "provider:dahl" {
+		t.Errorf("expected ModelOverride 'provider:dahl', got '%s'", pol.ModelOverride)
+	}
+
+	// 2. Save specific provider binding
+	msg, err = ui.saveModelOverride(scope, chatID, "dahl:deepseek-ai/DeepSeek-V4-Flash-0731")
+	if err != nil {
+		t.Fatalf("unexpected error saving bound override: %v", err)
+	}
+	if !strings.Contains(msg, "Provider: <b>dahl</b>") {
+		t.Errorf("expected success message mentioning Provider: dahl, got: %s", msg)
+	}
+
+	pol = db.GetResolvedPolicy("admin", chatID)
+	if pol.ModelOverride != "dahl:deepseek-ai/DeepSeek-V4-Flash-0731" {
+		t.Errorf("expected ModelOverride 'dahl:deepseek-ai/DeepSeek-V4-Flash-0731', got '%s'", pol.ModelOverride)
+	}
+}
+
 

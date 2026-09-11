@@ -161,6 +161,10 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 			return c.EditOrSend(txt, kb, tele.ModeHTML)
 		}
 	}
+	if strings.HasPrefix(data, "mod_set_prov_") {
+		provName := strings.TrimPrefix(data, "mod_set_prov_")
+		return a.modelUI.HandleSetProviderResilientCallback(c, provName)
+	}
 	if strings.HasPrefix(data, "mod_set_m_") {
 		raw := strings.TrimPrefix(data, "mod_set_m_")
 		parts := strings.Split(raw, "__")

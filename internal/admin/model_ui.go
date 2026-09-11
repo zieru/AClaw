@@ -106,7 +106,62 @@ func (ui *ModelUI) formatModelDesc(modelName string) string {
 		}
 		return fmt.Sprintf("🔀 <b>Combo:</b> <code>%s</code>\n   • <i>Chain:</i> %s", html.EscapeString(combo.Name), strings.Join(targets, " ➔ "))
 	}
+
+	lower := strings.ToLower(modelName)
+	// Mode Resilient Provider: "provider:dahl" or "resilient:dahl"
+	if strings.HasPrefix(lower, "provider:") || strings.HasPrefix(lower, "resilient:") {
+		colonIdx := strings.Index(modelName, ":")
+		provPart := strings.TrimSpace(modelName[colonIdx+1:])
+		if p, ok := ui.providerManager.Get(provPart); ok && p != nil {
+			allModels := ui.getAllModelsForProvider(p)
+			var backupModels []string
+			for _, m := range allModels {
+				if !strings.EqualFold(m, p.DefaultModel()) {
+					backupModels = append(backupModels, m)
+				}
+			}
+			backupStr := "Tidak ada cadangan"
+			if len(backupModels) > 0 {
+				backupStr = fmt.Sprintf("<code>%s</code>", html.EscapeString(backupModels[0]))
+				if len(backupModels) > 1 {
+					backupStr += fmt.Sprintf(" (+%d model lainnya)", len(backupModels)-1)
+				}
+			}
+			return fmt.Sprintf("🛡️ <b>Provider Resilient:</b> <code>%s</code> (Auto Model Failback)\n   • <i>Model Utama:</i> <code>%s</code> (Default)\n   • <i>Cadangan:</i> %s",
+				html.EscapeString(p.Name()), html.EscapeString(p.DefaultModel()), backupStr)
+		}
+		return fmt.Sprintf("🛡️ <b>Provider Resilient:</b> <code>%s</code> (Auto Model Failback)", html.EscapeString(provPart))
+	}
+
+	// Specific Model Binding: "provider:model" (e.g. "dahl:deepseek-ai/DeepSeek-V4-Flash-0731")
+	if strings.Contains(modelName, ":") && !strings.HasPrefix(lower, "combo:") {
+		parts := strings.SplitN(modelName, ":", 2)
+		if p, ok := ui.providerManager.Get(parts[0]); ok && p != nil {
+			return fmt.Sprintf("🎯 <b>Custom Model:</b> <code>%s</code>\n   • <i>Provider:</i> 🤖 <b>%s</b>", html.EscapeString(parts[1]), html.EscapeString(p.Name()))
+		}
+	}
+
 	return fmt.Sprintf("🎯 <b>Custom Model:</b> <code>%s</code>", html.EscapeString(modelName))
+}
+
+func (ui *ModelUI) formatShortDesc(modelName string) string {
+	if modelName == "" {
+		return "🔄 Default Auto"
+	}
+	if combo, ok := ui.providerManager.GetCombo(modelName); ok {
+		return fmt.Sprintf("🔀 <code>%s</code> (Combo)", html.EscapeString(combo.Name))
+	}
+	lower := strings.ToLower(modelName)
+	if strings.HasPrefix(lower, "provider:") || strings.HasPrefix(lower, "resilient:") {
+		colonIdx := strings.Index(modelName, ":")
+		provPart := strings.TrimSpace(modelName[colonIdx+1:])
+		return fmt.Sprintf("🛡️ <code>%s</code> (Resilient)", html.EscapeString(provPart))
+	}
+	if strings.Contains(modelName, ":") && !strings.HasPrefix(lower, "combo:") {
+		parts := strings.SplitN(modelName, ":", 2)
+		return fmt.Sprintf("🎯 <code>%s</code> [%s]", html.EscapeString(parts[1]), html.EscapeString(parts[0]))
+	}
+	return fmt.Sprintf("🎯 <code>%s</code>", html.EscapeString(modelName))
 }
 
 // RenderModelDashboard returns HTML formatted model selector dashboard
@@ -165,13 +220,10 @@ func (ui *ModelUI) RenderModelDashboard(c tele.Context) string {
 	sb.WriteString(fmt.Sprintf("⚡ <b>Model Aktif Scope Ini:</b>\n%s\n\n", activeDesc))
 
 	sb.WriteString("📊 <b>Ringkasan Hirarki Scope Saat Ini:</b>\n")
-	globShort := "🔄 Default Auto"
-	if globOverride != "" {
-		globShort = fmt.Sprintf("<code>%s</code>", html.EscapeString(globOverride))
-	}
+	globShort := ui.formatShortDesc(globOverride)
 	chatShort := "🔄 Inherit Global"
 	if chatOverride != "" {
-		chatShort = fmt.Sprintf("🎯 <code>%s</code> (Khusus Chat Ini)", html.EscapeString(chatOverride))
+		chatShort = fmt.Sprintf("%s (Khusus Chat Ini)", ui.formatShortDesc(chatOverride))
 	}
 	sb.WriteString(fmt.Sprintf("• 🌐 <b>Global:</b> %s\n", globShort))
 	sb.WriteString(fmt.Sprintf("• 💬 <b>Chat Ini:</b> %s\n\n", chatShort))
@@ -396,9 +448,14 @@ func (ui *ModelUI) RenderProviderModels(c tele.Context, provName string, page in
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🤖 <b>DAFTAR MODEL TERSEDIA: %s</b>\n", html.EscapeString(strings.ToUpper(provName))))
 	sb.WriteString(fmt.Sprintf("Halaman <code>%d/%d</code> (Total: <code>%d model</code>)\n\n", page+1, totalPages, totalModels))
-	sb.WriteString("Pilih salah satu model di bawah untuk mengaktifkannya:\n\n")
+	sb.WriteString("🛡️ <i>Klik tombol <b>Auto Resilient</b> untuk rotasi failback otomatis saat limit (429), atau pilih salah satu model spesifik di bawah:</i>\n\n")
 
 	var rows []tele.Row
+
+	// Tombol Utama: Gunakan Provider Ini (Auto Resilient Mode)
+	btnResilient := menu.Data("🛡️ Gunakan Provider Ini (Auto Resilient)", fmt.Sprintf("mod_set_prov_%s", provName))
+	rows = append(rows, menu.Row(btnResilient))
+
 	for i, m := range pageModels {
 		globalIdx := startIdx + i + 1
 		isDef := strings.EqualFold(m, p.DefaultModel())
@@ -593,6 +650,17 @@ func (ui *ModelUI) HandleTextMessage(c tele.Context) (bool, error) {
 
 		// Try matching by exact or case-insensitive model name
 		if chosenModel == "" {
+			if msgText == "0" || strings.EqualFold(msgText, "auto") || strings.EqualFold(msgText, "resilient") {
+				ui.CancelSession(userID)
+				overrideVal := fmt.Sprintf("provider:%s", p.Name())
+				msg, err := ui.saveModelOverride(scope, chatIDStr, overrideVal)
+				if err != nil {
+					return true, c.Reply(fmt.Sprintf("❌ Gagal: %v", err))
+				}
+				_ = c.Reply(msg, tele.ModeHTML)
+				return true, c.Send(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
+			}
+
 			for _, m := range allModels {
 				if strings.EqualFold(m, msgText) {
 					chosenModel = m
@@ -603,7 +671,8 @@ func (ui *ModelUI) HandleTextMessage(c tele.Context) (bool, error) {
 
 		if chosenModel != "" {
 			ui.CancelSession(userID)
-			msg, err := ui.saveModelOverride(scope, chatIDStr, chosenModel)
+			overrideVal := fmt.Sprintf("%s:%s", p.Name(), chosenModel)
+			msg, err := ui.saveModelOverride(scope, chatIDStr, overrideVal)
 			if err != nil {
 				return true, c.Reply(fmt.Sprintf("❌ Gagal menyimpan model: %v", err))
 			}
@@ -665,21 +734,26 @@ func (ui *ModelUI) HandleModelCommand(c tele.Context) error {
 		return ui.applyModelOverride(c, scope, chatIDStr, comboName)
 	}
 
-	// 3. Provider + Model (e.g. `/model gemini gemini-2.0-flash` or `/model 9router gpt-4o`)
+	// 3. Provider + Model (e.g. `/model dahl deepseek-ai/DeepSeek-V4-Flash-0731` or `/model 9router gpt-4o`)
 	if len(args) >= 2 {
 		provName := args[0]
 		modelName := strings.TrimSpace(args[1])
-		if _, ok := ui.providerManager.Get(provName); ok {
-			return ui.applyModelOverride(c, scope, chatIDStr, modelName)
+		if strings.EqualFold(provName, "resilient") || strings.EqualFold(provName, "provider") {
+			if p, ok := ui.providerManager.Get(modelName); ok && p != nil {
+				return ui.applyModelOverride(c, scope, chatIDStr, fmt.Sprintf("provider:%s", p.Name()))
+			}
+		}
+		if p, ok := ui.providerManager.Get(provName); ok && p != nil {
+			return ui.applyModelOverride(c, scope, chatIDStr, fmt.Sprintf("%s:%s", p.Name(), modelName))
 		}
 		// If 2 args provided and args[0] didn't match provider directly, treat args[1] as the model name
 		return ui.applyModelOverride(c, scope, chatIDStr, modelName)
 	}
 
-	// 4. Single argument: check if it's a provider name without model (e.g. `/model gemini`)
-	if p, ok := ui.providerManager.Get(target); ok {
-		// If user typed provider name e.g. "/model gemini", set to its default model
-		return ui.applyModelOverride(c, scope, chatIDStr, p.DefaultModel())
+	// 4. Single argument: check if it's a provider name without model (e.g. `/model dahl` or `/model gemini`)
+	if p, ok := ui.providerManager.Get(target); ok && p != nil {
+		// Set to Provider Resilient mode (e.g. "provider:dahl")
+		return ui.applyModelOverride(c, scope, chatIDStr, fmt.Sprintf("provider:%s", p.Name()))
 	}
 
 	// 5. Direct combo name or model name (e.g. `/model smart` or `/model gemini-2.0-flash`)
@@ -716,6 +790,18 @@ func (ui *ModelUI) saveModelOverride(scope, chatIDStr, modelOverride string) (st
 
 	if combo, ok := ui.providerManager.GetCombo(modelOverride); ok {
 		return fmt.Sprintf("✅ Model untuk <b>%s</b> berhasil diubah ke Combo: <code>%s</code> (%d targets)!", scopeLabel, html.EscapeString(combo.Name), len(combo.Targets)), nil
+	}
+
+	lowerOverride := strings.ToLower(modelOverride)
+	if strings.HasPrefix(lowerOverride, "provider:") || strings.HasPrefix(lowerOverride, "resilient:") {
+		colonIdx := strings.Index(modelOverride, ":")
+		provPart := strings.TrimSpace(modelOverride[colonIdx+1:])
+		return fmt.Sprintf("✅ <b>%s</b> berhasil diubah ke <b>Mode Resilient: %s</b> (Auto Model Failback)!", scopeLabel, html.EscapeString(provPart)), nil
+	}
+
+	if strings.Contains(modelOverride, ":") && !strings.HasPrefix(lowerOverride, "combo:") {
+		parts := strings.SplitN(modelOverride, ":", 2)
+		return fmt.Sprintf("✅ Model untuk <b>%s</b> berhasil diubah ke <code>%s</code> (Provider: <b>%s</b>)!", scopeLabel, html.EscapeString(parts[1]), html.EscapeString(parts[0])), nil
 	}
 
 	return fmt.Sprintf("✅ Model untuk <b>%s</b> berhasil diubah ke model: <code>%s</code>!", scopeLabel, html.EscapeString(modelOverride)), nil
@@ -781,11 +867,35 @@ func (ui *ModelUI) HandleSetModelCallback(c tele.Context, provName string, model
 	}
 
 	chosenModel := allModels[modelIndex]
-	_, err := ui.saveModelOverride(scope, chatIDStr, chosenModel)
+	overrideVal := fmt.Sprintf("%s:%s", p.Name(), chosenModel)
+	_, err := ui.saveModelOverride(scope, chatIDStr, overrideVal)
 	if err != nil {
 		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("❌ Gagal: %v", err)})
 	} else {
-		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🎯 Model '%s' aktif!", chosenModel)})
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🎯 Model '%s' aktif (%s)!", chosenModel, p.Name())})
+	}
+	return c.EditOrSend(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
+}
+
+// HandleSetProviderResilientCallback sets entire provider in auto resilient mode
+func (ui *ModelUI) HandleSetProviderResilientCallback(c tele.Context, provName string) error {
+	userID := c.Sender().ID
+	ui.CancelSession(userID)
+	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
+	scope := ui.getScope(userID)
+
+	p, ok := ui.providerManager.Get(provName)
+	if !ok || p == nil {
+		_ = c.Respond(&tele.CallbackResponse{Text: "❌ Provider tidak ditemukan"})
+		return c.EditOrSend(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
+	}
+
+	overrideVal := fmt.Sprintf("provider:%s", p.Name())
+	_, err := ui.saveModelOverride(scope, chatIDStr, overrideVal)
+	if err != nil {
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("❌ Gagal: %v", err)})
+	} else {
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🛡️ Mode Resilient: %s aktif!", p.Name())})
 	}
 	return c.EditOrSend(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
 }

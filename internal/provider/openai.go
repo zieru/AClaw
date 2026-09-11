@@ -143,15 +143,6 @@ func isStaleModelError(statusCode int, bodyStr string) bool {
 
 func (p *OpenAIProvider) getResilientModelCandidates(requestedModel string) []string {
 	isDahl := p.providerType == "dahl" || strings.Contains(strings.ToLower(p.baseURL), "dahl.global")
-	if !isDahl {
-		if requestedModel != "" && !strings.HasPrefix(strings.ToLower(requestedModel), "combo:") {
-			return []string{requestedModel}
-		}
-		if p.defaultModel != "" {
-			return []string{p.defaultModel}
-		}
-		return []string{"gpt-4o-mini"}
-	}
 
 	var candidates []string
 	reqTrim := strings.TrimSpace(requestedModel)
@@ -162,7 +153,13 @@ func (p *OpenAIProvider) getResilientModelCandidates(requestedModel string) []st
 				break
 			}
 		}
+		// Jika model spesifik diminta dan bukan dahl (tidak ada model rotasi dahl), langsung kembalikan model tersebut
+		if !isDahl && len(candidates) > 0 {
+			return candidates
+		}
 	}
+
+	// Jika belum ada kandidat atau requestedModel kosong, prioritaskan defaultModel
 	if len(candidates) == 0 {
 		for _, m := range p.models {
 			if strings.EqualFold(m, p.defaultModel) {
@@ -171,6 +168,8 @@ func (p *OpenAIProvider) getResilientModelCandidates(requestedModel string) []st
 			}
 		}
 	}
+
+	// Masukkan seluruh sisa model aktif yang terdaftar untuk provider ini
 	for _, m := range p.models {
 		found := false
 		for _, c := range candidates {
@@ -183,11 +182,14 @@ func (p *OpenAIProvider) getResilientModelCandidates(requestedModel string) []st
 			candidates = append(candidates, m)
 		}
 	}
+
 	if len(candidates) == 0 {
 		if p.defaultModel != "" {
 			candidates = []string{p.defaultModel}
-		} else {
+		} else if isDahl {
 			candidates = []string{"MiniMaxAI/MiniMax-M2.7"}
+		} else {
+			candidates = []string{"gpt-4o-mini"}
 		}
 	}
 	return candidates
@@ -437,6 +439,13 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 					p.keyPool.MarkRateLimit(apiKey)
 				}
 				lastErr = fmt.Errorf("rate limit error (429): %s", string(bodyBytes))
+				if isDahl && modelIdx < len(candidateModels)-1 && attempt >= maxAttempts-1 {
+					if req.OnProgress != nil {
+						req.OnProgress(fmt.Sprintf("🔄 Model <code>%s</code> limit (429), beralih ke <code>%s</code>...", model, candidateModels[modelIdx+1]))
+					}
+					log.Printf("[Dahl Resilience] Model '%s' limit (429). Cycling ke model berikutnya: '%s'...", model, candidateModels[modelIdx+1])
+					break // break key loop to try next model candidate
+				}
 				continue // retry with next key
 			}
 
@@ -453,6 +462,13 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 					p.keyPool.MarkRateLimit(apiKey)
 				}
 				lastErr = p.formatHTTPError(httpResp.StatusCode, bodyBytes, apiKey)
+				if isDahl && modelIdx < len(candidateModels)-1 && attempt >= maxAttempts-1 {
+					if req.OnProgress != nil {
+						req.OnProgress(fmt.Sprintf("🔄 Model <code>%s</code> token habis (402), beralih ke <code>%s</code>...", model, candidateModels[modelIdx+1]))
+					}
+					log.Printf("[Dahl Resilience] Model '%s' token habis (402). Cycling ke model berikutnya: '%s'...", model, candidateModels[modelIdx+1])
+					break
+				}
 				continue // retry with next key
 			}
 
@@ -461,6 +477,13 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 					p.keyPool.MarkTimeout(apiKey)
 				}
 				lastErr = p.formatHTTPError(httpResp.StatusCode, bodyBytes, apiKey)
+				if isDahl && modelIdx < len(candidateModels)-1 && attempt >= maxAttempts-1 {
+					if req.OnProgress != nil {
+						req.OnProgress(fmt.Sprintf("🔄 Model <code>%s</code> overload (503), beralih ke <code>%s</code>...", model, candidateModels[modelIdx+1]))
+					}
+					log.Printf("[Dahl Resilience] Model '%s' overload (503). Cycling ke model berikutnya: '%s'...", model, candidateModels[modelIdx+1])
+					break
+				}
 				time.Sleep(600 * time.Millisecond)
 				continue
 			}
@@ -468,6 +491,9 @@ func (p *OpenAIProvider) GenerateChat(ctx context.Context, req ChatRequest) (*Ch
 			if isDahl && isStaleModelError(httpResp.StatusCode, string(bodyBytes)) {
 				lastErr = p.formatHTTPError(httpResp.StatusCode, bodyBytes, apiKey)
 				if modelIdx < len(candidateModels)-1 {
+					if req.OnProgress != nil {
+						req.OnProgress(fmt.Sprintf("🔄 Model <code>%s</code> stale (%d), beralih ke <code>%s</code>...", model, httpResp.StatusCode, candidateModels[modelIdx+1]))
+					}
 					log.Printf("[Dahl Resilience] Model '%s' gagal (stale %d). Cycling ke model berikutnya: '%s'...", model, httpResp.StatusCode, candidateModels[modelIdx+1])
 					break // break key loop to try next model candidate
 				}
@@ -695,6 +721,13 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 				bodyBytes, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				lastErr = fmt.Errorf("stream rate limit error (429): %s", string(bodyBytes))
+				if isDahl && modelIdx < len(candidateModels)-1 && attempt >= maxAttempts-1 {
+					if req.OnProgress != nil {
+						req.OnProgress(fmt.Sprintf("🔄 Model stream <code>%s</code> limit (429), beralih ke <code>%s</code>...", model, candidateModels[modelIdx+1]))
+					}
+					log.Printf("[Dahl Resilience] Model stream '%s' limit (429). Cycling ke model berikutnya: '%s'...", model, candidateModels[modelIdx+1])
+					break
+				}
 				continue
 			}
 
@@ -715,6 +748,13 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 				bodyBytes, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				lastErr = p.formatHTTPError(resp.StatusCode, bodyBytes, apiKey)
+				if isDahl && modelIdx < len(candidateModels)-1 && attempt >= maxAttempts-1 {
+					if req.OnProgress != nil {
+						req.OnProgress(fmt.Sprintf("🔄 Model stream <code>%s</code> token habis (402), beralih ke <code>%s</code>...", model, candidateModels[modelIdx+1]))
+					}
+					log.Printf("[Dahl Resilience] Model stream '%s' token habis (402). Cycling ke model berikutnya: '%s'...", model, candidateModels[modelIdx+1])
+					break
+				}
 				continue
 			}
 
@@ -725,6 +765,13 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 				bodyBytes, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				lastErr = p.formatHTTPError(resp.StatusCode, bodyBytes, apiKey)
+				if isDahl && modelIdx < len(candidateModels)-1 && attempt >= maxAttempts-1 {
+					if req.OnProgress != nil {
+						req.OnProgress(fmt.Sprintf("🔄 Model stream <code>%s</code> overload (503), beralih ke <code>%s</code>...", model, candidateModels[modelIdx+1]))
+					}
+					log.Printf("[Dahl Resilience] Model stream '%s' overload (503). Cycling ke model berikutnya: '%s'...", model, candidateModels[modelIdx+1])
+					break
+				}
 				time.Sleep(600 * time.Millisecond)
 				continue
 			}
@@ -734,6 +781,9 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 				resp.Body.Close()
 				lastErr = p.formatHTTPError(resp.StatusCode, bodyBytes, apiKey)
 				if modelIdx < len(candidateModels)-1 {
+					if req.OnProgress != nil {
+						req.OnProgress(fmt.Sprintf("🔄 Model stream <code>%s</code> stale (%d), beralih ke <code>%s</code>...", model, resp.StatusCode, candidateModels[modelIdx+1]))
+					}
 					log.Printf("[Dahl Resilience] Model stream '%s' gagal (stale %d). Cycling ke model berikutnya: '%s'...", model, resp.StatusCode, candidateModels[modelIdx+1])
 					break
 				}

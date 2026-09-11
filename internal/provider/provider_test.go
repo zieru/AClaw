@@ -478,4 +478,75 @@ func TestDahlResilientCandidateSelection(t *testing.T) {
 	}
 }
 
+func TestGenerateWithFallback_ProviderModelBindingCollision(t *testing.T) {
+	mgr := &Manager{
+		providers:     make(map[string]Provider),
+		providersByID: make(map[string]Provider),
+		combos:        make(map[string]*storage.ModelComboRecord),
+	}
+
+	modelID := "deepseek-ai/DeepSeek-V4-Flash-0731"
+
+	gonkanazMock := &mockProvider{
+		name:         "GONKANAZ",
+		pType:        "openai",
+		defaultModel: modelID,
+		models:       []string{modelID},
+	}
+	dahlMock := &mockProvider{
+		name:         "dahl",
+		pType:        "dahl",
+		defaultModel: modelID,
+		models:       []string{modelID, "MiniMaxAI/MiniMax-M2.7"},
+	}
+
+	mgr.RegisterWithID("gonkanaz", gonkanazMock, 1)
+	mgr.RegisterWithID("dahl", dahlMock, 2)
+
+	// Call with model override binding "dahl:deepseek-ai/DeepSeek-V4-Flash-0731"
+	resp, err := mgr.GenerateWithFallback(context.Background(), "", ChatRequest{
+		Model: "dahl:deepseek-ai/DeepSeek-V4-Flash-0731",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Must be routed to dahl, NOT GONKANAZ
+	if !strings.Contains(resp.Content, "response from dahl") {
+		t.Fatalf("expected response from dahl, but got: %s", resp.Content)
+	}
+	if dahlMock.calls == 0 {
+		t.Fatalf("expected dahl to be called, but calls=0")
+	}
+}
+
+func TestGenerateWithFallback_ProviderResilientMode(t *testing.T) {
+	mgr := &Manager{
+		providers:     make(map[string]Provider),
+		providersByID: make(map[string]Provider),
+		combos:        make(map[string]*storage.ModelComboRecord),
+	}
+
+	dahlMock := &mockProvider{
+		name:         "dahl",
+		pType:        "dahl",
+		defaultModel: "deepseek-ai/DeepSeek-V4-Flash-0731",
+		models:       []string{"deepseek-ai/DeepSeek-V4-Flash-0731", "MiniMaxAI/MiniMax-M2.7"},
+	}
+	mgr.RegisterWithID("dahl", dahlMock, 1)
+
+	// Call with "provider:dahl"
+	resp, err := mgr.GenerateWithFallback(context.Background(), "", ChatRequest{
+		Model: "provider:dahl",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(resp.Content, "response from dahl") {
+		t.Fatalf("expected response from dahl, but got: %s", resp.Content)
+	}
+}
+
+
 

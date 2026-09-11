@@ -152,8 +152,35 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 
 	// 3. Resolve Active Provider & Model Early
 	activeProvName := req.PreferredProv
+	activeModelName := policy.ModelOverride
 	var activeProv provider.Provider
-	if activeProvName != "" {
+
+	// Parse provider binding or resilient provider mode from ModelOverride
+	if policy.ModelOverride != "" && !strings.HasPrefix(strings.ToLower(policy.ModelOverride), "combo:") {
+		lowerOverride := strings.ToLower(policy.ModelOverride)
+		if strings.HasPrefix(lowerOverride, "provider:") || strings.HasPrefix(lowerOverride, "resilient:") {
+			colonIdx := strings.Index(policy.ModelOverride, ":")
+			provPart := strings.TrimSpace(policy.ModelOverride[colonIdx+1:])
+			if p, ok := o.providerManager.Get(provPart); ok && p != nil {
+				if activeProvName == "" {
+					activeProvName = p.Name()
+				}
+				activeProv = p
+				activeModelName = p.DefaultModel()
+			}
+		} else if strings.Contains(policy.ModelOverride, ":") {
+			parts := strings.SplitN(policy.ModelOverride, ":", 2)
+			if p, ok := o.providerManager.Get(parts[0]); ok && p != nil {
+				if activeProvName == "" {
+					activeProvName = p.Name()
+				}
+				activeProv = p
+				activeModelName = parts[1]
+			}
+		}
+	}
+
+	if activeProvName != "" && activeProv == nil {
 		activeProv, _ = o.providerManager.Get(activeProvName)
 	}
 	if activeProv == nil {
@@ -164,9 +191,23 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		}
 	}
 
-	activeModelName := policy.ModelOverride
 	if activeModelName == "" && activeProv != nil {
 		activeModelName = activeProv.DefaultModel()
+	}
+
+	provToCall := req.PreferredProv
+	if provToCall == "" {
+		provToCall = activeProvName
+	}
+	modelToUse := policy.ModelOverride
+	if strings.HasPrefix(strings.ToLower(policy.ModelOverride), "provider:") ||
+		strings.HasPrefix(strings.ToLower(policy.ModelOverride), "resilient:") {
+		modelToUse = ""
+	} else if strings.Contains(policy.ModelOverride, ":") && !strings.HasPrefix(strings.ToLower(policy.ModelOverride), "combo:") {
+		parts := strings.SplitN(policy.ModelOverride, ":", 2)
+		if _, ok := o.providerManager.Get(parts[0]); ok {
+			modelToUse = parts[1]
+		}
 	}
 
 	// 4. Exact Response Cache Check (0 Token, Instant Delivery)
@@ -298,7 +339,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 
 		isStreaming := policy.StreamingEnabled && req.OnStreamChunk != nil
 		chatReq := provider.ChatRequest{
-			Model:           policy.ModelOverride,
+			Model:           modelToUse,
 			PreferredModel:  req.PreferredModel,
 			Messages:        compressedMsgs,
 			Tools:           allowedTools,
@@ -313,7 +354,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 			chatReq.StreamCallback = nil
 		}
 
-		resp, err := o.providerManager.GenerateWithFallback(ctx, req.PreferredProv, chatReq)
+		resp, err := o.providerManager.GenerateWithFallback(ctx, provToCall, chatReq)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -353,7 +394,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 				totalTokensSaved += retrySaverReport.TokensSaved
 
 				retryChatReq := provider.ChatRequest{
-					Model:          policy.ModelOverride,
+					Model:          modelToUse,
 					PreferredModel: req.PreferredModel,
 					Messages:       retryCompressedMsgs,
 					Tools:          allowedTools,
@@ -365,7 +406,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 				// Fresh 2-minute context if original ctx was timed out
 				retryCtx, cancelRetry := context.WithTimeout(context.Background(),
 					time.Duration(config.Get().Timeouts.RetrySeconds)*time.Second)
-				resp, err = o.providerManager.GenerateWithFallback(retryCtx, req.PreferredProv, retryChatReq)
+				resp, err = o.providerManager.GenerateWithFallback(retryCtx, provToCall, retryChatReq)
 				cancelRetry()
 			} else if ctx.Err() == nil {
 				// Auto-retry once for transient provider/network glitches before failing
@@ -379,7 +420,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 				}
 				retryCtx, cancelRetry := context.WithTimeout(context.Background(),
 					time.Duration(config.Get().Timeouts.RetrySeconds)*time.Second)
-				resp, err = o.providerManager.GenerateWithFallback(retryCtx, req.PreferredProv, chatReq)
+				resp, err = o.providerManager.GenerateWithFallback(retryCtx, provToCall, chatReq)
 				cancelRetry()
 			}
 
@@ -395,8 +436,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 					ChatID:             req.ChatID,
 					UserID:             req.UserID,
 					UserName:           req.UserName,
-					Provider:           req.PreferredProv,
-					Model:              policy.ModelOverride,
+					Provider:           provToCall,
+					Model:              modelToUse,
 					TokensSaved:        totalTokensSaved,
 					ThinkingTokens:     totalThinkingTokens,
 					NumberOfTries:      totalTries,
@@ -523,7 +564,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		totalTokensSaved += synthSaverReport.TokensSaved
 
 		synthReq := provider.ChatRequest{
-			Model:           policy.ModelOverride,
+			Model:           modelToUse,
 			PreferredModel:  req.PreferredModel,
 			Messages:        synthCompressedMsgs,
 			Tools:           nil, // Paksa hasil berupa teks (tanpa pemanggilan tool lagi)
@@ -533,7 +574,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 			OnProgress:      req.OnProgress,
 		}
 
-		synthResp, synthErr := o.providerManager.GenerateWithFallback(ctx, req.PreferredProv, synthReq)
+		synthResp, synthErr := o.providerManager.GenerateWithFallback(ctx, provToCall, synthReq)
 		if synthErr == nil && synthResp != nil {
 			if strings.TrimSpace(synthResp.Content) != "" {
 				finalContent = synthResp.Content
