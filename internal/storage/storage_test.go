@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -346,4 +347,103 @@ func TestMultiTopicChatSessions(t *testing.T) {
 		t.Fatalf("expected fallback to s2 after deleting s1, got: %v, %+v", err, nextActive)
 	}
 }
+
+func TestLegacyMigration_NoColumnIsActive(t *testing.T) {
+	tempDir := t.TempDir()
+	legacyDbPath := filepath.Join(tempDir, "legacy_no_is_active.db")
+
+	// 1. Manually create a legacy SQLite database with the old schema (without is_active, with UNIQUE(channel_id, chat_id))
+	rawDB, err := sql.Open("sqlite", legacyDbPath)
+	if err != nil {
+		t.Fatalf("failed to open raw db: %v", err)
+	}
+
+	legacySchema := `
+	CREATE TABLE chat_sessions (
+		id TEXT PRIMARY KEY,
+		channel_id TEXT NOT NULL,
+		chat_id TEXT NOT NULL,
+		user_id TEXT NOT NULL,
+		title TEXT NOT NULL DEFAULT '',
+		summary TEXT NOT NULL DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(channel_id, chat_id)
+	);
+	CREATE TABLE chat_messages (
+		id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		role TEXT NOT NULL,
+		content TEXT NOT NULL,
+		tokens INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	INSERT INTO chat_sessions (id, channel_id, chat_id, user_id, title, summary)
+	VALUES ('sess_old_1', 'telegram', 'chat_old_999', 'user_1', 'Old Session', 'Summary old');
+	INSERT INTO chat_messages (id, session_id, role, content, tokens)
+	VALUES ('msg_old_1', 'sess_old_1', 'user', 'hello legacy world', 10);
+	`
+	if _, err := rawDB.Exec(legacySchema); err != nil {
+		t.Fatalf("failed to populate legacy db: %v", err)
+	}
+	_ = rawDB.Close()
+
+	// 2. Now open with storage.Open which must run migrations cleanly without crashing
+	migratedDB, err := Open(legacyDbPath)
+	if err != nil {
+		t.Fatalf("Open failed on legacy database: %v", err)
+	}
+	defer migratedDB.Close()
+
+	// 3. Verify old session still exists and has is_active = 1
+	sess, err := migratedDB.GetSessionByID("sess_old_1")
+	if err != nil || sess == nil {
+		t.Fatalf("expected to find old session, got err: %v", err)
+	}
+	if sess.Title != "Old Session" || !sess.IsActive {
+		t.Fatalf("expected old session intact and active, got: %+v", sess)
+	}
+
+	// 4. Verify old message is intact
+	msgs, err := migratedDB.GetRecentMessages("sess_old_1", 10)
+	if err != nil || len(msgs) != 1 || msgs[0].Content != "hello legacy world" {
+		t.Fatalf("expected old message intact, got: %v, %+v", err, msgs)
+	}
+
+	// 5. Verify we can now add a second session in the same (channel_id, chat_id) without UNIQUE constraint violation
+	s2, err := migratedDB.CreateChatSession("telegram", "chat_old_999", "user_1", "Second Session", true)
+	if err != nil {
+		t.Fatalf("failed to create second session on migrated db: %v", err)
+	}
+	if !s2.IsActive {
+		t.Fatalf("expected s2 to be active")
+	}
+
+	// 6. Verify listing sessions returns both
+	allSessions, err := migratedDB.ListChatSessions("telegram", "chat_old_999")
+	if err != nil || len(allSessions) != 2 {
+		t.Fatalf("expected 2 sessions, got: %d (err: %v)", len(allSessions), err)
+	}
+}
+
+func TestOpenActualDataDBIfExists(t *testing.T) {
+	dbPath := filepath.Join("..", "..", "data", "goassistant.db")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		t.Skip("data/goassistant.db not present, skipping")
+	}
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed on real data/goassistant.db: %v", err)
+	}
+	defer db.Close()
+
+	// Verify we can query chat_sessions
+	sessions, err := db.ListChatSessions("system", "default")
+	if err != nil {
+		t.Fatalf("failed to query chat_sessions: %v", err)
+	}
+	_ = sessions
+}
+
+
 

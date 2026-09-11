@@ -51,9 +51,9 @@ func Open(dbPath string) (*DB, error) {
 	var tableSQL string
 	_ = db.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='chat_sessions'").Scan(&tableSQL)
 	if strings.Contains(tableSQL, "UNIQUE(channel_id, chat_id)") || (tableSQL != "" && !strings.Contains(tableSQL, "is_active")) {
-		migrationSQL := `
-		PRAGMA foreign_keys = OFF;
-		CREATE TABLE IF NOT EXISTS chat_sessions_v2 (
+		_, _ = db.Exec("PRAGMA foreign_keys = OFF")
+		_, _ = db.Exec("DROP TABLE IF EXISTS chat_sessions_v2")
+		_, err := db.Exec(`CREATE TABLE chat_sessions_v2 (
 			id TEXT PRIMARY KEY,
 			channel_id TEXT NOT NULL,
 			chat_id TEXT NOT NULL,
@@ -63,15 +63,19 @@ func Open(dbPath string) (*DB, error) {
 			is_active INTEGER NOT NULL DEFAULT 1,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);
-		INSERT OR IGNORE INTO chat_sessions_v2 (id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at)
-			SELECT id, channel_id, chat_id, user_id, title, summary, 1, created_at, updated_at FROM chat_sessions;
-		DROP TABLE chat_sessions;
-		ALTER TABLE chat_sessions_v2 RENAME TO chat_sessions;
-		CREATE INDEX IF NOT EXISTS idx_chat_sessions_lookup ON chat_sessions(channel_id, chat_id, is_active, updated_at);
-		PRAGMA foreign_keys = ON;
-		`
-		_, _ = db.Exec(migrationSQL)
+		)`)
+		if err == nil {
+			if strings.Contains(tableSQL, "is_active") {
+				_, _ = db.Exec(`INSERT OR IGNORE INTO chat_sessions_v2 (id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at)
+					SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions`)
+			} else {
+				_, _ = db.Exec(`INSERT OR IGNORE INTO chat_sessions_v2 (id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at)
+					SELECT id, channel_id, chat_id, user_id, title, summary, 1, created_at, updated_at FROM chat_sessions`)
+			}
+			_, _ = db.Exec("DROP TABLE chat_sessions")
+			_, _ = db.Exec("ALTER TABLE chat_sessions_v2 RENAME TO chat_sessions")
+		}
+		_, _ = db.Exec("PRAGMA foreign_keys = ON")
 	}
 	_, _ = db.Exec("ALTER TABLE chat_sessions ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_chat_sessions_lookup ON chat_sessions(channel_id, chat_id, is_active, updated_at)")
