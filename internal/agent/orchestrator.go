@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -113,8 +114,106 @@ func (o *Orchestrator) GetLastPrompt(channelID, chatID, userID string) string {
 }
 
 // ProcessMessage handles the complete pipeline of governance, context building, tool execution, and logging
-func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*AgentResponse, error) {
+func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (resp *AgentResponse, err error) {
 	start := time.Now()
+
+	var allToolsCalled []string
+	var messages []provider.ChatMessage
+	var sysPrompt string
+	var totalPromptTokens int
+	var totalCompletionTokens int
+	var totalThinkingTokens int
+	var totalTokensUsed int
+	var totalTokensSaved int
+	var totalTries int
+	var totalCostUSD float64
+	var lastModel string
+	var lastProviderName string
+
+	var provToCall string
+	var modelToUse string
+	var activeProvName string
+	var activeModelName string
+
+	defer func() {
+		if err != nil {
+			latency := time.Since(start)
+			errStatus := "error"
+			errLower := strings.ToLower(err.Error())
+			if ctx.Err() == context.DeadlineExceeded || strings.Contains(errLower, "deadline") || strings.Contains(errLower, "timeout") {
+				errStatus = "timeout"
+			} else if ctx.Err() == context.Canceled || strings.Contains(errLower, "canceled") {
+				errStatus = "canceled"
+			}
+
+			logProv := provToCall
+			if logProv == "" {
+				logProv = lastProviderName
+			}
+			if logProv == "" {
+				logProv = activeProvName
+			}
+			if logProv == "" && o.providerManager != nil {
+				allP := o.providerManager.ListAll()
+				if len(allP) > 0 {
+					logProv = allP[0].Name()
+				}
+			}
+
+			logModel := modelToUse
+			if logModel == "" {
+				logModel = lastModel
+			}
+			if logModel == "" {
+				logModel = activeModelName
+			}
+			if logModel == "" && logProv != "" && o.providerManager != nil {
+				if p, ok := o.providerManager.Get(logProv); ok && p != nil {
+					logModel = p.DefaultModel()
+				}
+			}
+
+			log.Printf("⚠️ [Orchestrator] Request gagal/timeout (Status: %s, User: %s, Chat: %s, Latensi: %v): %v",
+				errStatus, req.UserName, req.ChatID, latency, err)
+
+			var toolsJSON []byte
+			if len(allToolsCalled) > 0 {
+				toolsJSON, _ = json.Marshal(allToolsCalled)
+			}
+			var fullPayloadJSON []byte
+			if len(messages) > 0 {
+				fullPayloadJSON, _ = json.Marshal(messages)
+			}
+
+			if totalTries <= 0 {
+				totalTries = 1
+			}
+
+			_ = o.db.InsertAuditLog(&storage.AuditLogRecord{
+				ChannelType:        req.ChannelType,
+				ChannelID:          req.ChannelID,
+				ChatID:             req.ChatID,
+				UserID:             req.UserID,
+				UserName:           req.UserName,
+				Provider:           logProv,
+				Model:              logModel,
+				PromptTokens:       totalPromptTokens,
+				CompletionTokens:   totalCompletionTokens,
+				ThinkingTokens:     totalThinkingTokens,
+				TotalTokens:        totalTokensUsed,
+				TokensSaved:        totalTokensSaved,
+				NumberOfTries:      totalTries,
+				LatencyMs:          int(latency.Milliseconds()),
+				CostUSD:            totalCostUSD,
+				ToolsCalled:        string(toolsJSON),
+				ClientRequest:      req.UserPrompt,
+				SystemPrompt:       sysPrompt,
+				FullRequestPayload: string(fullPayloadJSON),
+				Status:             errStatus,
+				ErrorMessage:       err.Error(),
+			})
+		}
+	}()
 
 	// Track last user prompt for quick retry
 	if o.sessionManager != nil && strings.TrimSpace(req.UserPrompt) != "" {
@@ -151,8 +250,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	}
 
 	// 3. Resolve Active Provider & Model Early
-	activeProvName := req.PreferredProv
-	activeModelName := policy.ModelOverride
+	activeProvName = req.PreferredProv
+	activeModelName = policy.ModelOverride
 	var activeProv provider.Provider
 
 	// Parse provider binding or resilient provider mode from ModelOverride
@@ -195,11 +294,11 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		activeModelName = activeProv.DefaultModel()
 	}
 
-	provToCall := req.PreferredProv
+	provToCall = req.PreferredProv
 	if provToCall == "" {
 		provToCall = activeProvName
 	}
-	modelToUse := policy.ModelOverride
+	modelToUse = policy.ModelOverride
 	if strings.HasPrefix(strings.ToLower(policy.ModelOverride), "provider:") ||
 		strings.HasPrefix(strings.ToLower(policy.ModelOverride), "resilient:") {
 		modelToUse = ""
@@ -255,7 +354,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	// 7. Build Memory & System Prompt
 	memContext, _ := o.memoryManager.GetContextMemory(req.ChannelID, req.UserID)
 
-	sysPrompt, err := o.promptBuilder.BuildSystemPrompt(PromptContext{
+	sysPrompt, err = o.promptBuilder.BuildSystemPrompt(PromptContext{
 		ChannelID:       req.ChannelID,
 		AgentRole:       req.PreferredRole,
 		ChannelType:     req.ChannelType,
@@ -275,11 +374,12 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	}
 
 	// 8. Prepare Messages for LLM
-	var messages []provider.ChatMessage
-	messages = append(messages, provider.ChatMessage{
-		Role:    provider.RoleSystem,
-		Content: sysPrompt,
-	})
+	messages = []provider.ChatMessage{
+		{
+			Role:    provider.RoleSystem,
+			Content: sysPrompt,
+		},
+	}
 	messages = append(messages, history...)
 	messages = append(messages, provider.ChatMessage{
 		Role:    provider.RoleUser,
@@ -290,17 +390,6 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	// 9. Execute with Tool Loop (up to 5 turns)
 	var finalContent string
 	var finalThinking string
-	var allToolsCalled []string
-	var totalPromptTokens int
-	var totalCompletionTokens int
-	var totalThinkingTokens int
-	var totalTokensUsed int
-	var totalTokensSaved int
-	var totalTries int
-	var totalCostUSD float64
-	var lastModel string
-	var lastProviderName string
-
 	var mediaFiles []MediaAttachment
 
 	extractAttachments := func(s string) {
@@ -354,13 +443,15 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 			chatReq.StreamCallback = nil
 		}
 
-		resp, err := o.providerManager.GenerateWithFallback(ctx, provToCall, chatReq)
-		if err != nil {
+		var genResp *provider.ChatResponse
+		var genErr error
+		genResp, genErr = o.providerManager.GenerateWithFallback(ctx, provToCall, chatReq)
+		if genErr != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			// Check if error is timeout, context length exceeded, or network issue with long context
-			errStr := strings.ToLower(err.Error())
+			errStr := strings.ToLower(genErr.Error())
 			isContextOrTimeout := strings.Contains(errStr, "context deadline exceeded") ||
 				strings.Contains(errStr, "timeout") ||
 				strings.Contains(errStr, "context_length_exceeded") ||
@@ -406,7 +497,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 				// Fresh 2-minute context if original ctx was timed out
 				retryCtx, cancelRetry := context.WithTimeout(context.Background(),
 					time.Duration(config.Get().Timeouts.RetrySeconds)*time.Second)
-				resp, err = o.providerManager.GenerateWithFallback(retryCtx, provToCall, retryChatReq)
+				genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, retryChatReq)
 				cancelRetry()
 			} else if ctx.Err() == nil {
 				// Auto-retry once for transient provider/network glitches before failing
@@ -420,37 +511,16 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 				}
 				retryCtx, cancelRetry := context.WithTimeout(context.Background(),
 					time.Duration(config.Get().Timeouts.RetrySeconds)*time.Second)
-				resp, err = o.providerManager.GenerateWithFallback(retryCtx, provToCall, chatReq)
+				genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, chatReq)
 				cancelRetry()
 			}
 
-			if err != nil {
-				if totalTries <= 0 {
-					totalTries = 1
-				}
-				// Log failure to audit
-				fullPayloadJSON, _ := json.Marshal(compressedMsgs)
-				_ = o.db.InsertAuditLog(&storage.AuditLogRecord{
-					ChannelType:        req.ChannelType,
-					ChannelID:          req.ChannelID,
-					ChatID:             req.ChatID,
-					UserID:             req.UserID,
-					UserName:           req.UserName,
-					Provider:           provToCall,
-					Model:              modelToUse,
-					TokensSaved:        totalTokensSaved,
-					ThinkingTokens:     totalThinkingTokens,
-					NumberOfTries:      totalTries,
-					LatencyMs:          int(time.Since(start).Milliseconds()),
-					ClientRequest:      req.UserPrompt,
-					SystemPrompt:       sysPrompt,
-					FullRequestPayload: string(fullPayloadJSON),
-					Status:             "error",
-					ErrorMessage:       err.Error(),
-				})
-				return nil, err
+			if genErr != nil {
+				return nil, genErr
 			}
 		}
+
+		resp := genResp
 
 		if resp != nil {
 			if resp.Tries > 0 {
@@ -518,6 +588,9 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		messages = append(messages, assistantMsg)
 
 		for _, tc := range resp.ToolCalls {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			allToolsCalled = append(allToolsCalled, tc.Name)
 			if req.OnProgress != nil {
 				req.OnProgress(fmt.Sprintf("🔍 <i>Sedang menjalankan tool: <b>%s</b>...</i>", tc.Name))
@@ -540,6 +613,10 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 				Content:    compressedToolOut,
 			}
 			messages = append(messages, toolMsg)
+
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 		}
 
 		if req.OnProgress != nil && len(resp.ToolCalls) > 0 {
@@ -550,6 +627,9 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 	// Jika loop tool selesai tapi teks respon masih kosong (misal model hanya menjalankan tools beruntun),
 	// lakukan final synthesis call tanpa tools agar model merumuskan jawaban lengkap
 	if strings.TrimSpace(finalContent) == "" {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if req.OnProgress != nil {
 			req.OnProgress("✍️ <i>Menyusun kesimpulan & analisis akhir...</i>")
 		}
@@ -575,6 +655,9 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (*Ag
 		}
 
 		synthResp, synthErr := o.providerManager.GenerateWithFallback(ctx, provToCall, synthReq)
+		if synthErr != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if synthErr == nil && synthResp != nil {
 			if strings.TrimSpace(synthResp.Content) != "" {
 				finalContent = synthResp.Content

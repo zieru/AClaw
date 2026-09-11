@@ -286,6 +286,8 @@ func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPr
 	stopUpdater()
 
 	if err != nil {
+		log.Printf("⚠️ [Telegram Bot] Request gagal/timeout (Chat: %d, User: %s, Prompt: %q): %v",
+			c.Chat().ID, c.Sender().Username, userPrompt, err)
 		if ctx.Err() == context.Canceled {
 			text := "🛑 <b>PROSES DIBATALKAN</b>\n\nRespon AI berhasil dihentikan atas permintaan pengguna."
 			if thinkingMsg != nil {

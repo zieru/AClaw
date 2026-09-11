@@ -1,10 +1,17 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"goassistant/internal/memory"
+	"goassistant/internal/provider"
+	"goassistant/internal/storage"
+	"goassistant/internal/tools"
 )
 
 func TestMDLoaderAndPromptBuilder(t *testing.T) {
@@ -231,5 +238,95 @@ func TestMultiChannelMDLoader(t *testing.T) {
 		t.Errorf("expected support channel to fallback to global after reset, got:\n%s", promptSupportAfterReset)
 	}
 }
+
+type mockTimeoutProvider struct{}
+
+func (m *mockTimeoutProvider) Name() string                     { return "mock_timeout_prov" }
+func (m *mockTimeoutProvider) Type() string                     { return "mock" }
+func (m *mockTimeoutProvider) DefaultModel() string             { return "mock-model" }
+func (m *mockTimeoutProvider) Models() []string                 { return []string{"mock-model"} }
+func (m *mockTimeoutProvider) SetHTTPClient(client interface{}) {}
+func (m *mockTimeoutProvider) GenerateChat(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	return nil, context.DeadlineExceeded
+}
+
+func TestProcessMessage_TimeoutAuditLog(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_timeout.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+	defer db.Close()
+
+	sm := memory.NewSessionManager(db)
+	mm := memory.NewManager(db)
+	loader := NewMDLoader(tempDir)
+	pb := NewPromptBuilder(loader)
+	tr := tools.GetRegistry()
+
+	pm := provider.GetManager()
+	mockP := &mockTimeoutProvider{}
+	pm.Register(mockP, 1)
+
+	orch := NewOrchestrator(db, sm, mm, pb, tr, pm)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	userPrompt := "bisa cek log onedrive 50 trakhir?"
+	resp, err := orch.ProcessMessage(ctx, UserRequest{
+		ChannelType:   "telegram",
+		ChannelID:     "tg_test_chan",
+		ChatID:        "chat_123",
+		UserID:        "user_456",
+		UserName:      "Ahmad Nazirul",
+		UserPrompt:    userPrompt,
+		PreferredProv: "mock_timeout_prov",
+	})
+
+	if err == nil {
+		t.Fatalf("expected error from timed out ProcessMessage, got nil")
+	}
+	if resp != nil {
+		t.Fatalf("expected nil response on timeout, got %+v", resp)
+	}
+
+	// Verify that the timeout error formatting is polite
+	friendly := FormatUserFriendlyError(err)
+	if !strings.Contains(friendly, "Waktu Tunggu Habis (Timeout)") {
+		t.Errorf("expected friendly timeout message, got: %s", friendly)
+	}
+
+	// Verify that audit log was inserted into DB
+	logs, err := db.GetRecentAuditLogs(10)
+	if err != nil {
+		t.Fatalf("failed to get audit logs: %v", err)
+	}
+	if len(logs) == 0 {
+		t.Fatalf("expected at least 1 audit log for timed out request, got 0")
+	}
+
+	found := false
+	for _, l := range logs {
+		if l.ClientRequest == userPrompt {
+			found = true
+			if l.Status != "timeout" {
+				t.Errorf("expected status 'timeout', got '%s'", l.Status)
+			}
+			if l.UserName != "Ahmad Nazirul" {
+				t.Errorf("expected UserName 'Ahmad Nazirul', got '%s'", l.UserName)
+			}
+			if !strings.Contains(strings.ToLower(l.ErrorMessage), "deadline") {
+				t.Errorf("expected error message to mention deadline, got '%s'", l.ErrorMessage)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("audit log for prompt %q was not found in DB", userPrompt)
+	}
+}
+
 
 

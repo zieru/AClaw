@@ -633,6 +633,8 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 		})
 
 		if err != nil {
+			log.Printf("⚠️ [WhatsApp] Request gagal/timeout (Chat: %s, User: %s, Prompt: %q): %v",
+				chatID, senderName, cleanText, err)
 			if ctx.Err() == context.Canceled {
 				return
 			}

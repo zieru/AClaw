@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,8 @@ func (a *AdminBot) handleDirectChatWithMedia(c tele.Context, msg string, images 
 	stopUpdater()
 
 	if err != nil {
+		log.Printf("⚠️ [Telegram Admin PM] Request gagal/timeout (User: %s, Prompt: %q): %v",
+			c.Sender().Username, msg, err)
 		if ctx.Err() == context.Canceled {
 			text := "🛑 <b>PROSES DIBATALKAN</b>\n\nRespon AI berhasil dihentikan atas permintaan pengguna."
 			if thinkingMsg != nil {
