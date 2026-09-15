@@ -38,6 +38,20 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle("/stop", a.handleStop)
 	a.bot.Handle("/cancel", a.handleStop)
 
+	// Web Admin Commands
+	a.bot.Handle("/webadmin", func(c tele.Context) error {
+		if a.webAdminUI != nil {
+			return a.webAdminUI.HandleWebAdminDashboard(c)
+		}
+		return c.Send("⚠️ Layanan Web Admin belum diaktifkan.", tele.ModeHTML)
+	})
+	a.bot.Handle("/setwebport", func(c tele.Context) error {
+		if a.webAdminUI != nil {
+			return a.webAdminUI.HandleSetPortCommand(c)
+		}
+		return c.Send("⚠️ Layanan Web Admin belum diaktifkan.", tele.ModeHTML)
+	})
+
 	// Topic / Multi-Chat Commands
 	a.bot.Handle("/topic", a.topicUI.HandleTopicDashboard)
 	a.bot.Handle("/topics", a.topicUI.HandleTopicDashboard)
@@ -50,6 +64,24 @@ func (a *AdminBot) registerRoutes() {
 
 	// Main Menu Inline Callbacks
 	a.bot.Handle(&tele.Btn{Unique: "menu_main"}, a.handleMenu)
+	a.bot.Handle(&tele.Btn{Unique: "menu_webadmin"}, func(c tele.Context) error {
+		if a.webAdminUI != nil {
+			return a.webAdminUI.HandleWebAdminDashboard(c)
+		}
+		return c.Send("⚠️ Layanan Web Admin belum diaktifkan.", tele.ModeHTML)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "btn_webadmin_setport"}, func(c tele.Context) error {
+		if a.webAdminUI != nil {
+			return a.webAdminUI.HandleSetPortCallback(c)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "btn_webadmin_restart"}, func(c tele.Context) error {
+		if a.webAdminUI != nil {
+			return a.webAdminUI.HandleRestartCallback(c)
+		}
+		return nil
+	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_topic"}, a.topicUI.HandleTopicDashboard)
 	a.bot.Handle(&tele.Btn{Unique: "menu_status"}, a.handleStatus)
 	a.bot.Handle(&tele.Btn{Unique: "btn_refresh_status"}, func(c tele.Context) error {

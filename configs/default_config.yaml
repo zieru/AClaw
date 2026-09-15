@@ -54,6 +54,13 @@ http_server:
   read_timeout_seconds: 15
   write_timeout_seconds: 45
 
+# GoAssistant Web Admin Configuration (Khusus Administrator)
+web_admin:
+  enabled: true              # Aktifkan Web Admin dashboard & web chat
+  port: 12111                # Port Web Admin (bisa diubah dinamis lewat Telegram: /setwebport <port>)
+  session_ttl_minutes: 1440  # Masa aktif login admin (menit)
+  otp_ttl_minutes: 5         # Masa berlaku kode OTP Telegram (menit)
+
 # Auto-Updater Configuration (GitHub Releases)
 updater:
   github_repo: "zieru/AClaw"  # Repository target untuk auto-update binary

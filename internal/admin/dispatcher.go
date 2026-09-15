@@ -75,6 +75,13 @@ func (a *AdminBot) handleTextMessage(c tele.Context) error {
 		return err
 	}
 
+	// 8d. Check WebAdmin Port dialog
+	if a.webAdminUI != nil {
+		if handled, err := a.webAdminUI.HandleTextMessage(c); handled {
+			return err
+		}
+	}
+
 	// 9. Direct Chat with Assistant from Admin PM
 	msg := c.Message().Text
 	if msg == "" || msg[0] == '/' {

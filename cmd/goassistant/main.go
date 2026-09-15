@@ -27,6 +27,7 @@ import (
 	"goassistant/internal/storage"
 	"goassistant/internal/tools"
 	"goassistant/internal/version"
+	"goassistant/internal/webadmin"
 
 	tele "gopkg.in/telebot.v3"
 )
@@ -307,8 +308,10 @@ func main() {
 	defer checkinSvc.Stop()
 
 	// 10. Start Admin Control Plane Telegram Bot
+	var adminBot *admin.AdminBot
 	if cfg.AdminTelegram.BotToken != "" {
-		adminBot, err := admin.NewAdminBot(
+		var err error
+		adminBot, err = admin.NewAdminBot(
 			cfg.AdminTelegram.BotToken,
 			cfg,
 			db,
@@ -348,6 +351,26 @@ func main() {
 		httpServer.Start()
 	}
 
+	// 11b. Start GoAssistant Web Admin Control Plane (Telegram OTP Protected & Dynamic Port)
+	var webAdminServer *webadmin.Server
+	if cfg.WebAdmin.Enabled {
+		var tgSender webadmin.TelegramSender
+		if adminBot != nil {
+			tgSender = func(userID int64, text string) error {
+				_, sendErr := adminBot.Bot().Send(&tele.User{ID: userID}, text, tele.ModeHTML)
+				return sendErr
+			}
+		}
+		webAdminServer = webadmin.NewServer(cfg, db, orchestrator, tgSender)
+		if err := webAdminServer.Start(); err != nil {
+			log.Printf("⚠️ Gagal memulai Web Admin Server: %v", err)
+		} else {
+			if adminBot != nil {
+				adminBot.SetWebAdminServer(webAdminServer)
+			}
+		}
+	}
+
 	log.Println("✅ GoAssistant Core siap melayani. Tekan Ctrl+C untuk berhenti.")
 
 	// Wait for OS Interrupt signal
@@ -356,6 +379,14 @@ func main() {
 	<-sigChan
 
 	log.Println("\n🛑 Menghentikan GoAssistant secara aman (Graceful Shutdown)...")
+
+	if webAdminServer != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := webAdminServer.Stop(shutdownCtx); err != nil {
+			log.Printf("⚠️ Error saat mematikan Web Admin Server: %v", err)
+		}
+	}
 
 	if httpServer != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

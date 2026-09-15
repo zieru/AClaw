@@ -51,3 +51,5 @@ desktop.ini
 *.test
 *.out
 coverage.html
+/node_modules
+/webadmin/node_modules

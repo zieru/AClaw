@@ -74,6 +74,13 @@ type AppConfig struct {
 		WriteTimeoutSeconds int    `yaml:"write_timeout_seconds"`
 	} `yaml:"http_server"`
 
+	WebAdmin struct {
+		Enabled           bool `yaml:"enabled"`
+		Port              int  `yaml:"port"`
+		SessionTTLMinutes int  `yaml:"session_ttl_minutes"`
+		OTPTTLMinutes     int  `yaml:"otp_ttl_minutes"`
+	} `yaml:"web_admin"`
+
 	Updater struct {
 		GitHubRepo string `yaml:"github_repo"`
 	} `yaml:"updater"`
@@ -153,6 +160,11 @@ func Load(configPath string) (*AppConfig, error) {
 		cfg.HTTPServer.EndpointsFile = "configs/endpoints.yaml"
 		cfg.HTTPServer.ReadTimeoutSeconds = 15
 		cfg.HTTPServer.WriteTimeoutSeconds = 45
+
+		cfg.WebAdmin.Enabled = true
+		cfg.WebAdmin.Port = 12111
+		cfg.WebAdmin.SessionTTLMinutes = 1440
+		cfg.WebAdmin.OTPTTLMinutes = 5
 
 		cfg.Timeouts.APICallSeconds = 90
 		cfg.Timeouts.HandlerSeconds = 120

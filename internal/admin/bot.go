@@ -16,6 +16,7 @@ import (
 	"goassistant/internal/proxy"
 	"goassistant/internal/storage"
 	"goassistant/internal/tools"
+	"goassistant/internal/webadmin"
 
 	tele "gopkg.in/telebot.v3"
 )
@@ -52,6 +53,7 @@ type AdminBot struct {
 	tavilyUI     *TavilyUI
 	checkinUI    *CheckinUI
 	topicUI      *TopicUI
+	webAdminUI   *WebAdminUI
 }
 
 func NewAdminBot(
@@ -137,4 +139,9 @@ func (a *AdminBot) Stop() {
 // Bot returns the telebot instance
 func (a *AdminBot) Bot() *tele.Bot {
 	return a.bot
+}
+
+// SetWebAdminServer connects the WebAdminServer instance for dynamic control
+func (a *AdminBot) SetWebAdminServer(server *webadmin.Server) {
+	a.webAdminUI = NewWebAdminUI(server, a.db, a.bot)
 }

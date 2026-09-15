@@ -1885,6 +1885,67 @@ func (d *DB) GetAuditLogByID(id string) (*AuditLogRecord, error) {
 	return &l, nil
 }
 
+// ListAuditLogsFiltered retrieves audit logs with filtering, search, and pagination
+func (d *DB) ListAuditLogsFiltered(channelType, status, search string, limit, offset int) ([]AuditLogRecord, int, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var whereClauses []string
+	var args []interface{}
+
+	if channelType != "" && channelType != "all" {
+		whereClauses = append(whereClauses, "channel_type = ?")
+		args = append(args, channelType)
+	}
+	if status != "" && status != "all" {
+		whereClauses = append(whereClauses, "status = ?")
+		args = append(args, status)
+	}
+	if search != "" {
+		whereClauses = append(whereClauses, "(user_name LIKE ? OR client_request LIKE ? OR provider_response LIKE ? OR model LIKE ?)")
+		pattern := "%" + search + "%"
+		args = append(args, pattern, pattern, pattern, pattern)
+	}
+
+	whereSQL := ""
+	if len(whereClauses) > 0 {
+		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	// Count total matching records
+	countQuery := "SELECT COUNT(*) FROM audit_logs " + whereSQL
+	var total int
+	if err := d.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	query := fmt.Sprintf("SELECT id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, COALESCE(thinking_tokens, 0), total_tokens, COALESCE(tokens_saved, 0), COALESCE(number_of_tries, 1), COALESCE(proxy_used, ''), latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message FROM audit_logs %s ORDER BY timestamp DESC LIMIT ? OFFSET ?", whereSQL)
+	queryArgs := append(args, limit, offset)
+
+	rows, err := d.db.Query(query, queryArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var logs []AuditLogRecord
+	for rows.Next() {
+		var l AuditLogRecord
+		if err := rows.Scan(&l.ID, &l.Timestamp, &l.ChannelType, &l.ChannelID, &l.ChatID, &l.UserID, &l.UserName, &l.Provider, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.ThinkingTokens, &l.TotalTokens, &l.TokensSaved, &l.NumberOfTries, &l.ProxyUsed, &l.LatencyMs, &l.CostUSD, &l.ToolsCalled, &l.ClientRequest, &l.SystemPrompt, &l.FullRequestPayload, &l.ProviderResponse, &l.Status, &l.ErrorMessage); err != nil {
+			return nil, 0, err
+		}
+		logs = append(logs, l)
+	}
+	return logs, total, nil
+}
+
 // --- System Settings ---
 
 func (d *DB) GetSetting(key string, fallback string) (string, error) {
