@@ -1,13 +1,16 @@
 package webadmin
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -222,11 +225,44 @@ func (s *Server) buildRoutes() http.Handler {
 	uiFs, err := GetUIFileSystem()
 	if err == nil {
 		fileServer := http.FileServer(uiFs)
-		mux.HandleFunc("/admin/", func(w http.ResponseWriter, r *http.Request) {
+		serveStatic := func(w http.ResponseWriter, r *http.Request) {
 			relPath := strings.TrimPrefix(r.URL.Path, "/admin/")
-			if relPath == "" {
+			if relPath == "" || relPath == "/" {
 				relPath = "index.html"
 			}
+
+			acceptsGzip := strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
+
+			// 1. Try serving pre-gzipped version (.gz) if client supports gzip
+			if acceptsGzip {
+				gzPath := relPath + ".gz"
+				if fGz, err := uiFs.Open(gzPath); err == nil {
+					defer fGz.Close()
+					if stat, err := fGz.Stat(); err == nil {
+						if seeker, ok := fGz.(io.ReadSeeker); ok {
+							mimeType := mime.TypeByExtension(filepath.Ext(relPath))
+							if mimeType == "" {
+								if strings.HasSuffix(relPath, ".js") {
+									mimeType = "application/javascript"
+								} else if strings.HasSuffix(relPath, ".css") {
+									mimeType = "text/css"
+								} else if strings.HasSuffix(relPath, ".html") {
+									mimeType = "text/html; charset=utf-8"
+								} else {
+									mimeType = "application/octet-stream"
+								}
+							}
+							w.Header().Set("Content-Encoding", "gzip")
+							w.Header().Set("Content-Type", mimeType)
+							w.Header().Set("Vary", "Accept-Encoding")
+							http.ServeContent(w, r, relPath, stat.ModTime(), seeker)
+							return
+						}
+					}
+				}
+			}
+
+			// 2. Fallback to normal file or index.html for SPA routes
 			f, err := uiFs.Open(relPath)
 			if err != nil {
 				// Fallback to index.html for client-side Nuxt SPA routing
@@ -235,6 +271,7 @@ func (s *Server) buildRoutes() http.Handler {
 					defer indexFile.Close()
 					if stat, err := indexFile.Stat(); err == nil {
 						if seeker, ok := indexFile.(io.ReadSeeker); ok {
+							w.Header().Set("Content-Type", "text/html; charset=utf-8")
 							http.ServeContent(w, r, "index.html", stat.ModTime(), seeker)
 							return
 						}
@@ -244,7 +281,9 @@ func (s *Server) buildRoutes() http.Handler {
 				_ = f.Close()
 			}
 			http.StripPrefix("/admin", fileServer).ServeHTTP(w, r)
-		})
+		}
+
+		mux.HandleFunc("/admin/", serveStatic)
 		mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
 		})
@@ -253,8 +292,18 @@ func (s *Server) buildRoutes() http.Handler {
 				http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
 				return
 			}
-			fileServer.ServeHTTP(w, r)
+			serveStatic(w, r)
 		})
+	} else {
+		log.Printf("⚠️ [WebAdmin] Gagal memuat UI embedded filesystem: %v", err)
+		fallback503 := func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><title>GoAssistant Admin - Service Unavailable</title></head><body style="font-family:sans-serif;text-align:center;padding:50px;"><h2>⚠️ Service Unavailable (503)</h2><p>Filesystem Web Admin UI belum dibangun atau gagal dimuat.</p></body></html>`))
+		}
+		mux.HandleFunc("/admin/", fallback503)
+		mux.HandleFunc("/admin", fallback503)
+		mux.HandleFunc("/", fallback503)
 	}
 
 	// Auth Endpoints
@@ -283,7 +332,85 @@ func (s *Server) buildRoutes() http.Handler {
 	mux.HandleFunc("/api/chat/clear", s.authMgr.RequireAuth(s.handleClearChat))
 	mux.HandleFunc("/api/models", s.authMgr.RequireAuth(s.handleListModels))
 
-	return s.corsMiddleware(mux)
+	return s.corsMiddleware(s.gzipMiddleware(mux))
+}
+
+func (s *Server) gzipMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Skip gzip for SSE streaming endpoint or WebSocket
+		if r.URL.Path == "/api/chat" || r.Header.Get("Upgrade") != "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		gzw := &gzipResponseWriter{ResponseWriter: w}
+		defer func() {
+			if gzw.gzWriter != nil {
+				_ = gzw.gzWriter.Close()
+			}
+		}()
+
+		next.ServeHTTP(gzw, r)
+	})
+}
+
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	gzWriter    *gzip.Writer
+	wroteHeader bool
+}
+
+func (w *gzipResponseWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.gzWriter != nil {
+		return w.gzWriter.Write(b)
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *gzipResponseWriter) WriteHeader(statusCode int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+
+	ct := w.Header().Get("Content-Type")
+	ce := w.Header().Get("Content-Encoding")
+
+	shouldCompress := ce == "" &&
+		!strings.Contains(ct, "text/event-stream") &&
+		!strings.Contains(ct, "font/woff2") &&
+		!strings.Contains(ct, "image/png") &&
+		!strings.Contains(ct, "image/jpeg") &&
+		!strings.Contains(ct, "image/webp") &&
+		!strings.Contains(ct, "application/gzip") &&
+		!strings.Contains(ct, "application/zip")
+
+	if shouldCompress {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Vary", "Accept-Encoding")
+		gz, err := gzip.NewWriterLevel(w.ResponseWriter, gzip.DefaultCompression)
+		if err == nil {
+			w.gzWriter = gz
+		}
+	}
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *gzipResponseWriter) Flush() {
+	if w.gzWriter != nil {
+		_ = w.gzWriter.Flush()
+	}
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
