@@ -400,19 +400,24 @@
             </v-card>
           </v-window-item>
 
-          <!-- TAB 2: AI Chat Assistant with Topic Sidebar & Model Selector -->
+          <!-- TAB 2: AI Chat Assistant with Fixed Scroll Area, Hierarchical Provider => Model, & Set Thinking -->
           <v-window-item value="chat">
-            <v-row no-gutters class="rounded-xl overflow-hidden border" style="height: calc(100vh - 120px);">
+            <v-row
+              no-gutters
+              class="rounded-xl overflow-hidden border"
+              style="height: calc(100vh - 120px); min-height: 500px;"
+            >
               <!-- LEFT: Topics Sidebar -->
               <v-col
                 cols="12"
                 md="4"
                 lg="3"
                 class="bg-surface border-e d-flex flex-column"
+                style="height: 100%; min-height: 0; max-height: 100%;"
                 :class="{ 'd-none d-md-flex': !showMobileTopicList }"
               >
                 <!-- Topic Header -->
-                <div class="pa-3 border-b d-flex justify-space-between align-center">
+                <div class="pa-3 border-b d-flex justify-space-between align-center flex-shrink-0">
                   <div class="d-flex align-center">
                     <v-icon color="primary" class="me-2">mdi-forum</v-icon>
                     <span class="font-weight-bold text-subtitle-2">Topik & Sesi Channel</span>
@@ -429,7 +434,7 @@
                 </div>
 
                 <!-- Channel Filter Selector -->
-                <div class="pa-3 border-b bg-surface-variant">
+                <div class="pa-3 border-b bg-surface-variant flex-shrink-0">
                   <div class="text-caption text-medium-emphasis mb-1 font-weight-bold">Filter Channel:</div>
                   <v-select
                     v-model="selectedTopicChannel"
@@ -441,8 +446,8 @@
                   />
                 </div>
 
-                <!-- Topic List -->
-                <div class="flex-grow-1 overflow-y-auto pa-2">
+                <!-- Topic List Scroll Area -->
+                <div class="flex-grow-1 overflow-y-auto pa-2" style="min-height: 0;">
                   <div v-if="loadingTopics" class="text-center py-6">
                     <v-progress-circular indeterminate color="primary" size="24" />
                     <div class="text-caption text-medium-emphasis mt-2">Memuat topik percakapan...</div>
@@ -482,9 +487,15 @@
               </v-col>
 
               <!-- RIGHT: Chat Window -->
-              <v-col cols="12" md="8" lg="9" class="d-flex flex-column bg-surface">
-                <!-- Chat Header Bar -->
-                <div class="pa-3 border-b d-flex flex-wrap justify-space-between align-center ga-2 bg-surface">
+              <v-col
+                cols="12"
+                md="8"
+                lg="9"
+                class="d-flex flex-column bg-surface"
+                style="height: 100%; min-height: 0; max-height: 100%; overflow: hidden;"
+              >
+                <!-- Chat Header Bar: Provider, Model & Set Thinking -->
+                <div class="pa-3 border-b d-flex flex-wrap justify-space-between align-center ga-2 bg-surface flex-shrink-0">
                   <div class="d-flex align-center ga-2">
                     <v-btn
                       icon="mdi-menu"
@@ -507,21 +518,53 @@
                     </div>
                   </div>
 
-                  <div class="d-flex align-center ga-2">
-                    <!-- Model Selector Dropdown -->
-                    <div style="min-width: 200px;">
+                  <!-- Hierarchical Provider => Model Selection & Thinking Control -->
+                  <div class="d-flex align-center flex-wrap ga-2">
+                    <!-- 1. Provider Selector -->
+                    <div style="min-width: 160px;">
+                      <v-select
+                        v-model="selectedProviderId"
+                        :items="providerOptions"
+                        item-title="title"
+                        item-value="value"
+                        label="Penyedia AI"
+                        density="compact"
+                        variant="outlined"
+                        hide-details
+                        prepend-inner-icon="mdi-server"
+                        @update:model-value="onProviderChange"
+                      />
+                    </div>
+
+                    <!-- 2. Model Selector (Under Selected Provider) -->
+                    <div style="min-width: 220px;">
                       <v-select
                         v-model="selectedModel"
-                        :items="modelOptions"
+                        :items="availableModelsForSelectedProvider"
                         item-title="name"
                         item-value="id"
+                        label="Model AI"
                         density="compact"
                         variant="outlined"
                         hide-details
                         prepend-inner-icon="mdi-brain"
-                        title="Pilih Model AI"
+                        @update:model-value="onModelChange"
                       />
                     </div>
+
+                    <!-- 3. Thinking Button (Visible when model supports thinking) -->
+                    <v-btn
+                      v-if="currentModelThinkingConfig && currentModelThinkingConfig.supported"
+                      variant="tonal"
+                      color="amber"
+                      size="small"
+                      prepend-icon="mdi-brain"
+                      class="font-weight-medium"
+                      title="Atur parameter proses berpikir model ini"
+                      @click="thinkingDialog = true"
+                    >
+                      {{ currentThinkingValueLabel }}
+                    </v-btn>
 
                     <!-- Stop AI Button (Active during processing) -->
                     <v-btn
@@ -549,8 +592,12 @@
                   </div>
                 </div>
 
-                <!-- Chat Message Scroll Area -->
-                <div ref="chatScrollRef" class="flex-grow-1 overflow-y-auto pa-4 pa-sm-6 d-flex flex-column ga-4">
+                <!-- Chat Message Scroll Area (Explicit min-height: 0 and flex: 1 1 0 enables proper scrolling) -->
+                <div
+                  ref="chatScrollRef"
+                  class="chat-scroll-area pa-4 pa-sm-6 d-flex flex-column ga-4"
+                  style="min-height: 0; flex: 1 1 0; overflow-y: auto; overflow-x: hidden;"
+                >
                   <div
                     v-for="(msg, idx) in chatMessages"
                     :key="idx"
@@ -617,7 +664,7 @@
                 </div>
 
                 <!-- Chat Input Box -->
-                <div class="pa-4 border-t bg-surface">
+                <div class="pa-4 border-t bg-surface flex-shrink-0">
                   <div class="d-flex align-end ga-2">
                     <v-textarea
                       v-model="chatInput"
@@ -796,6 +843,95 @@
         </v-window>
       </v-container>
     </v-main>
+
+    <!-- Dialog: Pengaturan Berpikir Model AI (Set Thinking) -->
+    <v-dialog v-model="thinkingDialog" max-width="560">
+      <v-card color="surface" rounded="xl" class="pa-4 pa-sm-6" v-if="currentModelThinkingConfig">
+        <div class="d-flex justify-space-between align-center border-b pb-3 mb-4">
+          <div class="d-flex align-center">
+            <v-avatar color="amber" variant="tonal" size="40" class="me-3">
+              <v-icon size="24">mdi-brain</v-icon>
+            </v-avatar>
+            <div>
+              <div class="font-weight-bold text-h6">Pengaturan Berpikir AI</div>
+              <div class="text-caption text-medium-emphasis">
+                {{ currentModelDetail ? currentModelDetail.name : selectedModel }}
+              </div>
+            </div>
+          </div>
+          <v-btn icon="mdi-close" variant="text" size="small" @click="thinkingDialog = false" />
+        </div>
+
+        <!-- Parameter Info -->
+        <div class="mb-4">
+          <div class="text-caption text-medium-emphasis font-weight-bold text-uppercase mb-1">
+            Parameter API: <span class="font-monospace text-primary">{{ currentModelThinkingConfig.parameter_name }}</span>
+          </div>
+          <div v-if="currentModelThinkingConfig.note" class="text-caption text-medium-emphasis mb-3 bg-surface-variant pa-2 rounded">
+            💡 {{ currentModelThinkingConfig.note }}
+          </div>
+        </div>
+
+        <!-- Options Selection: String Options -->
+        <div v-if="currentModelThinkingConfig.parameter_type === 'string'" class="d-flex flex-column ga-2 mb-4">
+          <v-card
+            v-for="opt in currentModelThinkingConfig.options"
+            :key="opt.value"
+            :color="thinkingLevel === opt.value ? 'primary' : 'surface-variant'"
+            :variant="thinkingLevel === opt.value ? 'tonal' : 'flat'"
+            class="pa-3 cursor-pointer border"
+            rounded="lg"
+            @click="thinkingLevel = opt.value"
+          >
+            <div class="d-flex justify-space-between align-center mb-1">
+              <span class="font-weight-bold text-subtitle-2">{{ opt.label }} (<code>{{ opt.value }}</code>)</span>
+              <v-icon v-if="thinkingLevel === opt.value" color="primary">mdi-check-circle</v-icon>
+            </div>
+            <div class="text-caption" :class="thinkingLevel === opt.value ? 'text-white' : 'text-medium-emphasis'">
+              {{ opt.description }}
+            </div>
+          </v-card>
+        </div>
+
+        <!-- Options Selection: Object (Anthropic budget_tokens) -->
+        <div v-else-if="currentModelThinkingConfig.parameter_type === 'object'" class="mb-4">
+          <div class="text-caption text-medium-emphasis mb-2 font-weight-bold">
+            Pilih Kuota Token Berpikir (Budget Tokens):
+          </div>
+          <v-row dense class="mb-3">
+            <v-col cols="6" sm="3" v-for="opt in currentModelThinkingConfig.options" :key="opt.value">
+              <v-btn
+                block
+                :color="thinkingBudget === parseInt(opt.value, 10) ? 'primary' : 'surface-variant'"
+                :variant="thinkingBudget === parseInt(opt.value, 10) ? 'flat' : 'tonal'"
+                size="small"
+                @click="thinkingBudget = parseInt(opt.value, 10)"
+              >
+                {{ opt.label }}
+              </v-btn>
+            </v-col>
+          </v-row>
+          <v-text-field
+            v-model.number="thinkingBudget"
+            label="Custom Token Budget (Integer)"
+            type="number"
+            min="1024"
+            max="65536"
+            step="1024"
+            density="compact"
+            variant="outlined"
+            hide-details
+          />
+        </div>
+
+        <div class="d-flex justify-end ga-2 pt-3 border-t">
+          <v-btn variant="text" @click="thinkingDialog = false">Tutup</v-btn>
+          <v-btn color="primary" prepend-icon="mdi-check" @click="thinkingDialog = false">
+            Terapkan Pengaturan
+          </v-btn>
+        </div>
+      </v-card>
+    </v-dialog>
 
     <!-- Dialog: Menu Command Telegram Quick Actions & Reference -->
     <v-dialog v-model="commandMenuDialog" max-width="850">
@@ -1073,18 +1209,87 @@ const channelCreateOptions = [
   { title: 'Web Admin (webadmin)', value: 'webadmin' }
 ]
 
-// Models State
-const modelOptions = ref([
-  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
-  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
-  { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
-  { id: 'gpt-4o', name: 'GPT-4o' },
-  { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' }
-])
-const selectedModel = ref('gemini-2.5-flash')
-const selectedProvider = ref('')
+// Hierarchical Provider => Model State
+const rawProvidersData = ref([])
+const selectedProviderId = ref('google')
+const selectedModel = ref('gemini-3.8-flash')
 
-// Chat State
+// Thinking Configuration State
+const thinkingDialog = ref(false)
+const thinkingLevel = ref('medium')
+const thinkingBudget = ref(4096)
+
+const providerOptions = computed(() => {
+  if (!rawProvidersData.value || rawProvidersData.value.length === 0) {
+    return [
+      { title: 'Google (Gemini)', value: 'google' },
+      { title: 'OpenAI', value: 'openai' },
+      { title: 'DeepSeek', value: 'deepseek' },
+      { title: 'Anthropic', value: 'anthropic' },
+      { title: 'xAI (Grok)', value: 'xai' },
+      { title: 'Alibaba Cloud (Qwen)', value: 'alibaba' },
+      { title: 'Mistral AI', value: 'mistral' },
+      { title: 'MiniMax', value: 'minimax' }
+    ]
+  }
+  return rawProvidersData.value.map(p => ({
+    title: p.name,
+    value: p.id
+  }))
+})
+
+const availableModelsForSelectedProvider = computed(() => {
+  if (!rawProvidersData.value || rawProvidersData.value.length === 0) {
+    return [{ id: selectedModel.value, name: selectedModel.value }]
+  }
+  const currentProv = rawProvidersData.value.find(p => p.id === selectedProviderId.value)
+  if (!currentProv || !currentProv.models) return []
+  return currentProv.models
+})
+
+const currentModelDetail = computed(() => {
+  if (!availableModelsForSelectedProvider.value) return null
+  return availableModelsForSelectedProvider.value.find(m => m.id === selectedModel.value) || null
+})
+
+const currentModelThinkingConfig = computed(() => {
+  if (currentModelDetail.value && currentModelDetail.value.thinking_config) {
+    return currentModelDetail.value.thinking_config
+  }
+  return null
+})
+
+const currentThinkingValueLabel = computed(() => {
+  if (!currentModelThinkingConfig.value) return ''
+  if (currentModelThinkingConfig.value.parameter_type === 'object') {
+    return `Thinking: ${thinkingBudget.value} Tokens`
+  }
+  return `Thinking: ${thinkingLevel.value.toUpperCase()}`
+})
+
+function onProviderChange(provId) {
+  selectedProviderId.value = provId
+  const currentProv = rawProvidersData.value.find(p => p.id === provId)
+  if (currentProv && currentProv.models && currentProv.models.length > 0) {
+    selectedModel.value = currentProv.models[0].id
+    onModelChange(selectedModel.value)
+  }
+}
+
+function onModelChange(modelId) {
+  selectedModel.value = modelId
+  if (currentModelThinkingConfig.value) {
+    if (currentModelThinkingConfig.value.default_value) {
+      if (currentModelThinkingConfig.value.parameter_type === 'object') {
+        thinkingBudget.value = parseInt(currentModelThinkingConfig.value.default_value, 10) || 4096
+      } else {
+        thinkingLevel.value = currentModelThinkingConfig.value.default_value
+      }
+    }
+  }
+}
+
+// Chat Messages State
 const chatMessages = ref([
   {
     role: 'assistant',
@@ -1416,21 +1621,22 @@ async function handleCreateTopic() {
   }
 }
 
-// Models Handlers
+// Models & Providers Handlers
 async function fetchModels() {
   try {
     const res = await fetch('/api/models')
     if (res.ok) {
       const data = await res.json()
-      if (data.models && data.models.length > 0) {
-        modelOptions.value = data.models
+      if (data.providers && data.providers.length > 0) {
+        rawProvidersData.value = data.providers
+      }
+      if (data.active_provider) {
+        selectedProviderId.value = data.active_provider
       }
       if (data.active_model) {
         selectedModel.value = data.active_model
       }
-      if (data.active_provider) {
-        selectedProvider.value = data.active_provider
-      }
+      onModelChange(selectedModel.value)
     }
   } catch (e) {}
 }
@@ -1469,7 +1675,9 @@ async function sendChatMessage() {
         session_id: activeTopicId.value,
         channel_id: currentTopicChannel.value,
         model: selectedModel.value,
-        provider: selectedProvider.value
+        provider: selectedProviderId.value,
+        thinking_level: thinkingLevel.value,
+        thinking_budget: thinkingBudget.value
       })
     })
 
@@ -1503,7 +1711,7 @@ async function sendChatMessage() {
               chatMessages.value[assistantMsgIndex].status = parsed.status
               chatSubtitle.value = '⏳ ' + parsed.status
             } else if (currentEvent === 'chunk' && parsed.text) {
-              chatMessages.value[assistantMsgIndex].status = '' // Clear progress status once chunks arrive
+              chatMessages.value[assistantMsgIndex].status = '' // Clear status once content chunks stream
               chatMessages.value[assistantMsgIndex].content += parsed.text
             } else if (currentEvent === 'thinking' && parsed.text) {
               chatMessages.value[assistantMsgIndex].thinking += parsed.text
@@ -1686,6 +1894,32 @@ onMounted(() => {
   0% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.85; transform: scale(1.02); }
   100% { opacity: 1; transform: scale(1); }
+}
+
+/* Custom Visible Scrollbar for Chat */
+.chat-scroll-area {
+  min-height: 0 !important;
+  flex: 1 1 0 !important;
+  overflow-y: auto !important;
+  scroll-behavior: smooth;
+}
+
+.chat-scroll-area::-webkit-scrollbar {
+  width: 8px;
+}
+
+.chat-scroll-area::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+}
+
+.chat-scroll-area::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+}
+
+.chat-scroll-area::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.45);
 }
 
 /* Markdown typography inside chat bubble */

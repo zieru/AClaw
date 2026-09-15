@@ -72,6 +72,7 @@ type ChatRequest struct {
 	Stream          bool           // Enable streaming response
 	StreamCallback  StreamCallback // Callback for streaming chunks
 	ThinkingEnabled bool           // Enable thinking/reasoning output
+	ThinkingLevel   string         // "low", "medium", "high", "disabled", etc.
 	ThinkingBudget  int            // Max tokens for thinking (0 = provider default)
 	OnProgress      func(status string) // Optional progress callback during retry attempts
 }

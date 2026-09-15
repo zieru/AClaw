@@ -14,12 +14,14 @@ import (
 )
 
 type ChatRequest struct {
-	Message   string `json:"message"`
-	Model     string `json:"model"`
-	Provider  string `json:"provider"`
-	ChannelID string `json:"channel_id"`
-	ChatID    string `json:"chat_id"`
-	SessionID string `json:"session_id"`
+	Message        string `json:"message"`
+	Model          string `json:"model"`
+	Provider       string `json:"provider"`
+	ChannelID      string `json:"channel_id"`
+	ChatID         string `json:"chat_id"`
+	SessionID      string `json:"session_id"`
+	ThinkingLevel  string `json:"thinking_level"`
+	ThinkingBudget int    `json:"thinking_budget"`
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -129,6 +131,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		UserPrompt:     prompt,
 		PreferredModel: chatReq.Model,
 		PreferredProv:  chatReq.Provider,
+		ThinkingLevel:  chatReq.ThinkingLevel,
+		ThinkingBudget: chatReq.ThinkingBudget,
 		OnProgress: func(status string) {
 			sendSSE("progress", map[string]string{"status": status})
 		},
@@ -217,8 +221,8 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeModel := "gemini-2.5-flash"
-	activeProv := "gemini"
+	activeModel := "gemini-3.8-flash"
+	activeProv := "google"
 	if s.db != nil {
 		if pol, err := s.db.GetPolicy("global", "system"); err == nil && pol != nil {
 			if pol.ModelOverride != "" {
@@ -227,64 +231,183 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	type ModelOption struct {
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		Provider string `json:"provider"`
+	// 1. Built-in standard providers & models according to user specifications
+	standardProviders := []ProviderWithModels{
+		{
+			ID:   "google",
+			Name: "Google (Gemini)",
+			Type: "gemini",
+			Models: []ModelDetail{
+				{ID: "gemini-3.8-flash", Name: "Gemini 3.8 Flash (Recommended)", ProviderID: "google", ThinkingConfig: ResolveThinkingForModel("gemini-3.8-flash")},
+				{ID: "gemini-3.7-flash", Name: "Gemini 3.7 Flash", ProviderID: "google", ThinkingConfig: ResolveThinkingForModel("gemini-3.7-flash")},
+				{ID: "gemini-3.1-pro", Name: "Gemini 3.1 Pro (Deep Thinking)", ProviderID: "google", ThinkingConfig: ResolveThinkingForModel("gemini-3.1-pro")},
+				{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash", ProviderID: "google", ThinkingConfig: ResolveThinkingForModel("gemini-2.5-flash")},
+				{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro", ProviderID: "google", ThinkingConfig: ResolveThinkingForModel("gemini-2.5-pro")},
+			},
+		},
+		{
+			ID:   "openai",
+			Name: "OpenAI",
+			Type: "openai",
+			Models: []ModelDetail{
+				{ID: "o3-mini", Name: "o3-mini (Reasoning)", ProviderID: "openai", ThinkingConfig: ResolveThinkingForModel("o3-mini")},
+				{ID: "o1", Name: "o1 (High Reasoning)", ProviderID: "openai", ThinkingConfig: ResolveThinkingForModel("o1")},
+				{ID: "o1-mini", Name: "o1-mini", ProviderID: "openai", ThinkingConfig: ResolveThinkingForModel("o1-mini")},
+				{ID: "gpt-4o", Name: "GPT-4o (Omni)", ProviderID: "openai", ThinkingConfig: nil},
+				{ID: "gpt-4o-mini", Name: "GPT-4o Mini", ProviderID: "openai", ThinkingConfig: nil},
+			},
+		},
+		{
+			ID:   "deepseek",
+			Name: "DeepSeek",
+			Type: "deepseek",
+			Models: []ModelDetail{
+				{ID: "deepseek-r1", Name: "DeepSeek R1 (Reasoning)", ProviderID: "deepseek", ThinkingConfig: ResolveThinkingForModel("deepseek-r1")},
+				{ID: "deepseek-v4", Name: "DeepSeek V4", ProviderID: "deepseek", ThinkingConfig: ResolveThinkingForModel("deepseek-v4")},
+				{ID: "deepseek-chat", Name: "DeepSeek Chat (V3)", ProviderID: "deepseek", ThinkingConfig: nil},
+			},
+		},
+		{
+			ID:   "anthropic",
+			Name: "Anthropic",
+			Type: "anthropic",
+			Models: []ModelDetail{
+				{ID: "claude-4-sonnet", Name: "Claude 4 Sonnet", ProviderID: "anthropic", ThinkingConfig: ResolveThinkingForModel("claude-4-sonnet")},
+				{ID: "claude-4-opus", Name: "Claude 4 Opus", ProviderID: "anthropic", ThinkingConfig: ResolveThinkingForModel("claude-4-opus")},
+				{ID: "claude-3-7-sonnet", Name: "Claude 3.7 Sonnet (Hybrid)", ProviderID: "anthropic", ThinkingConfig: ResolveThinkingForModel("claude-3-7-sonnet")},
+				{ID: "claude-3-5-sonnet-20241022", Name: "Claude 3.5 Sonnet", ProviderID: "anthropic", ThinkingConfig: ResolveThinkingForModel("claude-3-5-sonnet-20241022")},
+			},
+		},
+		{
+			ID:   "xai",
+			Name: "xAI (Grok)",
+			Type: "xai",
+			Models: []ModelDetail{
+				{ID: "grok-4.6-reasoning", Name: "Grok 4.6 Reasoning", ProviderID: "xai", ThinkingConfig: ResolveThinkingForModel("grok-4.6-reasoning")},
+				{ID: "grok-4.6", Name: "Grok 4.6", ProviderID: "xai", ThinkingConfig: ResolveThinkingForModel("grok-4.6")},
+				{ID: "grok-4.5", Name: "Grok 4.5", ProviderID: "xai", ThinkingConfig: ResolveThinkingForModel("grok-4.5")},
+			},
+		},
+		{
+			ID:   "alibaba",
+			Name: "Alibaba Cloud (Qwen)",
+			Type: "alibaba",
+			Models: []ModelDetail{
+				{ID: "qwen3.8-max", Name: "Qwen 3.8 Max", ProviderID: "alibaba", ThinkingConfig: ResolveThinkingForModel("qwen3.8-max")},
+				{ID: "qwen3.8-max-preview", Name: "Qwen 3.8 Max Preview", ProviderID: "alibaba", ThinkingConfig: ResolveThinkingForModel("qwen3.8-max-preview")},
+				{ID: "qwen3.5-instruct", Name: "Qwen 3.5 Instruct", ProviderID: "alibaba", ThinkingConfig: ResolveThinkingForModel("qwen3.5-instruct")},
+			},
+		},
+		{
+			ID:   "mistral",
+			Name: "Mistral AI",
+			Type: "mistral",
+			Models: []ModelDetail{
+				{ID: "mistral-small-4", Name: "Mistral Small 4", ProviderID: "mistral", ThinkingConfig: ResolveThinkingForModel("mistral-small-4")},
+				{ID: "mistral-medium-3.5", Name: "Mistral Medium 3.5", ProviderID: "mistral", ThinkingConfig: ResolveThinkingForModel("mistral-medium-3.5")},
+			},
+		},
+		{
+			ID:   "minimax",
+			Name: "MiniMax",
+			Type: "minimax",
+			Models: []ModelDetail{
+				{ID: "minimax-m1", Name: "MiniMax M1", ProviderID: "minimax", ThinkingConfig: ResolveThinkingForModel("minimax-m1")},
+				{ID: "minimax-m2", Name: "MiniMax M2", ProviderID: "minimax", ThinkingConfig: ResolveThinkingForModel("minimax-m2")},
+				{ID: "minimax-m3", Name: "MiniMax M3", ProviderID: "minimax", ThinkingConfig: ResolveThinkingForModel("minimax-m3")},
+			},
+		},
 	}
 
-	models := []ModelOption{}
+	providerMap := make(map[string]*ProviderWithModels)
+	for i := range standardProviders {
+		providerMap[standardProviders[i].ID] = &standardProviders[i]
+	}
 
+	// 2. Append DB configured providers & custom models
 	if s.db != nil {
 		if provRecords, err := s.db.ListProviders(); err == nil {
 			for _, pr := range provRecords {
 				if !pr.IsActive {
 					continue
 				}
-				for _, m := range pr.Models {
-					models = append(models, ModelOption{
-						ID:       m,
-						Name:     fmt.Sprintf("%s (%s)", m, pr.Name),
-						Provider: pr.Type,
-					})
+				provID := strings.ToLower(pr.Type)
+				if provID == "" {
+					provID = strings.ToLower(pr.Name)
 				}
-				if len(pr.Models) == 0 && pr.DefaultModel != "" {
-					models = append(models, ModelOption{
-						ID:       pr.DefaultModel,
-						Name:     fmt.Sprintf("%s (%s)", pr.DefaultModel, pr.Name),
-						Provider: pr.Type,
-					})
+				target, exists := providerMap[provID]
+				if !exists {
+					newProv := &ProviderWithModels{
+						ID:     provID,
+						Name:   pr.Name,
+						Type:   pr.Type,
+						Models: []ModelDetail{},
+					}
+					providerMap[provID] = newProv
+					standardProviders = append(standardProviders, *newProv)
+					target = providerMap[provID]
+				}
+
+				for _, m := range pr.Models {
+					already := false
+					for _, existingM := range target.Models {
+						if strings.EqualFold(existingM.ID, m) {
+							already = true
+							break
+						}
+					}
+					if !already {
+						target.Models = append(target.Models, ModelDetail{
+							ID:             m,
+							Name:           m,
+							ProviderID:     provID,
+							ThinkingConfig: ResolveThinkingForModel(m),
+						})
+					}
 				}
 			}
 		}
 
-		if combos, err := s.db.ListCombos(); err == nil {
+		// 3. Append Model Combos
+		if combos, err := s.db.ListCombos(); err == nil && len(combos) > 0 {
+			comboProv := ProviderWithModels{
+				ID:     "combo",
+				Name:   "Model Combos (Fallback)",
+				Type:   "combo",
+				Models: []ModelDetail{},
+			}
 			for _, c := range combos {
-				models = append(models, ModelOption{
-					ID:       c.Name,
-					Name:     fmt.Sprintf("🔀 Combo: %s (%s)", c.Name, c.Strategy),
-					Provider: "combo",
+				comboProv.Models = append(comboProv.Models, ModelDetail{
+					ID:             c.Name,
+					Name:           fmt.Sprintf("🔀 Combo: %s (%s)", c.Name, c.Strategy),
+					ProviderID:     "combo",
+					ThinkingConfig: nil,
 				})
 			}
+			standardProviders = append(standardProviders, comboProv)
 		}
 	}
 
-	if len(models) == 0 {
-		models = []ModelOption{
-			{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash", Provider: "gemini"},
-			{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro", Provider: "gemini"},
-			{ID: "gpt-4o-mini", Name: "GPT-4o Mini", Provider: "openai"},
-			{ID: "gpt-4o", Name: "GPT-4o", Provider: "openai"},
-			{ID: "claude-3-5-sonnet-20241022", Name: "Claude 3.5 Sonnet", Provider: "anthropic"},
-			{ID: "free", Name: "OpenCode Free AI", Provider: "free_openai"},
+	// 4. Flatten models list for backward compatibility
+	flatModels := []map[string]interface{}{}
+	for _, p := range standardProviders {
+		for _, m := range p.Models {
+			flatModels = append(flatModels, map[string]interface{}{
+				"id":              m.ID,
+				"name":            fmt.Sprintf("%s (%s)", m.Name, p.Name),
+				"provider":        p.ID,
+				"thinking_config": m.ThinkingConfig,
+			})
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"active_model":    activeModel,
-		"active_provider": activeProv,
-		"models":          models,
+		"active_model":     activeModel,
+		"active_provider":  activeProv,
+		"providers":        standardProviders,
+		"models":           flatModels,
+		"thinking_catalog": GetThinkingCatalog(),
 	})
 }
 

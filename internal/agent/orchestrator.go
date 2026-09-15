@@ -69,6 +69,8 @@ type UserRequest struct {
 	PreferredRole  string
 	PreferredProv  string
 	PreferredModel string
+	ThinkingLevel  string // e.g. "low", "medium", "high", "disabled", "xhigh"
+	ThinkingBudget int    // budget tokens
 	OnProgress     func(status string)
 	OnStreamChunk  func(chunk provider.StreamChunk)
 }
@@ -438,6 +440,15 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		totalTokensSaved += saverReport.TokensSaved
 
 		isStreaming := policy.StreamingEnabled && req.OnStreamChunk != nil
+		thinkingEnabled := policy.ThinkingEnabled
+		if req.ThinkingLevel != "" {
+			if req.ThinkingLevel == "disabled" || req.ThinkingLevel == "none" {
+				thinkingEnabled = false
+			} else {
+				thinkingEnabled = true
+			}
+		}
+
 		chatReq := provider.ChatRequest{
 			Model:           modelToUse,
 			PreferredModel:  req.PreferredModel,
@@ -445,7 +456,9 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			Tools:           allowedTools,
 			Temperature:     0.7,
 			MaxTokens:       policy.MaxTokens,
-			ThinkingEnabled: policy.ThinkingEnabled,
+			ThinkingEnabled: thinkingEnabled,
+			ThinkingLevel:   req.ThinkingLevel,
+			ThinkingBudget:  req.ThinkingBudget,
 			OnProgress:      req.OnProgress,
 			Stream:          isStreaming,
 			StreamCallback:  req.OnStreamChunk,
