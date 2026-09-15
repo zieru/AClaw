@@ -42,7 +42,7 @@ func TestServer_StartRestartStop(t *testing.T) {
 	}
 
 	// Test dynamic rebind / Restart to port 12982
-	if err := srv.Restart(12982); err != nil {
+	if err := srv.RestartPort(12982); err != nil {
 		t.Fatalf("failed to restart server to port 12982: %v", err)
 	}
 

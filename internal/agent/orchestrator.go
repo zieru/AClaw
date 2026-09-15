@@ -48,6 +48,14 @@ func NewOrchestrator(
 	}
 }
 
+// ProviderManager returns the underlying provider manager instance
+func (o *Orchestrator) ProviderManager() *provider.Manager {
+	if o == nil {
+		return nil
+	}
+	return o.providerManager
+}
+
 type UserRequest struct {
 	ChannelType    string
 	ChannelID      string

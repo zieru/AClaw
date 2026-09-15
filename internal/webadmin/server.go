@@ -20,6 +20,7 @@ import (
 
 type Server struct {
 	mu           sync.Mutex
+	bindAddress  string
 	port         int
 	httpServer   *http.Server
 	listener     net.Listener
@@ -29,6 +30,7 @@ type Server struct {
 	authMgr      *AuthManager
 	startTime    time.Time
 	isClosed     bool
+	activeChats  sync.Map
 }
 
 func NewServer(
@@ -37,13 +39,21 @@ func NewServer(
 	orch *agent.Orchestrator,
 	sender TelegramSender,
 ) *Server {
+	bindAddress := "0.0.0.0"
+	if cfg != nil && cfg.WebAdmin.BindAddress != "" {
+		bindAddress = cfg.WebAdmin.BindAddress
+	}
+
 	port := 12111
 	if cfg != nil && cfg.WebAdmin.Port > 0 {
 		port = cfg.WebAdmin.Port
 	}
 
-	// Check if port is configured in DB system_settings
+	// Check if port or bind address is configured in DB system_settings
 	if db != nil {
+		if savedBind, err := db.GetSetting("webadmin_bind_address", ""); err == nil && savedBind != "" {
+			bindAddress = savedBind
+		}
 		if savedPortStr, err := db.GetSetting("webadmin_port", ""); err == nil && savedPortStr != "" {
 			if p, err := strconv.Atoi(savedPortStr); err == nil && p >= 1024 && p <= 65535 {
 				port = p
@@ -54,6 +64,7 @@ func NewServer(
 	authMgr := NewAuthManager(cfg, sender)
 
 	return &Server{
+		bindAddress:  bindAddress,
 		port:         port,
 		db:           db,
 		cfg:          cfg,
@@ -70,11 +81,25 @@ func (s *Server) GetPort() int {
 	return s.port
 }
 
+// GetBindAddress returns current binding address
+func (s *Server) GetBindAddress() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bindAddress == "" {
+		return "0.0.0.0"
+	}
+	return s.bindAddress
+}
+
 // GetURL returns the accessible local admin URL
 func (s *Server) GetURL() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return fmt.Sprintf("http://localhost:%d/admin", s.port)
+	host := s.bindAddress
+	if host == "" || host == "0.0.0.0" {
+		host = "localhost"
+	}
+	return fmt.Sprintf("http://%s:%d/admin", host, s.port)
 }
 
 // AuthManager returns the AuthManager instance
@@ -93,10 +118,10 @@ func (s *Server) Start() error {
 
 	mux := s.buildRoutes()
 
-	addr := fmt.Sprintf(":%d", s.port)
+	addr := fmt.Sprintf("%s:%d", s.bindAddress, s.port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("gagal bind ke port %d: %w", s.port, err)
+		return fmt.Errorf("gagal bind ke %s:%d: %w", s.bindAddress, s.port, err)
 	}
 	s.listener = ln
 
@@ -107,7 +132,7 @@ func (s *Server) Start() error {
 	}
 
 	go func() {
-		log.Printf("🌐 [WebAdmin] Server aktif mendengarkan di http://0.0.0.0:%d/admin", s.port)
+		log.Printf("🌐 [WebAdmin] Server aktif mendengarkan di http://%s:%d/admin", s.bindAddress, s.port)
 		if err := s.httpServer.Serve(s.listener); err != nil && err != http.ErrServerClosed {
 			log.Printf("⚠️ [WebAdmin] Server error: %v", err)
 		}
@@ -128,8 +153,8 @@ func (s *Server) Stop(ctx context.Context) error {
 	return nil
 }
 
-// Restart rebinds the server to a new port gracefully
-func (s *Server) Restart(newPort int) error {
+// Restart rebinds the server to a new address and port gracefully
+func (s *Server) Restart(bindAddress string, newPort int) error {
 	if newPort < 1024 || newPort > 65535 {
 		return fmt.Errorf("nomor port harus antara 1024 sampai 65535")
 	}
@@ -137,11 +162,18 @@ func (s *Server) Restart(newPort int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 1. Test listening on new port first
-	newAddr := fmt.Sprintf(":%d", newPort)
+	if strings.TrimSpace(bindAddress) == "" {
+		bindAddress = s.bindAddress
+	}
+	if bindAddress == "" {
+		bindAddress = "0.0.0.0"
+	}
+
+	// 1. Test listening on new address and port first
+	newAddr := fmt.Sprintf("%s:%d", bindAddress, newPort)
 	newLn, err := net.Listen("tcp", newAddr)
 	if err != nil {
-		return fmt.Errorf("port %d sedang digunakan atau tidak dapat dibuka: %w", newPort, err)
+		return fmt.Errorf("alamat %s:%d sedang digunakan atau tidak dapat dibuka: %w", bindAddress, newPort, err)
 	}
 
 	// 2. Shut down old server gracefully
@@ -151,11 +183,13 @@ func (s *Server) Restart(newPort int) error {
 		cancel()
 	}
 
-	// 3. Save new port to DB
+	// 3. Save new settings to DB
 	if s.db != nil {
+		_ = s.db.SetSetting("webadmin_bind_address", bindAddress)
 		_ = s.db.SetSetting("webadmin_port", strconv.Itoa(newPort))
 	}
 
+	s.bindAddress = bindAddress
 	s.port = newPort
 	s.listener = newLn
 
@@ -167,13 +201,18 @@ func (s *Server) Restart(newPort int) error {
 	}
 
 	go func() {
-		log.Printf("🌐 [WebAdmin] Server berhasil berpindah ke http://0.0.0.0:%d/admin", newPort)
+		log.Printf("🌐 [WebAdmin] Server berhasil berpindah ke http://%s:%d/admin", bindAddress, newPort)
 		if err := s.httpServer.Serve(s.listener); err != nil && err != http.ErrServerClosed {
 			log.Printf("⚠️ [WebAdmin] Server error: %v", err)
 		}
 	}()
 
 	return nil
+}
+
+// RestartPort restarts server retaining current bindAddress
+func (s *Server) RestartPort(newPort int) error {
+	return s.Restart("", newPort)
 }
 
 func (s *Server) buildRoutes() http.Handler {
@@ -228,12 +267,21 @@ func (s *Server) buildRoutes() http.Handler {
 	mux.HandleFunc("/api/activities", s.authMgr.RequireAuth(s.handleListActivities))
 	mux.HandleFunc("/api/activities/detail", s.authMgr.RequireAuth(s.handleGetActivity))
 	mux.HandleFunc("/api/system/stats", s.authMgr.RequireAuth(s.handleSystemStats))
-	mux.HandleFunc("/api/system/port", s.authMgr.RequireAuth(s.handleUpdatePort))
+	mux.HandleFunc("/api/system/port", s.authMgr.RequireAuth(s.handleUpdateAddress))
+	mux.HandleFunc("/api/system/address", s.authMgr.RequireAuth(s.handleUpdateAddress))
+
+	// Topic Endpoints
+	mux.HandleFunc("/api/topics", s.authMgr.RequireAuth(s.handleListTopics))
+	mux.HandleFunc("/api/topics/switch", s.authMgr.RequireAuth(s.handleSwitchTopic))
+	mux.HandleFunc("/api/topics/new", s.authMgr.RequireAuth(s.handleNewTopic))
+	mux.HandleFunc("/api/topics/messages", s.authMgr.RequireAuth(s.handleGetTopicMessages))
 
 	// AI Chat Endpoints
 	mux.HandleFunc("/api/chat", s.authMgr.RequireAuth(s.handleChat))
+	mux.HandleFunc("/api/chat/stop", s.authMgr.RequireAuth(s.handleChatStop))
 	mux.HandleFunc("/api/chat/history", s.authMgr.RequireAuth(s.handleChatHistory))
 	mux.HandleFunc("/api/chat/clear", s.authMgr.RequireAuth(s.handleClearChat))
+	mux.HandleFunc("/api/models", s.authMgr.RequireAuth(s.handleListModels))
 
 	return s.corsMiddleware(mux)
 }
@@ -384,36 +432,54 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
-type UpdatePortPayload struct {
-	Port int `json:"port"`
+type UpdateAddressPayload struct {
+	BindAddress string `json:"bind_address"`
+	Port        int    `json:"port"`
 }
 
-func (s *Server) handleUpdatePort(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleUpdateAddress(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var req UpdatePortPayload
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Port < 1024 || req.Port > 65535 {
+	var req UpdateAddressPayload
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Payload JSON tidak valid"})
+		return
+	}
+
+	targetPort := req.Port
+	if targetPort == 0 {
+		targetPort = s.GetPort()
+	}
+	if targetPort < 1024 || targetPort > 65535 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Port harus antara 1024 sampai 65535"})
 		return
 	}
 
+	targetBind := strings.TrimSpace(req.BindAddress)
+	if targetBind == "" {
+		targetBind = s.GetBindAddress()
+	}
+
 	// Return success first, then rebind in background
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"port":    req.Port,
-		"message": fmt.Sprintf("Port berhasil diubah ke %d", req.Port),
+		"success":      true,
+		"port":         targetPort,
+		"bind_address": targetBind,
+		"message":      fmt.Sprintf("Alamat server berhasil diubah ke %s:%d", targetBind, targetPort),
 	})
 
-	go func(p int) {
+	go func(b string, p int) {
 		time.Sleep(200 * time.Millisecond)
-		if err := s.Restart(p); err != nil {
-			log.Printf("⚠️ [WebAdmin] Gagal restart ke port %d: %v", p, err)
+		if err := s.Restart(b, p); err != nil {
+			log.Printf("⚠️ [WebAdmin] Gagal restart ke %s:%d: %v", b, p, err)
 		}
-	}(req.Port)
+	}(targetBind, targetPort)
 }

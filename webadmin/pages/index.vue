@@ -99,45 +99,59 @@
             >
               Ganti ID
             </v-btn>
-            <span class="text-caption text-medium-emphasis">
-              {{ resendCountdown > 0 ? `Kirim ulang dalam ${resendCountdown}s` : '' }}
-            </span>
+            <v-btn
+              variant="text"
+              size="small"
+              :disabled="resendCountdown > 0"
+              @click="handleRequestOTP"
+            >
+              {{ resendCountdown > 0 ? `Kirim ulang (${resendCountdown}s)` : 'Kirim Ulang OTP' }}
+            </v-btn>
           </div>
         </div>
       </v-card>
     </v-dialog>
 
-    <!-- Main Navigation Bar -->
-    <v-app-bar color="surface" elevation="1" border="b">
-      <v-container fluid class="d-flex align-center py-0">
-        <div class="d-flex align-center me-4">
-          <v-avatar color="primary" size="36" class="me-2">
-            <v-icon size="20" color="white">mdi-robot-outline</v-icon>
+    <!-- Top App Bar Navigation -->
+    <v-app-bar flat color="surface" density="comfortable" class="border-b">
+      <v-container fluid class="d-flex align-center justify-space-between px-4">
+        <div class="d-flex align-center">
+          <v-avatar color="primary" size="36" class="me-3 elevation-2">
+            <v-icon size="20" color="white">mdi-lightning-bolt</v-icon>
           </v-avatar>
           <div>
-            <div class="font-weight-bold text-subtitle-1 line-height-1">GoAssistant</div>
-            <div class="text-caption text-medium-emphasis">Web Admin Control Plane</div>
+            <div class="font-weight-bold text-subtitle-1 leading-tight text-white">
+              GoAssistant <span class="text-primary font-weight-light">Admin</span>
+            </div>
+            <div class="text-caption text-medium-emphasis">Control Plane & Analytics</div>
           </div>
         </div>
 
-        <v-tabs v-model="activeTab" color="primary" density="comfortable" class="ms-sm-6">
-          <v-tab value="activities">
-            <v-icon start>mdi-chart-timeline-variant</v-icon>
-            <span class="d-none d-sm-inline">Aktivitas & Log</span>
+        <!-- Navigation Tabs -->
+        <v-tabs v-model="activeTab" density="compact" color="primary" class="d-none d-sm-flex">
+          <v-tab value="activities" prepend-icon="mdi-chart-timeline-variant-shimmer">
+            Aktivitas & Log
           </v-tab>
-          <v-tab value="chat">
-            <v-icon start>mdi-chat-processing-outline</v-icon>
-            <span class="d-none d-sm-inline">Chat Assistant</span>
+          <v-tab value="chat" prepend-icon="mdi-robot">
+            AI Web Chat
           </v-tab>
-          <v-tab value="system">
-            <v-icon start>mdi-server-network</v-icon>
-            <span class="d-none d-sm-inline">Status & Port</span>
+          <v-tab value="system" prepend-icon="mdi-server-network">
+            Status & Jaringan
           </v-tab>
         </v-tabs>
 
-        <v-spacer />
-
         <div class="d-flex align-center ga-2">
+          <!-- Button Menu Telegram Quick Actions -->
+          <v-btn
+            variant="tonal"
+            color="primary"
+            size="small"
+            prepend-icon="mdi-robot-outline"
+            @click="commandMenuDialog = true"
+          >
+            Menu Telegram
+          </v-btn>
+
           <v-chip
             v-if="currentAdminId"
             color="success"
@@ -227,123 +241,128 @@
                   <div class="d-flex align-center justify-space-between">
                     <div>
                       <div class="text-caption text-medium-emphasis text-uppercase font-weight-bold">
-                        Tokens Saved (RTK)
+                        Tokens Dihemat (Cache)
                       </div>
-                      <div class="text-h4 font-weight-bold mt-1 text-secondary">
+                      <div class="text-h4 font-weight-bold mt-1 text-info">
                         {{ statsTokensSaved.toLocaleString() }}
                       </div>
                     </div>
-                    <v-avatar color="secondary" variant="tonal" size="48" rounded="lg">
-                      <v-icon size="28">mdi-leaf</v-icon>
+                    <v-avatar color="info" variant="tonal" size="48" rounded="lg">
+                      <v-icon size="28">mdi-piggy-bank-outline</v-icon>
                     </v-avatar>
                   </div>
                 </v-card>
               </v-col>
             </v-row>
 
-            <!-- Filters & Toolbar -->
-            <v-card color="surface" class="pa-4 mb-4">
-              <v-row dense align="center">
-                <v-col cols="12" md="4">
+            <!-- Activities Table Card -->
+            <v-card color="surface" class="overflow-hidden">
+              <v-card-title class="d-flex flex-wrap align-center justify-space-between ga-3 pa-4 pa-sm-6 border-b">
+                <div class="d-flex align-center">
+                  <v-icon class="me-2 text-primary">mdi-format-list-bulleted</v-icon>
+                  <span class="font-weight-bold text-h6">Riwayat Audit & Aktivitas</span>
+                </div>
+
+                <div class="d-flex flex-wrap align-center ga-3">
                   <v-text-field
                     v-model="searchQuery"
+                    placeholder="Cari prompt, user, model..."
                     prepend-inner-icon="mdi-magnify"
-                    label="Cari prompt, pengguna, respon, model..."
+                    density="compact"
+                    variant="outlined"
                     hide-details
-                    clearable
+                    style="min-width: 220px;"
                     @keyup.enter="fetchActivities(1)"
                   />
-                </v-col>
 
-                <v-col cols="6" sm="4" md="2">
                   <v-select
                     v-model="filterChannel"
                     :items="channelOptions"
-                    label="Channel"
+                    density="compact"
+                    variant="outlined"
                     hide-details
+                    style="min-width: 150px;"
                     @update:model-value="fetchActivities(1)"
                   />
-                </v-col>
 
-                <v-col cols="6" sm="4" md="2">
                   <v-select
                     v-model="filterStatus"
                     :items="statusOptions"
-                    label="Status"
+                    density="compact"
+                    variant="outlined"
                     hide-details
+                    style="min-width: 140px;"
                     @update:model-value="fetchActivities(1)"
                   />
-                </v-col>
 
-                <v-col cols="12" sm="4" md="4" class="text-sm-end mt-2 mt-sm-0">
                   <v-btn
-                    prepend-icon="mdi-refresh"
-                    variant="tonal"
                     color="primary"
+                    variant="tonal"
+                    icon="mdi-refresh"
+                    density="comfortable"
                     :loading="loadingActivities"
-                    @click="fetchActivities(1)"
-                  >
-                    Segarkan
-                  </v-btn>
-                </v-col>
-              </v-row>
-            </v-card>
+                    @click="fetchActivities(currentPage)"
+                  />
+                </div>
+              </v-card-title>
 
-            <!-- Activities Table -->
-            <v-card color="surface" class="mb-4">
-              <v-table hover>
+              <!-- Table -->
+              <v-table density="comfortable" hover>
                 <thead>
                   <tr>
-                    <th class="text-uppercase font-weight-bold text-medium-emphasis">Waktu</th>
-                    <th class="text-uppercase font-weight-bold text-medium-emphasis">Channel</th>
-                    <th class="text-uppercase font-weight-bold text-medium-emphasis">Pengguna</th>
-                    <th class="text-uppercase font-weight-bold text-medium-emphasis">Model / Provider</th>
-                    <th class="text-uppercase font-weight-bold text-medium-emphasis">Tokens</th>
-                    <th class="text-uppercase font-weight-bold text-medium-emphasis">Latensi</th>
-                    <th class="text-uppercase font-weight-bold text-medium-emphasis">Biaya</th>
-                    <th class="text-uppercase font-weight-bold text-medium-emphasis">Status</th>
-                    <th class="text-uppercase font-weight-bold text-medium-emphasis text-center">Aksi</th>
+                    <th class="text-left">Waktu</th>
+                    <th class="text-left">Channel</th>
+                    <th class="text-left">User</th>
+                    <th class="text-left">Model / Provider</th>
+                    <th class="text-left">Prompt Singkat</th>
+                    <th class="text-center">Tokens</th>
+                    <th class="text-center">Status</th>
+                    <th class="text-center">Aksi</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr v-if="loadingActivities">
-                    <td colspan="9" class="text-center py-6 text-medium-emphasis">
-                      <v-progress-circular indeterminate color="primary" class="me-2" size="20" />
-                      Memuat riwayat aktivitas...
+                    <td colspan="8" class="text-center py-6 text-medium-emphasis">
+                      <v-progress-circular indeterminate color="primary" size="24" class="me-2" />
+                      Memuat data aktivitas...
                     </td>
                   </tr>
                   <tr v-else-if="activities.length === 0">
-                    <td colspan="9" class="text-center py-6 text-medium-emphasis">
-                      Tidak ada aktivitas yang sesuai dengan filter.
+                    <td colspan="8" class="text-center py-6 text-medium-emphasis">
+                      Belum ada catatan aktivitas yang cocok dengan filter.
                     </td>
                   </tr>
                   <tr v-for="item in activities" :key="item.id">
-                    <td class="text-no-wrap font-monospace text-caption">
+                    <td class="text-caption font-monospace text-medium-emphasis">
                       {{ formatTime(item.timestamp) }}
                     </td>
                     <td>
-                      <v-chip size="x-small" color="primary" variant="tonal" class="text-capitalize">
-                        {{ item.channel_type || 'web' }}
+                      <v-chip size="x-small" color="primary" variant="flat" class="font-weight-medium">
+                        {{ item.channel_type }}
                       </v-chip>
                     </td>
-                    <td class="font-weight-medium">
-                      {{ item.user_name || 'Admin' }}
-                    </td>
-                    <td class="text-no-wrap">
-                      <span class="text-body-2">{{ item.model || '-' }}</span>
-                      <span class="text-caption text-medium-emphasis ms-1">({{ item.provider || '-' }})</span>
-                    </td>
-                    <td class="font-monospace text-caption">
-                      {{ (item.total_tokens || 0).toLocaleString() }}
-                    </td>
-                    <td>{{ item.latency_ms || 0 }}ms</td>
-                    <td class="font-monospace">${{ (item.cost_usd || 0).toFixed(4) }}</td>
                     <td>
+                      <div class="text-caption font-weight-bold">{{ item.user_name || 'Anonim' }}</div>
+                      <div class="text-caption text-medium-emphasis font-monospace">{{ item.user_id }}</div>
+                    </td>
+                    <td>
+                      <div class="text-caption font-weight-medium">{{ item.model }}</div>
+                      <div class="text-caption text-medium-emphasis">{{ item.provider }}</div>
+                    </td>
+                    <td style="max-width: 300px;">
+                      <div class="text-caption text-truncate">{{ item.client_request }}</div>
+                    </td>
+                    <td class="text-center text-caption font-monospace">
+                      {{ item.total_tokens || 0 }}
+                      <span v-if="item.tokens_saved > 0" class="text-info text-caption">
+                        (+{{ item.tokens_saved }})
+                      </span>
+                    </td>
+                    <td class="text-center">
                       <v-chip
                         size="x-small"
                         :color="item.status === 'success' ? 'success' : 'error'"
                         variant="tonal"
-                        class="text-uppercase"
                       >
                         {{ item.status }}
                       </v-chip>
@@ -381,117 +400,263 @@
             </v-card>
           </v-window-item>
 
-          <!-- TAB 2: AI Chat Assistant -->
+          <!-- TAB 2: AI Chat Assistant with Topic Sidebar & Model Selector -->
           <v-window-item value="chat">
-            <v-card color="surface" height="calc(100vh - 130px)" class="d-flex flex-column">
-              <!-- Chat Header -->
-              <div class="pa-4 border-b d-flex justify-space-between align-center">
-                <div class="d-flex align-center">
-                  <v-avatar color="primary" variant="tonal" size="40" class="me-3">
-                    <v-icon size="24">mdi-forum-outline</v-icon>
-                  </v-avatar>
-                  <div>
-                    <div class="font-weight-bold">GoAssistant AI Web Chat</div>
-                    <div class="text-caption text-medium-emphasis">
-                      {{ chatSubtitle }}
-                    </div>
+            <v-row no-gutters class="rounded-xl overflow-hidden border" style="height: calc(100vh - 120px);">
+              <!-- LEFT: Topics Sidebar -->
+              <v-col
+                cols="12"
+                md="4"
+                lg="3"
+                class="bg-surface border-e d-flex flex-column"
+                :class="{ 'd-none d-md-flex': !showMobileTopicList }"
+              >
+                <!-- Topic Header -->
+                <div class="pa-3 border-b d-flex justify-space-between align-center">
+                  <div class="d-flex align-center">
+                    <v-icon color="primary" class="me-2">mdi-forum</v-icon>
+                    <span class="font-weight-bold text-subtitle-2">Topik & Sesi Channel</span>
                   </div>
-                </div>
-
-                <v-btn
-                  variant="tonal"
-                  color="warning"
-                  size="small"
-                  prepend-icon="mdi-delete-sweep-outline"
-                  @click="handleResetChat"
-                >
-                  Reset Chat
-                </v-btn>
-              </div>
-
-              <!-- Chat Message Scroll Area -->
-              <div ref="chatScrollRef" class="flex-grow-1 overflow-y-auto pa-4 pa-sm-6 d-flex flex-column ga-4">
-                <div
-                  v-for="(msg, idx) in chatMessages"
-                  :key="idx"
-                  class="d-flex ga-3"
-                  :class="msg.role === 'user' ? 'justify-end' : 'justify-start'"
-                >
-                  <!-- Avatar for Assistant -->
-                  <v-avatar
-                    v-if="msg.role === 'assistant'"
-                    color="success"
-                    size="36"
-                    class="flex-shrink-0 mt-1"
-                  >
-                    <v-icon size="20" color="white">mdi-robot</v-icon>
-                  </v-avatar>
-
-                  <!-- Bubble -->
-                  <div style="max-width: 80%;">
-                    <!-- Thinking Details if present -->
-                    <v-expansion-panels v-if="msg.thinking" class="mb-2" variant="inset">
-                      <v-expansion-panel
-                        title="💭 Proses Berpikir Model AI"
-                        elevation="0"
-                        bg-color="surface-variant"
-                      >
-                        <v-expansion-panel-text>
-                          <pre class="thinking-pre text-caption font-monospace pa-2">{{ msg.thinking }}</pre>
-                        </v-expansion-panel-text>
-                      </v-expansion-panel>
-                    </v-expansion-panels>
-
-                    <v-card
-                      :color="msg.role === 'user' ? 'primary' : 'surface-variant'"
-                      class="pa-3 pa-sm-4 bubble-card"
-                      elevation="1"
-                    >
-                      <div class="markdown-body" v-html="renderMarkdown(msg.content)" />
-                    </v-card>
-                  </div>
-
-                  <!-- Avatar for User -->
-                  <v-avatar
-                    v-if="msg.role === 'user'"
-                    color="primary"
-                    size="36"
-                    class="flex-shrink-0 mt-1"
-                  >
-                    <v-icon size="20" color="white">mdi-account</v-icon>
-                  </v-avatar>
-                </div>
-              </div>
-
-              <!-- Chat Input Box -->
-              <div class="pa-4 border-t bg-surface">
-                <div class="d-flex align-end ga-2">
-                  <v-textarea
-                    v-model="chatInput"
-                    placeholder="Ketik pesan untuk asisten (Enter untuk kirim, Shift+Enter untuk baris baru)..."
-                    rows="1"
-                    auto-grow
-                    max-rows="5"
-                    hide-details
-                    variant="outlined"
-                    density="comfortable"
-                    class="flex-grow-1"
-                    @keydown.enter.exact.prevent="sendChatMessage"
-                  />
                   <v-btn
                     color="primary"
-                    icon="mdi-send"
-                    size="large"
-                    :loading="chatStreaming"
-                    :disabled="!chatInput.trim()"
-                    @click="sendChatMessage"
+                    size="small"
+                    variant="tonal"
+                    prepend-icon="mdi-plus"
+                    @click="newTopicDialog = true"
+                  >
+                    Topik Baru
+                  </v-btn>
+                </div>
+
+                <!-- Channel Filter Selector -->
+                <div class="pa-3 border-b bg-surface-variant">
+                  <div class="text-caption text-medium-emphasis mb-1 font-weight-bold">Filter Channel:</div>
+                  <v-select
+                    v-model="selectedTopicChannel"
+                    :items="topicChannelOptions"
+                    density="compact"
+                    variant="outlined"
+                    hide-details
+                    @update:model-value="fetchTopics"
                   />
                 </div>
-              </div>
-            </v-card>
+
+                <!-- Topic List -->
+                <div class="flex-grow-1 overflow-y-auto pa-2">
+                  <div v-if="loadingTopics" class="text-center py-6">
+                    <v-progress-circular indeterminate color="primary" size="24" />
+                    <div class="text-caption text-medium-emphasis mt-2">Memuat topik percakapan...</div>
+                  </div>
+                  <div v-else-if="topicList.length === 0" class="text-center py-6 text-medium-emphasis text-caption">
+                    Belum ada sesi/topik di channel ini.
+                  </div>
+                  <v-list v-else density="compact" nav class="pa-0">
+                    <v-list-item
+                      v-for="t in topicList"
+                      :key="t.id"
+                      :active="activeTopicId === t.id"
+                      rounded="lg"
+                      class="mb-1"
+                      color="primary"
+                      @click="selectTopic(t)"
+                    >
+                      <template #prepend>
+                        <v-avatar size="28" :color="activeTopicId === t.id ? 'primary' : 'surface-variant'" class="me-2">
+                          <v-icon size="16">
+                            {{ t.channel_id === 'admin' ? 'mdi-shield-account' : t.channel_id === 'telegram' ? 'mdi-telegram' : t.channel_id === 'whatsapp' ? 'mdi-whatsapp' : 'mdi-message-text' }}
+                          </v-icon>
+                        </v-avatar>
+                      </template>
+                      <v-list-item-title class="font-weight-medium text-body-2">
+                        {{ t.title || 'Topik Tanpa Judul' }}
+                      </v-list-item-title>
+                      <v-list-item-subtitle class="text-caption d-flex align-center ga-1 mt-1">
+                        <v-chip size="x-small" density="compact" variant="flat" color="surface-variant">
+                          {{ t.channel_id }}
+                        </v-chip>
+                        <span class="text-truncate">{{ formatTime(t.updated_at) }}</span>
+                      </v-list-item-subtitle>
+                    </v-list-item>
+                  </v-list>
+                </div>
+              </v-col>
+
+              <!-- RIGHT: Chat Window -->
+              <v-col cols="12" md="8" lg="9" class="d-flex flex-column bg-surface">
+                <!-- Chat Header Bar -->
+                <div class="pa-3 border-b d-flex flex-wrap justify-space-between align-center ga-2 bg-surface">
+                  <div class="d-flex align-center ga-2">
+                    <v-btn
+                      icon="mdi-menu"
+                      variant="text"
+                      size="small"
+                      class="d-md-none"
+                      @click="showMobileTopicList = !showMobileTopicList"
+                    />
+
+                    <div>
+                      <div class="d-flex align-center ga-2">
+                        <span class="font-weight-bold text-subtitle-1">{{ currentTopicTitle }}</span>
+                        <v-chip size="x-small" color="primary" variant="tonal">
+                          {{ currentTopicChannel }}
+                        </v-chip>
+                      </div>
+                      <div class="text-caption text-medium-emphasis">
+                        {{ chatSubtitle }}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="d-flex align-center ga-2">
+                    <!-- Model Selector Dropdown -->
+                    <div style="min-width: 200px;">
+                      <v-select
+                        v-model="selectedModel"
+                        :items="modelOptions"
+                        item-title="name"
+                        item-value="id"
+                        density="compact"
+                        variant="outlined"
+                        hide-details
+                        prepend-inner-icon="mdi-brain"
+                        title="Pilih Model AI"
+                      />
+                    </div>
+
+                    <!-- Stop AI Button (Active during processing) -->
+                    <v-btn
+                      v-if="chatStreaming"
+                      color="error"
+                      variant="flat"
+                      size="small"
+                      prepend-icon="mdi-stop-circle"
+                      class="font-weight-bold animate-pulse"
+                      @click="handleStopChat"
+                    >
+                      Stop AI (/stop)
+                    </v-btn>
+
+                    <!-- Reset Chat -->
+                    <v-btn
+                      variant="tonal"
+                      color="warning"
+                      size="small"
+                      prepend-icon="mdi-delete-sweep-outline"
+                      @click="handleResetChat"
+                    >
+                      Reset
+                    </v-btn>
+                  </div>
+                </div>
+
+                <!-- Chat Message Scroll Area -->
+                <div ref="chatScrollRef" class="flex-grow-1 overflow-y-auto pa-4 pa-sm-6 d-flex flex-column ga-4">
+                  <div
+                    v-for="(msg, idx) in chatMessages"
+                    :key="idx"
+                    class="d-flex ga-3"
+                    :class="msg.role === 'user' ? 'justify-end' : 'justify-start'"
+                  >
+                    <!-- Assistant Avatar -->
+                    <v-avatar
+                      v-if="msg.role === 'assistant'"
+                      color="success"
+                      size="36"
+                      class="flex-shrink-0 mt-1"
+                    >
+                      <v-icon size="20" color="white">mdi-robot</v-icon>
+                    </v-avatar>
+
+                    <!-- Bubble Card -->
+                    <div style="max-width: 85%;">
+                      <!-- Thinking Details if present -->
+                      <v-expansion-panels v-if="msg.thinking" class="mb-2" variant="inset">
+                        <v-expansion-panel
+                          title="💭 Proses Berpikir Model AI"
+                          elevation="0"
+                          bg-color="surface-variant"
+                        >
+                          <v-expansion-panel-text>
+                            <pre class="thinking-pre text-caption font-monospace pa-2">{{ msg.thinking }}</pre>
+                          </v-expansion-panel-text>
+                        </v-expansion-panel>
+                      </v-expansion-panels>
+
+                      <v-card
+                        :color="msg.role === 'user' ? 'primary' : 'surface-variant'"
+                        class="pa-3 pa-sm-4 bubble-card"
+                        elevation="1"
+                      >
+                        <!-- Live SSE Status Indicator inside Chat Bubble -->
+                        <div
+                          v-if="msg.status && (chatStreaming || !msg.content)"
+                          class="d-flex align-center ga-2 text-caption mb-2 text-warning font-weight-medium bg-black-opacity pa-2 rounded"
+                        >
+                          <v-progress-circular indeterminate size="14" width="2" color="warning" />
+                          <span>{{ msg.status }}</span>
+                        </div>
+
+                        <!-- Markdown Content -->
+                        <div v-if="msg.content" class="markdown-body" v-html="renderMarkdown(msg.content)" />
+                        <div v-else-if="!msg.status" class="text-caption text-medium-emphasis">
+                          Menunggu respon AI...
+                        </div>
+                      </v-card>
+                    </div>
+
+                    <!-- User Avatar -->
+                    <v-avatar
+                      v-if="msg.role === 'user'"
+                      color="primary"
+                      size="36"
+                      class="flex-shrink-0 mt-1"
+                    >
+                      <v-icon size="20" color="white">mdi-account</v-icon>
+                    </v-avatar>
+                  </div>
+                </div>
+
+                <!-- Chat Input Box -->
+                <div class="pa-4 border-t bg-surface">
+                  <div class="d-flex align-end ga-2">
+                    <v-textarea
+                      v-model="chatInput"
+                      placeholder="Ketik pesan atau /stop untuk membatalkan (Enter kirim, Shift+Enter baris baru)..."
+                      rows="1"
+                      auto-grow
+                      max-rows="5"
+                      hide-details
+                      variant="outlined"
+                      density="comfortable"
+                      class="flex-grow-1"
+                      @keydown.enter.exact.prevent="sendChatMessage"
+                    />
+
+                    <!-- Send Button or Stop Button -->
+                    <v-btn
+                      v-if="!chatStreaming"
+                      color="primary"
+                      icon="mdi-send"
+                      size="large"
+                      :disabled="!chatInput.trim()"
+                      @click="sendChatMessage"
+                    />
+                    <v-btn
+                      v-else
+                      color="error"
+                      variant="flat"
+                      icon="mdi-stop-circle"
+                      size="large"
+                      title="Batalkan proses AI (/stop)"
+                      @click="handleStopChat"
+                    />
+                  </div>
+                </div>
+              </v-col>
+            </v-row>
           </v-window-item>
 
-          <!-- TAB 3: Status & Port Server -->
+          <!-- TAB 3: Status & Konfigurasi Jaringan Server -->
           <v-window-item value="system">
             <v-row>
               <!-- System Runtime Card -->
@@ -540,7 +705,7 @@
                 </v-card>
               </v-col>
 
-              <!-- Web Admin Port Configuration Card -->
+              <!-- Web Admin Network Binding & Port Configuration Card -->
               <v-col cols="12" md="6">
                 <v-card color="surface" class="pa-6">
                   <div class="d-flex align-center mb-4">
@@ -548,35 +713,70 @@
                       <v-icon size="26">mdi-cog-sync-outline</v-icon>
                     </v-avatar>
                     <div>
-                      <h3 class="text-h6 font-weight-bold">Konfigurasi Port Web Admin</h3>
-                      <div class="text-caption text-medium-emphasis">Pengaturan port dinamis (Tersinkronisasi Telegram)</div>
+                      <h3 class="text-h6 font-weight-bold">Konfigurasi Jaringan & Port Web Admin</h3>
+                      <div class="text-caption text-medium-emphasis">Pengaturan binding address dan port dinamis</div>
                     </div>
                   </div>
 
                   <v-alert type="info" variant="tonal" class="mb-4" density="comfortable">
-                    Port Web Admin dapat diubah langsung di sini atau sewaktu-waktu melalui Telegram bot dengan perintah:
-                    <code class="text-white font-weight-bold ms-1">/setwebport &lt;port&gt;</code>
+                    Pengaturan ini dapat diatur di sini atau sewaktu-waktu via Telegram bot:
+                    <div class="mt-1">
+                      <code class="text-white font-weight-bold me-2">/setwebport &lt;port&gt;</code>
+                      <code class="text-white font-weight-bold">/setwebbind &lt;address&gt;</code>
+                    </div>
                   </v-alert>
 
                   <v-card color="surface-variant" class="pa-4 mb-4" rounded="lg">
-                    <div class="text-caption text-medium-emphasis text-uppercase">Port Aktif Saat Ini:</div>
-                    <div class="text-h3 font-weight-bold text-primary my-1">
-                      {{ currentWebPort }}
+                    <div class="d-flex justify-space-between align-center">
+                      <div>
+                        <div class="text-caption text-medium-emphasis text-uppercase">Binding Address:</div>
+                        <div class="text-h5 font-weight-bold font-monospace text-primary">
+                          {{ currentBindAddress }}
+                        </div>
+                      </div>
+                      <div>
+                        <div class="text-caption text-medium-emphasis text-uppercase text-end">Port Aktif:</div>
+                        <div class="text-h5 font-weight-bold font-monospace text-primary text-end">
+                          {{ currentWebPort }}
+                        </div>
+                      </div>
                     </div>
-                    <div class="text-caption text-medium-emphasis font-monospace">
-                      {{ currentHostUrl }}
+                    <v-divider class="my-2" />
+                    <div class="text-caption text-medium-emphasis font-monospace text-truncate">
+                      URL Akses: <a :href="currentHostUrl" target="_blank" class="text-info">{{ currentHostUrl }}</a>
                     </div>
                   </v-card>
 
+                  <!-- Binding Address Input -->
+                  <div class="mb-3">
+                    <v-text-field
+                      v-model="bindAddressInput"
+                      label="Binding Address (Host/IP)"
+                      prepend-inner-icon="mdi-ip-network-outline"
+                      placeholder="Contoh: 0.0.0.0 atau 127.0.0.1"
+                      hide-details
+                      class="mb-2"
+                    />
+                    <div class="d-flex ga-2">
+                      <v-chip size="small" variant="tonal" @click="bindAddressInput = '0.0.0.0'">
+                        0.0.0.0 (Semua Jaringan)
+                      </v-chip>
+                      <v-chip size="small" variant="tonal" @click="bindAddressInput = '127.0.0.1'">
+                        127.0.0.1 (Localhost Saja)
+                      </v-chip>
+                    </div>
+                  </div>
+
+                  <!-- Port Input -->
                   <v-text-field
                     v-model="newPortInput"
-                    label="Ubah ke Port Baru (1024 - 65535)"
+                    label="Nomor Port Baru (1024 - 65535)"
                     type="number"
                     min="1024"
                     max="65535"
                     prepend-inner-icon="mdi-numeric"
                     placeholder="Contoh: 8088 atau 12111"
-                    class="mb-3"
+                    class="mb-4"
                   />
 
                   <v-btn
@@ -584,10 +784,10 @@
                     block
                     size="large"
                     prepend-icon="mdi-content-save-cog"
-                    :loading="updatingPort"
-                    @click="handleSavePort"
+                    :loading="updatingAddress"
+                    @click="handleSaveAddress"
                   >
-                    Simpan & Pindahkan Port Sekarang
+                    Simpan & Terapkan Perubahan Jaringan
                   </v-btn>
                 </v-card>
               </v-col>
@@ -596,6 +796,133 @@
         </v-window>
       </v-container>
     </v-main>
+
+    <!-- Dialog: Menu Command Telegram Quick Actions & Reference -->
+    <v-dialog v-model="commandMenuDialog" max-width="850">
+      <v-card color="surface" rounded="xl">
+        <v-card-title class="d-flex justify-space-between align-center pa-4 pa-sm-6 border-b">
+          <div class="d-flex align-center">
+            <v-avatar color="primary" variant="tonal" size="40" class="me-3">
+              <v-icon size="24">mdi-robot</v-icon>
+            </v-avatar>
+            <div>
+              <span class="font-weight-bold text-h6">Menu Perintah Bot Telegram</span>
+              <div class="text-caption text-medium-emphasis">Aksi cepat dan referensi perintah lengkap administrator</div>
+            </div>
+          </div>
+          <v-btn icon="mdi-close" variant="text" size="small" @click="commandMenuDialog = false" />
+        </v-card-title>
+
+        <v-card-text class="pa-4 pa-sm-6 overflow-y-auto" style="max-height: 70vh;">
+          <!-- Quick Action Buttons -->
+          <div class="text-subtitle-2 font-weight-bold mb-3 d-flex align-center">
+            <v-icon color="warning" class="me-2">mdi-lightning-bolt</v-icon>
+            Aksi Cepat (Quick Actions)
+          </div>
+          <v-row class="mb-4" dense>
+            <v-col cols="6" sm="4">
+              <v-btn color="error" variant="tonal" block prepend-icon="mdi-stop-circle" @click="handleQuickStop">
+                /stop AI
+              </v-btn>
+            </v-col>
+            <v-col cols="6" sm="4">
+              <v-btn color="primary" variant="tonal" block prepend-icon="mdi-plus" @click="commandMenuDialog = false; newTopicDialog = true">
+                /new Topik
+              </v-btn>
+            </v-col>
+            <v-col cols="6" sm="4">
+              <v-btn color="info" variant="tonal" block prepend-icon="mdi-server" @click="commandMenuDialog = false; activeTab = 'system'">
+                /status Server
+              </v-btn>
+            </v-col>
+            <v-col cols="6" sm="4">
+              <v-btn color="warning" variant="tonal" block prepend-icon="mdi-delete-sweep" @click="handleResetChat">
+                /clear Chat
+              </v-btn>
+            </v-col>
+            <v-col cols="6" sm="4">
+              <v-btn color="secondary" variant="tonal" block prepend-icon="mdi-cog" @click="commandMenuDialog = false; activeTab = 'system'">
+                /setwebport
+              </v-btn>
+            </v-col>
+            <v-col cols="6" sm="4">
+              <v-btn color="success" variant="tonal" block prepend-icon="mdi-ip" @click="commandMenuDialog = false; activeTab = 'system'">
+                /setwebbind
+              </v-btn>
+            </v-col>
+          </v-row>
+
+          <v-divider class="mb-4" />
+
+          <!-- Full Telegram Commands Table -->
+          <div class="text-subtitle-2 font-weight-bold mb-3 d-flex align-center">
+            <v-icon color="primary" class="me-2">mdi-clipboard-text-outline</v-icon>
+            Daftar Perintah Telegram GoAssistant
+          </div>
+          <v-table density="compact" class="border rounded-lg">
+            <thead>
+              <tr>
+                <th class="text-left">Perintah</th>
+                <th class="text-left">Kategori</th>
+                <th class="text-left">Fungsi / Kegunaan</th>
+                <th class="text-center">Salin</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="cmd in telegramCommands" :key="cmd.command">
+                <td class="font-monospace text-primary font-weight-bold">{{ cmd.command }}</td>
+                <td><v-chip size="x-small" variant="tonal">{{ cmd.category }}</v-chip></td>
+                <td class="text-caption">{{ cmd.description }}</td>
+                <td class="text-center">
+                  <v-btn
+                    icon="mdi-content-copy"
+                    size="x-small"
+                    variant="text"
+                    title="Salin Perintah"
+                    @click="copyToClipboard(cmd.command)"
+                  />
+                </td>
+              </tr>
+            </tbody>
+          </v-table>
+        </v-card-text>
+      </v-card>
+    </v-dialog>
+
+    <!-- Dialog: Buat Topik Baru -->
+    <v-dialog v-model="newTopicDialog" max-width="460">
+      <v-card color="surface" rounded="xl" class="pa-4 pa-sm-6">
+        <v-card-title class="font-weight-bold text-h6 px-0 pb-2">Buat Topik / Sesi Baru</v-card-title>
+        <p class="text-caption text-medium-emphasis mb-4">
+          Buat sesi percakapan mandiri yang terpisah agar riwayat konteks tetap rapi dan terisolasi.
+        </p>
+
+        <v-text-field
+          v-model="newTopicTitle"
+          label="Judul Topik"
+          placeholder="Contoh: Diskusi Deployment atau Riset Model"
+          variant="outlined"
+          autofocus
+          class="mb-3"
+          @keyup.enter="handleCreateTopic"
+        />
+
+        <v-select
+          v-model="newTopicChannel"
+          label="Target Channel"
+          :items="channelCreateOptions"
+          variant="outlined"
+          class="mb-4"
+        />
+
+        <div class="d-flex justify-end ga-2">
+          <v-btn variant="text" @click="newTopicDialog = false">Batal</v-btn>
+          <v-btn color="primary" :loading="creatingTopic" @click="handleCreateTopic">
+            Buat Topik Sekarang
+          </v-btn>
+        </div>
+      </v-card>
+    </v-dialog>
 
     <!-- Detail Activity Modal Dialog -->
     <v-dialog v-model="detailDialog" max-width="800">
@@ -681,7 +1008,7 @@ const md = new MarkdownIt({
   breaks: true,
 })
 
-// State variables
+// Authentication State
 const loginRequired = ref(true)
 const loginStep = ref(1)
 const telegramIdInput = ref('')
@@ -695,7 +1022,7 @@ const currentAdminId = ref(null)
 
 const activeTab = ref('activities')
 
-// Activity State
+// Activity Logs State
 const activities = ref([])
 const totalLogs = ref(0)
 const currentPage = ref(1)
@@ -720,26 +1047,86 @@ const statusOptions = [
   { title: 'Error', value: 'error' }
 ]
 
+// Topic & Multi-Channel State
+const topicList = ref([])
+const loadingTopics = ref(false)
+const selectedTopicChannel = ref('all')
+const activeTopicId = ref('')
+const currentTopicTitle = ref('Topik Utama (Admin Telegram)')
+const currentTopicChannel = ref('admin')
+const showMobileTopicList = ref(false)
+const newTopicDialog = ref(false)
+const newTopicTitle = ref('')
+const newTopicChannel = ref('admin')
+const creatingTopic = ref(false)
+
+const topicChannelOptions = ref([
+  { title: 'Semua Channel', value: 'all' },
+  { title: 'Admin Telegram (admin)', value: 'admin' },
+  { title: 'Web Admin (webadmin)', value: 'webadmin' },
+  { title: 'Telegram Channel', value: 'telegram' },
+  { title: 'WhatsApp Channel', value: 'whatsapp' }
+])
+
+const channelCreateOptions = [
+  { title: 'Admin Telegram (admin)', value: 'admin' },
+  { title: 'Web Admin (webadmin)', value: 'webadmin' }
+]
+
+// Models State
+const modelOptions = ref([
+  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+  { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
+  { id: 'gpt-4o', name: 'GPT-4o' },
+  { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet' }
+])
+const selectedModel = ref('gemini-2.5-flash')
+const selectedProvider = ref('')
+
 // Chat State
 const chatMessages = ref([
   {
     role: 'assistant',
-    content: 'Halo Administrator! Saya adalah asisten AI GoAssistant. Ada yang bisa saya bantu terkait monitoring, analisis log, atau konfigurasi sistem?'
+    content: 'Halo Administrator! Saya adalah asisten AI GoAssistant. Ada yang bisa saya bantu terkait monitoring, analisis log, atau konfigurasi sistem?',
+    status: '',
+    thinking: ''
   }
 ])
 const chatInput = ref('')
 const chatStreaming = ref(false)
 const chatSubtitle = ref('Terkoneksi langsung ke AI Orchestrator')
 const chatScrollRef = ref(null)
+let activeAbortController = null
 
-// System & Port State
+// System, Binding & Port State
 const sysStats = ref({})
 const currentWebPort = ref(12111)
+const currentBindAddress = ref('0.0.0.0')
 const currentHostUrl = ref('')
+const bindAddressInput = ref('0.0.0.0')
 const newPortInput = ref('')
-const updatingPort = ref(false)
+const updatingAddress = ref(false)
 
-// Snackbar
+// Telegram Command Dialog State
+const commandMenuDialog = ref(false)
+const telegramCommands = [
+  { command: '/start', category: 'Navigasi', description: 'Buka menu utama dashboard administrator di bot Telegram' },
+  { command: '/status', category: 'Sistem', description: 'Cek kesehatan server, uptime, memory, dan model AI aktif' },
+  { command: '/models', category: 'AI Model', description: 'Pilih dan ganti model AI default atau combo model fallback' },
+  { command: '/providers', category: 'Penyedia', description: 'Kelola API key, status provider AI (Gemini, OpenAI, Anthropic, dll)' },
+  { command: '/topic', category: 'Topik', description: 'Kelola topik obrolan multi-thread percakapan' },
+  { command: '/newtopic', category: 'Topik', description: 'Buat sesi/topik percakapan baru di Telegram' },
+  { command: '/stop', category: 'Kontrol AI', description: 'Hentikan seketika proses AI atau tool yang sedang berjalan' },
+  { command: '/limits', category: 'Keamanan', description: 'Atur batas token, turn history, dan rate limit' },
+  { command: '/proxies', category: 'Jaringan', description: 'Kelola pool proxy, sinkronisasi Webshare, uji latency' },
+  { command: '/setwebport', category: 'Web Admin', description: 'Ganti port listener Web Admin secara dinamis' },
+  { command: '/setwebbind', category: 'Web Admin', description: 'Ganti binding IP address Web Admin (0.0.0.0 / 127.0.0.1)' },
+  { command: '/backup', category: 'Database', description: 'Cadangkan database SQLite GoAssistant' },
+  { command: '/update', category: 'Sistem', description: 'Periksa pembaruan versi rilis GoAssistant' }
+]
+
+// Snackbar State
 const snackbar = ref({
   show: false,
   text: '',
@@ -750,7 +1137,13 @@ function showToast(text, color = 'info') {
   snackbar.value = { show: true, text, color }
 }
 
-// Computed stats
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text).then(() => {
+    showToast(`Perintah ${text} berhasil disalin!`, 'success')
+  })
+}
+
+// Computed Statistics
 const successRate = computed(() => {
   if (activities.value.length === 0) return 100
   const successCount = activities.value.filter(a => a.status === 'success').length
@@ -777,15 +1170,20 @@ async function checkAuth() {
       const data = await res.json()
       currentAdminId.value = data.telegram_id
       loginRequired.value = false
-      fetchActivities(1)
-      fetchSystemStats()
-      fetchChatHistory()
+      initDashboard()
     } else {
       loginRequired.value = true
     }
   } catch (e) {
     loginRequired.value = true
   }
+}
+
+function initDashboard() {
+  fetchActivities(1)
+  fetchSystemStats()
+  fetchTopics()
+  fetchModels()
 }
 
 async function handleRequestOTP() {
@@ -852,9 +1250,7 @@ async function handleVerifyOTP() {
       loginRequired.value = false
       currentAdminId.value = data.telegram_id
       showToast('Login berhasil! Selamat datang di Web Admin.', 'success')
-      fetchActivities(1)
-      fetchSystemStats()
-      fetchChatHistory()
+      initDashboard()
     } else {
       loginError.value = data.error || 'Kode OTP tidak valid'
     }
@@ -915,28 +1311,166 @@ function renderMarkdown(text) {
   return md.render(text)
 }
 
-// Chat Handlers
+// Topic & Session Handlers
+async function fetchTopics() {
+  loadingTopics.value = true
+  try {
+    const chParam = selectedTopicChannel.value === 'all' ? '' : selectedTopicChannel.value
+    const res = await fetch('/api/topics?channel_id=' + encodeURIComponent(chParam))
+    if (!res.ok) return
+    const data = await res.json()
+
+    // Update channel options if server returned channels
+    if (data.channels && data.channels.length > 0) {
+      const opts = [{ title: 'Semua Channel', value: 'all' }]
+      for (const ch of data.channels) {
+        opts.push({ title: `${ch} Channel`, value: ch })
+      }
+      topicChannelOptions.value = opts
+    }
+
+    if (selectedTopicChannel.value === 'all') {
+      topicList.value = data.all_topics || []
+    } else if (selectedTopicChannel.value === 'admin') {
+      topicList.value = data.admin_topics || []
+    } else if (selectedTopicChannel.value === 'webadmin') {
+      topicList.value = data.web_topics || []
+    } else {
+      topicList.value = data.all_topics || []
+    }
+
+    // Set first topic active if none selected
+    if (!activeTopicId.value && topicList.value.length > 0) {
+      const active = topicList.value.find(t => t.is_active) || topicList.value[0]
+      selectTopic(active)
+    }
+  } catch (e) {
+  } finally {
+    loadingTopics.value = false
+  }
+}
+
+async function selectTopic(topic) {
+  activeTopicId.value = topic.id
+  currentTopicTitle.value = topic.title || 'Topik Sesi'
+  currentTopicChannel.value = topic.channel_id
+  showMobileTopicList.value = false
+
+  try {
+    const res = await fetch(`/api/topics/messages?session_id=${topic.id}`)
+    if (res.ok) {
+      const data = await res.json()
+      if (data.messages && data.messages.length > 0) {
+        chatMessages.value = data.messages.map(m => ({
+          role: m.role,
+          content: m.content,
+          status: '',
+          thinking: ''
+        }))
+      } else {
+        chatMessages.value = [
+          {
+            role: 'assistant',
+            content: `Sesi **${topic.title}** aktif. Silakan mulai percakapan!`,
+            status: '',
+            thinking: ''
+          }
+        ]
+      }
+      scrollChatBottom()
+    }
+  } catch (e) {}
+}
+
+async function handleCreateTopic() {
+  const title = newTopicTitle.value.trim()
+  if (!title) {
+    showToast('Judul topik tidak boleh kosong', 'warning')
+    return
+  }
+
+  creatingTopic.value = true
+  try {
+    const res = await fetch('/api/topics/new', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title,
+        channel_id: newTopicChannel.value
+      })
+    })
+    const data = await res.json()
+    if (res.ok && data.session) {
+      showToast(`Topik "${title}" berhasil dibuat!`, 'success')
+      newTopicDialog.value = false
+      newTopicTitle.value = ''
+      await fetchTopics()
+      selectTopic(data.session)
+    } else {
+      showToast(data.error || 'Gagal membuat topik', 'error')
+    }
+  } catch (e) {
+    showToast('Error membuat topik: ' + e.message, 'error')
+  } finally {
+    creatingTopic.value = false
+  }
+}
+
+// Models Handlers
+async function fetchModels() {
+  try {
+    const res = await fetch('/api/models')
+    if (res.ok) {
+      const data = await res.json()
+      if (data.models && data.models.length > 0) {
+        modelOptions.value = data.models
+      }
+      if (data.active_model) {
+        selectedModel.value = data.active_model
+      }
+      if (data.active_provider) {
+        selectedProvider.value = data.active_provider
+      }
+    }
+  } catch (e) {}
+}
+
+// Chat Handlers & Stop AI
 async function sendChatMessage() {
   const text = chatInput.value.trim()
   if (!text || chatStreaming.value) return
 
   // Append user message
-  chatMessages.value.push({ role: 'user', content: text })
+  chatMessages.value.push({ role: 'user', content: text, status: '', thinking: '' })
   chatInput.value = ''
 
-  // Append empty assistant message placeholder
+  // Append empty assistant message with active status
   const assistantMsgIndex = chatMessages.value.length
-  chatMessages.value.push({ role: 'assistant', content: '', thinking: '' })
+  chatMessages.value.push({
+    role: 'assistant',
+    content: '',
+    status: 'Memproses permintaan...',
+    thinking: ''
+  })
 
   chatStreaming.value = true
   chatSubtitle.value = 'Sedang memproses respon AI...'
   scrollChatBottom()
 
+  activeAbortController = new AbortController()
+
   try {
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text })
+      signal: activeAbortController.signal,
+      body: JSON.stringify({
+        message: text,
+        session_id: activeTopicId.value,
+        channel_id: currentTopicChannel.value,
+        model: selectedModel.value,
+        provider: selectedProvider.value
+      })
     })
 
     if (!response.ok) throw new Error('Server error: ' + response.statusText)
@@ -963,13 +1497,23 @@ async function sendChatMessage() {
 
           try {
             const parsed = JSON.parse(dataStr)
-            if (currentEvent === 'chunk' && parsed.text) {
+
+            // SSE stream status & progress handling
+            if ((currentEvent === 'start' || currentEvent === 'progress') && parsed.status) {
+              chatMessages.value[assistantMsgIndex].status = parsed.status
+              chatSubtitle.value = '⏳ ' + parsed.status
+            } else if (currentEvent === 'chunk' && parsed.text) {
+              chatMessages.value[assistantMsgIndex].status = '' // Clear progress status once chunks arrive
               chatMessages.value[assistantMsgIndex].content += parsed.text
             } else if (currentEvent === 'thinking' && parsed.text) {
               chatMessages.value[assistantMsgIndex].thinking += parsed.text
-            } else if (currentEvent === 'progress' && parsed.status) {
-              chatSubtitle.value = '⏳ ' + parsed.status
+            } else if (currentEvent === 'done') {
+              chatMessages.value[assistantMsgIndex].status = ''
+              if (!chatMessages.value[assistantMsgIndex].content && parsed.response) {
+                chatMessages.value[assistantMsgIndex].content = parsed.response
+              }
             } else if (currentEvent === 'error') {
+              chatMessages.value[assistantMsgIndex].status = ''
               chatMessages.value[assistantMsgIndex].content += `\n\n> ⚠️ **Error:** ${parsed.error}`
             }
           } catch (e) {}
@@ -978,12 +1522,38 @@ async function sendChatMessage() {
       scrollChatBottom()
     }
   } catch (err) {
-    chatMessages.value[assistantMsgIndex].content += `\n\n> ⚠️ **Koneksi terputus:** ${err.message}`
+    if (err.name === 'AbortError') {
+      chatMessages.value[assistantMsgIndex].status = ''
+      chatMessages.value[assistantMsgIndex].content += `\n\n🛑 *[Pemrosesan AI dihentikan oleh pengguna /stop]*`
+    } else {
+      chatMessages.value[assistantMsgIndex].status = ''
+      chatMessages.value[assistantMsgIndex].content += `\n\n> ⚠️ **Koneksi terputus:** ${err.message}`
+    }
   } finally {
     chatStreaming.value = false
     chatSubtitle.value = 'Terkoneksi langsung ke AI Orchestrator'
+    activeAbortController = null
     scrollChatBottom()
   }
+}
+
+async function handleStopChat() {
+  if (activeAbortController) {
+    activeAbortController.abort()
+  }
+  try {
+    await fetch('/api/chat/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: activeTopicId.value })
+    })
+    showToast('Perintah /stop dikirimkan ke server', 'warning')
+  } catch (e) {}
+}
+
+async function handleQuickStop() {
+  await handleStopChat()
+  commandMenuDialog.value = false
 }
 
 function scrollChatBottom() {
@@ -994,30 +1564,15 @@ function scrollChatBottom() {
   })
 }
 
-async function fetchChatHistory() {
-  try {
-    const res = await fetch('/api/chat/history')
-    if (!res.ok) return
-    const data = await res.json()
-    if (data.messages && data.messages.length > 0) {
-      chatMessages.value = data.messages.map(m => ({
-        role: m.role,
-        content: m.content,
-        thinking: ''
-      }))
-      scrollChatBottom()
-    }
-  } catch (e) {}
-}
-
 async function handleResetChat() {
-  if (!confirm('Bersihkan riwayat percakapan web chat?')) return
+  if (!confirm('Bersihkan riwayat obrolan topik ini?')) return
   try {
     await fetch('/api/chat/clear', { method: 'POST' })
     chatMessages.value = [
       {
         role: 'assistant',
-        content: 'Riwayat obrolan berhasil dibersihkan. Silakan mulai topik percakapan baru!',
+        content: 'Riwayat obrolan berhasil dibersihkan. Silakan mulai pertanyaan baru!',
+        status: '',
         thinking: ''
       }
     ]
@@ -1027,7 +1582,7 @@ async function handleResetChat() {
   }
 }
 
-// System & Port Handlers
+// System, Binding & Port Handlers
 async function fetchSystemStats() {
   try {
     const res = await fetch('/api/system/stats')
@@ -1035,42 +1590,53 @@ async function fetchSystemStats() {
     const data = await res.json()
     sysStats.value = data
     currentWebPort.value = data.current_web_port || 12111
-    currentHostUrl.value = window.location.protocol + '//' + window.location.hostname + ':' + currentWebPort.value + '/admin'
+    currentBindAddress.value = data.current_bind_address || '0.0.0.0'
+    bindAddressInput.value = currentBindAddress.value
+    newPortInput.value = currentWebPort.value.toString()
+    const host = currentBindAddress.value === '0.0.0.0' ? window.location.hostname : currentBindAddress.value
+    currentHostUrl.value = window.location.protocol + '//' + host + ':' + currentWebPort.value + '/admin'
   } catch (e) {}
 }
 
-async function handleSavePort() {
+async function handleSaveAddress() {
   const p = parseInt(newPortInput.value, 10)
   if (!p || p < 1024 || p > 65535) {
     alert('Nomor port harus berupa angka antara 1024 sampai 65535.')
     return
   }
 
-  if (!confirm(`Konfirmasi: Pindahkan port Web Admin ke ${p}? Halaman akan berpindah ke port baru.`)) {
+  const bindAddr = bindAddressInput.value.trim() || '0.0.0.0'
+
+  if (!confirm(`Konfirmasi: Pindahkan Web Admin ke ${bindAddr}:${p}? Halaman akan diarahkan ke alamat baru.`)) {
     return
   }
 
-  updatingPort.value = true
+  updatingAddress.value = true
   try {
-    const res = await fetch('/api/system/port', {
+    const res = await fetch('/api/system/address', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ port: p })
+      body: JSON.stringify({
+        port: p,
+        bind_address: bindAddr
+      })
     })
     const data = await res.json()
     if (res.ok) {
-      showToast(`Port berhasil diubah ke ${p}. Mengalihkan...`, 'success')
+      showToast(`Alamat berhasil diubah ke ${bindAddr}:${p}. Mengalihkan...`, 'success')
+      const targetHost = bindAddr === '0.0.0.0' ? window.location.hostname : bindAddr
       setTimeout(() => {
-        window.location.href = window.location.protocol + '//' + window.location.hostname + ':' + p + '/admin'
-      }, 1500)
+        window.location.href = window.location.protocol + '//' + targetHost + ':' + p + '/admin'
+      }, 1800)
     } else {
-      alert('Gagal mengubah port: ' + (data.error || 'Unknown error'))
-      updatingPort.value = false
+      alert('Gagal mengubah alamat: ' + (data.error || 'Unknown error'))
+      updatingAddress.value = false
     }
   } catch (e) {
-    showToast(`Server sedang berpindah ke port ${p}...`, 'info')
+    showToast(`Server sedang berpindah ke ${bindAddr}:${p}...`, 'info')
+    const targetHost = bindAddr === '0.0.0.0' ? window.location.hostname : bindAddr
     setTimeout(() => {
-      window.location.href = window.location.protocol + '//' + window.location.hostname + ':' + p + '/admin'
+      window.location.href = window.location.protocol + '//' + targetHost + ':' + p + '/admin'
     }, 2000)
   }
 }
@@ -1106,6 +1672,20 @@ onMounted(() => {
 .bubble-card {
   border-radius: 16px !important;
   word-break: break-word;
+}
+
+.bg-black-opacity {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.animate-pulse {
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.85; transform: scale(1.02); }
+  100% { opacity: 1; transform: scale(1); }
 }
 
 /* Markdown typography inside chat bubble */

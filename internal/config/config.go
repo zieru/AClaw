@@ -75,10 +75,11 @@ type AppConfig struct {
 	} `yaml:"http_server"`
 
 	WebAdmin struct {
-		Enabled           bool `yaml:"enabled"`
-		Port              int  `yaml:"port"`
-		SessionTTLMinutes int  `yaml:"session_ttl_minutes"`
-		OTPTTLMinutes     int  `yaml:"otp_ttl_minutes"`
+		Enabled           bool   `yaml:"enabled"`
+		BindAddress       string `yaml:"bind_address"`
+		Port              int    `yaml:"port"`
+		SessionTTLMinutes int    `yaml:"session_ttl_minutes"`
+		OTPTTLMinutes     int    `yaml:"otp_ttl_minutes"`
 	} `yaml:"web_admin"`
 
 	Updater struct {
@@ -162,6 +163,7 @@ func Load(configPath string) (*AppConfig, error) {
 		cfg.HTTPServer.WriteTimeoutSeconds = 45
 
 		cfg.WebAdmin.Enabled = true
+		cfg.WebAdmin.BindAddress = "0.0.0.0"
 		cfg.WebAdmin.Port = 12111
 		cfg.WebAdmin.SessionTTLMinutes = 1440
 		cfg.WebAdmin.OTPTTLMinutes = 5

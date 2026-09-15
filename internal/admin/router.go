@@ -51,6 +51,12 @@ func (a *AdminBot) registerRoutes() {
 		}
 		return c.Send("⚠️ Layanan Web Admin belum diaktifkan.", tele.ModeHTML)
 	})
+	a.bot.Handle("/setwebbind", func(c tele.Context) error {
+		if a.webAdminUI != nil {
+			return a.webAdminUI.HandleSetBindCommand(c)
+		}
+		return c.Send("⚠️ Layanan Web Admin belum diaktifkan.", tele.ModeHTML)
+	})
 
 	// Topic / Multi-Chat Commands
 	a.bot.Handle("/topic", a.topicUI.HandleTopicDashboard)

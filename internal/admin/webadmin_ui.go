@@ -111,11 +111,39 @@ func (u *WebAdminUI) HandleRestartCallback(c tele.Context) error {
 	}
 
 	currentPort := u.server.GetPort()
-	if err := u.server.Restart(currentPort); err != nil {
+	if err := u.server.RestartPort(currentPort); err != nil {
 		return c.Send(fmt.Sprintf("❌ Gagal merestart Web Admin: %v", err), tele.ModeHTML)
 	}
 
 	return u.HandleWebAdminDashboard(c)
+}
+
+// HandleSetBindCommand handles /setwebbind <address>
+func (u *WebAdminUI) HandleSetBindCommand(c tele.Context) error {
+	args := c.Args()
+	if len(args) == 0 {
+		return c.Send("📝 <b>PENGATURAN BINDING ADDRESS WEB ADMIN</b>\n\n"+
+			"Format: <code>/setwebbind &lt;address&gt;</code>\n"+
+			"<i>Contoh:</i>\n"+
+			"• <code>/setwebbind 0.0.0.0</code> (Dapat diakses dari seluruh jaringan)\n"+
+			"• <code>/setwebbind 127.0.0.1</code> (Hanya akses lokal server/localhost)\n\n"+
+			fmt.Sprintf("Binding aktif saat ini: <code>%s</code>", u.server.GetBindAddress()), tele.ModeHTML)
+	}
+
+	newBind := strings.TrimSpace(args[0])
+	if u.server == nil {
+		return c.Send("⚠️ Layanan Web Admin belum diaktifkan.", tele.ModeHTML)
+	}
+
+	currentPort := u.server.GetPort()
+	if err := u.server.Restart(newBind, currentPort); err != nil {
+		return c.Send(fmt.Sprintf("❌ <b>Gagal mengatur binding address:</b> %v", err), tele.ModeHTML)
+	}
+
+	return c.Send(fmt.Sprintf("✅ <b>BINDING ADDRESS BERHASIL DIUBAH!</b>\n\n"+
+		"🌐 <b>Host:</b> <code>%s</code>\n"+
+		"🔌 <b>Port:</b> <code>%d</code>\n"+
+		"🔗 <b>URL:</b> <code>%s</code>", newBind, currentPort, u.server.GetURL()), tele.ModeHTML)
 }
 
 func (u *WebAdminUI) applyPortChange(c tele.Context, portStr string) error {
@@ -135,7 +163,7 @@ func (u *WebAdminUI) applyPortChange(c tele.Context, portStr string) error {
 
 	msg, _ := u.bot.Send(c.Chat(), fmt.Sprintf("⏳ <i>Sedang memindahkan listener Web Admin dari port %d ke %d...</i>", oldPort, port), tele.ModeHTML)
 
-	if err := u.server.Restart(port); err != nil {
+	if err := u.server.RestartPort(port); err != nil {
 		if msg != nil {
 			_, _ = u.bot.Edit(msg, fmt.Sprintf("❌ <b>Gagal berpindah port:</b> %v", err), tele.ModeHTML)
 		}

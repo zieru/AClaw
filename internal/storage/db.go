@@ -1161,6 +1161,42 @@ func (d *DB) ListChatSessions(channelID, chatID string) ([]*ChatSessionRecord, e
 	return list, nil
 }
 
+// ListAllChatSessions returns all topics/sessions across all channels or filtered by channel
+func (d *DB) ListAllChatSessions(channelID string, limit int) ([]*ChatSessionRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 100
+	}
+
+	query := "SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions"
+	var args []interface{}
+	if channelID != "" && channelID != "all" {
+		query += " WHERE channel_id = ?"
+		args = append(args, channelID)
+	}
+	query += " ORDER BY updated_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []*ChatSessionRecord
+	for rows.Next() {
+		var s ChatSessionRecord
+		var isActiveInt int
+		if err := rows.Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt); err == nil {
+			s.IsActive = (isActiveInt == 1)
+			list = append(list, &s)
+		}
+	}
+	return list, nil
+}
+
 // CreateChatSession creates a new session/topic for a chat. If setActive is true, marks others as inactive.
 func (d *DB) CreateChatSession(channelID, chatID, userID, title string, setActive bool) (*ChatSessionRecord, error) {
 	d.mu.Lock()
@@ -1194,6 +1230,43 @@ func (d *DB) CreateChatSession(channelID, chatID, userID, title string, setActiv
 		return nil, err
 	}
 	return s, nil
+}
+
+// GetChatSession returns a single chat session by ID
+func (d *DB) GetChatSession(sessionID string) (*ChatSessionRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var s ChatSessionRecord
+	var isActiveInt int
+	err := d.db.QueryRow("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE id = ?", sessionID).
+		Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	s.IsActive = (isActiveInt == 1)
+	return &s, nil
+}
+
+// ListChannelsWithTopics returns distinct channel IDs that have active sessions/topics
+func (d *DB) ListChannelsWithTopics() ([]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT DISTINCT channel_id FROM chat_sessions WHERE channel_id != '' ORDER BY channel_id ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channels []string
+	for rows.Next() {
+		var ch string
+		if err := rows.Scan(&ch); err == nil && ch != "" {
+			channels = append(channels, ch)
+		}
+	}
+	return channels, nil
 }
 
 // SwitchChatSession sets the specified session as active and deactivates others in the chat

@@ -51,5 +51,18 @@ desktop.ini
 *.test
 *.out
 coverage.html
-/node_modules
-/webadmin/node_modules
+
+# Node.js & Frontend Build Outputs
+node_modules/
+**/node_modules/
+.nuxt/
+**/.nuxt/
+.output/
+**/.output/
+.nitro/
+**/.nitro/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*

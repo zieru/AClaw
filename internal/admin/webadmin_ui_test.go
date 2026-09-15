@@ -34,7 +34,7 @@ func TestWebAdminUI_PortValidation(t *testing.T) {
 	}
 
 	// Dynamic restart
-	if err := srv.Restart(12991); err != nil {
+	if err := srv.RestartPort(12991); err != nil {
 		t.Fatalf("failed to restart port to 12991: %v", err)
 	}
 

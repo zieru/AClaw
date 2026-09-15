@@ -25,9 +25,10 @@ type SystemStatsResponse struct {
 	MemorySysMB     float64           `json:"memory_sys_mb"`
 	Goroutines      int               `json:"goroutines"`
 	GoVersion       string            `json:"go_version"`
-	TotalAuditLogs  int               `json:"total_audit_logs"`
-	CurrentWebPort  int               `json:"current_web_port"`
-	ActiveProviders []string          `json:"active_providers"`
+	TotalAuditLogs     int               `json:"total_audit_logs"`
+	CurrentWebPort     int               `json:"current_web_port"`
+	CurrentBindAddress string            `json:"current_bind_address"`
+	ActiveProviders    []string          `json:"active_providers"`
 	ChannelStats    map[string]int    `json:"channel_stats"`
 	ServerTime      string            `json:"server_time"`
 }
@@ -166,9 +167,10 @@ func (s *Server) handleSystemStats(w http.ResponseWriter, r *http.Request) {
 		MemorySysMB:     float64(m.Sys) / 1024 / 1024,
 		Goroutines:      runtime.NumGoroutine(),
 		GoVersion:       runtime.Version(),
-		TotalAuditLogs:  totalLogs,
-		CurrentWebPort:  s.GetPort(),
-		ActiveProviders: activeProvNames,
+		TotalAuditLogs:     totalLogs,
+		CurrentWebPort:     s.GetPort(),
+		CurrentBindAddress: s.GetBindAddress(),
+		ActiveProviders:    activeProvNames,
 		ChannelStats:    channelStats,
 		ServerTime:      time.Now().Format("2006-01-02 15:04:05"),
 	}

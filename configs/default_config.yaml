@@ -57,7 +57,8 @@ http_server:
 # GoAssistant Web Admin Configuration (Khusus Administrator)
 web_admin:
   enabled: true              # Aktifkan Web Admin dashboard & web chat
-  port: 12111                # Port Web Admin (bisa diubah dinamis lewat Telegram: /setwebport <port>)
+  bind_address: "0.0.0.0"    # Binding IP host (0.0.0.0 untuk semua interface, 127.0.0.1 untuk localhost)
+  port: 12111                # Port Web Admin (bisa diubah dinamis lewat Telegram: /setwebport [ip] <port>)
   session_ttl_minutes: 1440  # Masa aktif login admin (menit)
   otp_ttl_minutes: 5         # Masa berlaku kode OTP Telegram (menit)
 
