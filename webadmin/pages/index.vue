@@ -1301,6 +1301,7 @@ const currentThinkingValueLabel = computed(() => {
 })
 
 function onProviderChange(provId) {
+  if (!provId) return
   selectedProviderId.value = provId
   const currentProv = rawProvidersData.value.find(p => p.id === provId)
   if (currentProv && currentProv.models && currentProv.models.length > 0) {
@@ -1310,13 +1311,16 @@ function onProviderChange(provId) {
 }
 
 function onModelChange(modelId) {
+  if (!modelId) return
   selectedModel.value = modelId
-  if (currentModelThinkingConfig.value) {
-    if (currentModelThinkingConfig.value.default_value) {
-      if (currentModelThinkingConfig.value.parameter_type === 'object') {
-        thinkingBudget.value = parseInt(currentModelThinkingConfig.value.default_value, 10) || 4096
+  const modelDetail = availableModelsForSelectedProvider.value.find(m => m.id === modelId)
+  if (modelDetail && modelDetail.thinking_config) {
+    const cfg = modelDetail.thinking_config
+    if (cfg.default_value) {
+      if (cfg.parameter_type === 'object') {
+        thinkingBudget.value = parseInt(cfg.default_value, 10) || 4096
       } else {
-        thinkingLevel.value = currentModelThinkingConfig.value.default_value
+        thinkingLevel.value = cfg.default_value
       }
     }
   }

@@ -308,15 +308,37 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 	if provToCall == "" {
 		provToCall = activeProvName
 	}
-	modelToUse = policy.ModelOverride
-	if strings.HasPrefix(strings.ToLower(policy.ModelOverride), "provider:") ||
-		strings.HasPrefix(strings.ToLower(policy.ModelOverride), "resilient:") {
-		modelToUse = ""
-	} else if strings.Contains(policy.ModelOverride, ":") && !strings.HasPrefix(strings.ToLower(policy.ModelOverride), "combo:") {
-		parts := strings.SplitN(policy.ModelOverride, ":", 2)
-		if _, ok := o.providerManager.Get(parts[0]); ok {
+
+	if req.PreferredModel != "" {
+		if strings.HasPrefix(strings.ToLower(req.PreferredModel), "provider:") ||
+			strings.HasPrefix(strings.ToLower(req.PreferredModel), "resilient:") {
+			colonIdx := strings.Index(req.PreferredModel, ":")
+			provToCall = strings.TrimSpace(req.PreferredModel[colonIdx+1:])
+			modelToUse = ""
+		} else if strings.Contains(req.PreferredModel, ":") && !strings.HasPrefix(strings.ToLower(req.PreferredModel), "combo:") {
+			parts := strings.SplitN(req.PreferredModel, ":", 2)
+			provToCall = parts[0]
 			modelToUse = parts[1]
+		} else {
+			modelToUse = req.PreferredModel
 		}
+		activeModelName = modelToUse
+	} else if policy.ModelOverride != "" {
+		modelToUse = policy.ModelOverride
+		if strings.HasPrefix(strings.ToLower(policy.ModelOverride), "provider:") ||
+			strings.HasPrefix(strings.ToLower(policy.ModelOverride), "resilient:") {
+			modelToUse = ""
+		} else if strings.Contains(policy.ModelOverride, ":") && !strings.HasPrefix(strings.ToLower(policy.ModelOverride), "combo:") {
+			parts := strings.SplitN(policy.ModelOverride, ":", 2)
+			if _, ok := o.providerManager.Get(parts[0]); ok {
+				modelToUse = parts[1]
+			}
+		}
+		activeModelName = modelToUse
+	}
+
+	if activeModelName == "" && activeProv != nil {
+		activeModelName = activeProv.DefaultModel()
 	}
 
 	// 4. Exact Response Cache Check (0 Token, Instant Delivery)
