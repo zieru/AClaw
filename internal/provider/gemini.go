@@ -65,27 +65,72 @@ type geminiBlob struct {
 
 type geminiPart struct {
 	Text             string              `json:"text,omitempty"`
-	Thought          string              `json:"thought,omitempty"`
+	Thought          string              `json:"-"`
+	IsThought        bool                `json:"-"`
 	InlineData       *geminiBlob         `json:"inlineData,omitempty"`
 	FunctionCall     *geminiFunctionCall `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResp `json:"functionResponse,omitempty"`
 	ThoughtSignature string              `json:"thought_signature,omitempty"`
 }
 
-func (p *geminiPart) UnmarshalJSON(data []byte) error {
+func (p geminiPart) MarshalJSON() ([]byte, error) {
 	type Alias geminiPart
 	aux := struct {
-		*Alias
-		CamelThoughtSig string `json:"thoughtSignature"`
+		Alias
+		Thought interface{} `json:"thought,omitempty"`
 	}{
-		Alias: (*Alias)(p),
+		Alias: Alias(p),
 	}
-	if err := json.Unmarshal(data, &aux); err != nil {
+	if p.IsThought {
+		aux.Thought = true
+	}
+	return json.Marshal(aux)
+}
+
+func (p *geminiPart) UnmarshalJSON(data []byte) error {
+	type rawPart struct {
+		Text             string              `json:"text,omitempty"`
+		Thought          json.RawMessage     `json:"thought,omitempty"`
+		InlineData       *geminiBlob         `json:"inlineData,omitempty"`
+		FunctionCall     *geminiFunctionCall `json:"functionCall,omitempty"`
+		FunctionResponse *geminiFunctionResp `json:"functionResponse,omitempty"`
+		ThoughtSignature string              `json:"thought_signature,omitempty"`
+		CamelThoughtSig  string              `json:"thoughtSignature,omitempty"`
+	}
+
+	var raw rawPart
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	if p.ThoughtSignature == "" && aux.CamelThoughtSig != "" {
-		p.ThoughtSignature = aux.CamelThoughtSig
+
+	p.Text = raw.Text
+	p.InlineData = raw.InlineData
+	p.FunctionCall = raw.FunctionCall
+	p.FunctionResponse = raw.FunctionResponse
+	p.ThoughtSignature = raw.ThoughtSignature
+	if p.ThoughtSignature == "" && raw.CamelThoughtSig != "" {
+		p.ThoughtSignature = raw.CamelThoughtSig
 	}
+
+	// In Google Gemini API, thought can be a boolean ("thought": true) with text in raw.Text,
+	// or in some proxies/wrappers it can be a string ("thought": "reasoning text").
+	if len(raw.Thought) > 0 {
+		var b bool
+		if err := json.Unmarshal(raw.Thought, &b); err == nil {
+			if b {
+				p.IsThought = true
+				p.Thought = raw.Text
+				p.Text = "" // Clear Text so it's not duplicated as regular message output
+			}
+		} else {
+			var s string
+			if err := json.Unmarshal(raw.Thought, &s); err == nil {
+				p.IsThought = true
+				p.Thought = s
+			}
+		}
+	}
+
 	return nil
 }
 

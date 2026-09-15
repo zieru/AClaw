@@ -145,3 +145,50 @@ func TestGeminiPartThoughtSignatureUnmarshal(t *testing.T) {
 		t.Errorf("expected sig_camel_456, got '%s'", pCamel.ThoughtSignature)
 	}
 }
+
+func TestGeminiPartThoughtUnmarshal(t *testing.T) {
+	// Case 1: Google Gemini API native format: thought is boolean true, thinking text is in text field
+	jsonBool := `{"text":"Mari kita hitung 2 + 2 = 4","thought":true}`
+	var pBool geminiPart
+	if err := json.Unmarshal([]byte(jsonBool), &pBool); err != nil {
+		t.Fatalf("failed to unmarshal thought bool: %v", err)
+	}
+	if !pBool.IsThought {
+		t.Errorf("expected IsThought to be true")
+	}
+	if pBool.Thought != "Mari kita hitung 2 + 2 = 4" {
+		t.Errorf("expected Thought 'Mari kita hitung 2 + 2 = 4', got '%s'", pBool.Thought)
+	}
+	if pBool.Text != "" {
+		t.Errorf("expected Text to be cleared for thought part, got '%s'", pBool.Text)
+	}
+
+	// Case 2: Proxy or alternative format: thought is a string
+	jsonString := `{"thought":"Ini proses berpikir string"}`
+	var pStr geminiPart
+	if err := json.Unmarshal([]byte(jsonString), &pStr); err != nil {
+		t.Fatalf("failed to unmarshal thought string: %v", err)
+	}
+	if !pStr.IsThought {
+		t.Errorf("expected IsThought to be true")
+	}
+	if pStr.Thought != "Ini proses berpikir string" {
+		t.Errorf("expected Thought 'Ini proses berpikir string', got '%s'", pStr.Thought)
+	}
+
+	// Case 3: Regular text response with thought=false
+	jsonNormal := `{"text":"Halo ini jawaban akhir","thought":false}`
+	var pNorm geminiPart
+	if err := json.Unmarshal([]byte(jsonNormal), &pNorm); err != nil {
+		t.Fatalf("failed to unmarshal thought false: %v", err)
+	}
+	if pNorm.IsThought {
+		t.Errorf("expected IsThought to be false")
+	}
+	if pNorm.Text != "Halo ini jawaban akhir" {
+		t.Errorf("expected Text 'Halo ini jawaban akhir', got '%s'", pNorm.Text)
+	}
+	if pNorm.Thought != "" {
+		t.Errorf("expected Thought to be empty, got '%s'", pNorm.Thought)
+	}
+}
