@@ -120,7 +120,7 @@
             <v-icon size="20" color="white">mdi-lightning-bolt</v-icon>
           </v-avatar>
           <div>
-            <div class="font-weight-bold text-subtitle-1 leading-tight text-white">
+            <div class="font-weight-bold text-subtitle-1 leading-tight text-high-emphasis">
               GoAssistant <span class="text-primary font-weight-light">Admin</span>
             </div>
             <div class="text-caption text-medium-emphasis">Control Plane & Analytics</div>
@@ -141,6 +141,15 @@
         </v-tabs>
 
         <div class="d-flex align-center ga-2">
+          <!-- Dark / Light Theme Toggle Button -->
+          <v-btn
+            :icon="isDark ? 'mdi-weather-sunny' : 'mdi-weather-night'"
+            variant="text"
+            size="small"
+            :title="isDark ? 'Beralih ke Light Mode' : 'Beralih ke Dark Mode'"
+            @click="toggleTheme"
+          />
+
           <!-- Button Menu Telegram Quick Actions -->
           <v-btn
             variant="tonal"
@@ -409,12 +418,13 @@
             >
               <!-- LEFT: Topics Sidebar -->
               <v-col
+                v-if="showDesktopTopicList || showMobileTopicList"
                 cols="12"
                 md="4"
                 lg="3"
                 class="bg-surface border-e d-flex flex-column"
                 style="height: 100%; min-height: 0; max-height: 100%;"
-                :class="{ 'd-none d-md-flex': !showMobileTopicList }"
+                :class="{ 'd-none d-md-flex': !showMobileTopicList && showDesktopTopicList, 'd-flex': showMobileTopicList }"
               >
                 <!-- Topic Header -->
                 <div class="pa-3 border-b d-flex justify-space-between align-center flex-shrink-0">
@@ -422,15 +432,24 @@
                     <v-icon color="primary" class="me-2">mdi-forum</v-icon>
                     <span class="font-weight-bold text-subtitle-2">Topik & Sesi Channel</span>
                   </div>
-                  <v-btn
-                    color="primary"
-                    size="small"
-                    variant="tonal"
-                    prepend-icon="mdi-plus"
-                    @click="newTopicDialog = true"
-                  >
-                    Topik Baru
-                  </v-btn>
+                  <div class="d-flex align-center ga-1">
+                    <v-btn
+                      color="primary"
+                      size="small"
+                      variant="tonal"
+                      prepend-icon="mdi-plus"
+                      @click="newTopicDialog = true"
+                    >
+                      Topik Baru
+                    </v-btn>
+                    <v-btn
+                      icon="mdi-close"
+                      size="x-small"
+                      variant="text"
+                      class="d-md-none"
+                      @click="showMobileTopicList = false"
+                    />
+                  </div>
                 </div>
 
                 <!-- Channel Filter Selector -->
@@ -489,8 +508,8 @@
               <!-- RIGHT: Chat Window -->
               <v-col
                 cols="12"
-                md="8"
-                lg="9"
+                :md="showDesktopTopicList ? 8 : 12"
+                :lg="showDesktopTopicList ? 9 : 12"
                 class="d-flex flex-column bg-surface"
                 style="height: 100%; min-height: 0; max-height: 100%; overflow: hidden;"
               >
@@ -502,7 +521,16 @@
                       variant="text"
                       size="small"
                       class="d-md-none"
+                      title="Buka Daftar Topik"
                       @click="showMobileTopicList = !showMobileTopicList"
+                    />
+                    <v-btn
+                      :icon="showDesktopTopicList ? 'mdi-dock-left' : 'mdi-dock-window'"
+                      variant="text"
+                      size="small"
+                      class="d-none d-md-flex"
+                      :title="showDesktopTopicList ? 'Sembunyikan Panel Topik' : 'Tampilkan Panel Topik'"
+                      @click="showDesktopTopicList = !showDesktopTopicList"
                     />
 
                     <div>
@@ -630,7 +658,8 @@
                       </v-expansion-panels>
 
                       <v-card
-                        :color="msg.role === 'user' ? 'primary' : 'surface-variant'"
+                        :color="msg.role === 'user' ? 'primary' : undefined"
+                        :class="msg.role === 'user' ? 'bubble-user' : 'bubble-assistant'"
                         class="pa-3 pa-sm-4 bubble-card"
                         elevation="1"
                       >
@@ -1136,7 +1165,19 @@
 
 <script setup>
 import { ref, computed, onMounted, nextTick } from 'vue'
+import { useTheme } from 'vuetify'
 import MarkdownIt from 'markdown-it'
+
+const theme = useTheme()
+const isDark = computed(() => theme.global.current.value.dark)
+
+function toggleTheme() {
+  const nextTheme = isDark.value ? 'light' : 'dark'
+  theme.global.name.value = nextTheme
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem('goassistant_theme', nextTheme)
+  }
+}
 
 const md = new MarkdownIt({
   html: false,
@@ -1190,6 +1231,7 @@ const selectedTopicChannel = ref('all')
 const activeTopicId = ref('')
 const currentTopicTitle = ref('Topik Utama (Admin Telegram)')
 const currentTopicChannel = ref('admin')
+const showDesktopTopicList = ref(true)
 const showMobileTopicList = ref(false)
 const newTopicDialog = ref(false)
 const newTopicTitle = ref('')
@@ -1859,6 +1901,12 @@ async function handleSaveAddress() {
 }
 
 onMounted(() => {
+  if (typeof localStorage !== 'undefined') {
+    const saved = localStorage.getItem('goassistant_theme')
+    if (saved === 'light' || saved === 'dark') {
+      theme.global.name.value = saved
+    }
+  }
   checkAuth()
 })
 </script>
@@ -1931,22 +1979,93 @@ onMounted(() => {
   background: rgba(255, 255, 255, 0.45);
 }
 
-/* Markdown typography inside chat bubble */
+/* Assistant Bubble - Dark Theme */
+.v-theme--dark .bubble-assistant {
+  background-color: #1e293b !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  color: #f8fafc !important;
+}
+
+/* Assistant Bubble - Light Theme */
+.v-theme--light .bubble-assistant {
+  background-color: #f8fafc !important;
+  border: 1px solid #e2e8f0 !important;
+  color: #0f172a !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+}
+
+/* User Bubble */
+.bubble-user {
+  color: #ffffff !important;
+}
+
+/* Markdown typography inside chat bubble - High Contrast */
 :deep(.markdown-body) {
   font-size: 0.925rem;
-  line-height: 1.6;
+  line-height: 1.65;
+  color: inherit !important;
 }
 
 :deep(.markdown-body p) {
   margin-bottom: 0.5rem;
+  color: inherit !important;
 }
 
 :deep(.markdown-body p:last-child) {
   margin-bottom: 0;
 }
 
+:deep(.markdown-body h1),
+:deep(.markdown-body h2),
+:deep(.markdown-body h3),
+:deep(.markdown-body h4) {
+  margin-top: 0.75rem;
+  margin-bottom: 0.5rem;
+  font-weight: 700;
+  color: inherit !important;
+}
+
+:deep(.markdown-body strong),
+:deep(.markdown-body b) {
+  font-weight: 700;
+  color: inherit !important;
+}
+
+:deep(.markdown-body ul),
+:deep(.markdown-body ol) {
+  padding-left: 1.25rem;
+  margin-bottom: 0.5rem;
+  color: inherit !important;
+}
+
+:deep(.markdown-body li) {
+  margin-bottom: 0.25rem;
+  color: inherit !important;
+}
+
+/* Code styling inside Markdown */
+.v-theme--dark :deep(.markdown-body code) {
+  background: rgba(255, 255, 255, 0.12) !important;
+  color: #38bdf8 !important;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85em;
+}
+
+.v-theme--light :deep(.markdown-body code) {
+  background: #e2e8f0 !important;
+  color: #0369a1 !important;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85em;
+}
+
 :deep(.markdown-body pre) {
   background: #0b1329 !important;
+  color: #f8fafc !important;
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
   padding: 10px 14px;
   margin: 8px 0;
@@ -1955,11 +2074,20 @@ onMounted(() => {
   font-size: 0.825rem;
 }
 
-:deep(.markdown-body code) {
-  background: rgba(255, 255, 255, 0.1);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.85em;
+:deep(.markdown-body pre code) {
+  background: transparent !important;
+  color: inherit !important;
+  padding: 0 !important;
+}
+
+/* Links inside Markdown */
+.v-theme--dark :deep(.markdown-body a) {
+  color: #818cf8 !important;
+  text-decoration: underline;
+}
+
+.v-theme--light :deep(.markdown-body a) {
+  color: #4f46e5 !important;
+  text-decoration: underline;
 }
 </style>
