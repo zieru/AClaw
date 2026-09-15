@@ -1211,8 +1211,8 @@ const channelCreateOptions = [
 
 // Hierarchical Provider => Model State
 const rawProvidersData = ref([])
-const selectedProviderId = ref('google')
-const selectedModel = ref('gemini-3.8-flash')
+const selectedProviderId = ref('')
+const selectedModel = ref('')
 
 // Thinking Configuration State
 const thinkingDialog = ref(false)
@@ -1221,16 +1221,7 @@ const thinkingBudget = ref(4096)
 
 const providerOptions = computed(() => {
   if (!rawProvidersData.value || rawProvidersData.value.length === 0) {
-    return [
-      { title: 'Google (Gemini)', value: 'google' },
-      { title: 'OpenAI', value: 'openai' },
-      { title: 'DeepSeek', value: 'deepseek' },
-      { title: 'Anthropic', value: 'anthropic' },
-      { title: 'xAI (Grok)', value: 'xai' },
-      { title: 'Alibaba Cloud (Qwen)', value: 'alibaba' },
-      { title: 'Mistral AI', value: 'mistral' },
-      { title: 'MiniMax', value: 'minimax' }
-    ]
+    return []
   }
   return rawProvidersData.value.map(p => ({
     title: p.name,
@@ -1629,16 +1620,34 @@ async function fetchModels() {
       const data = await res.json()
       if (data.providers && data.providers.length > 0) {
         rawProvidersData.value = data.providers
+
+        // 1. Resolve Provider
+        let targetProv = data.providers.find(p => p.id === selectedProviderId.value)
+        if (!targetProv && data.active_provider) {
+          targetProv = data.providers.find(p => p.id === data.active_provider)
+        }
+        if (!targetProv) {
+          targetProv = data.providers[0]
+        }
+        selectedProviderId.value = targetProv.id
+
+        // 2. Resolve Model
+        let targetModel = targetProv.models && targetProv.models.find(m => m.id === selectedModel.value)
+        if (!targetModel && data.active_model) {
+          targetModel = targetProv.models && targetProv.models.find(m => m.id === data.active_model)
+        }
+        if (!targetModel && targetProv.models && targetProv.models.length > 0) {
+          targetModel = targetProv.models[0]
+        }
+        if (targetModel) {
+          selectedModel.value = targetModel.id
+          onModelChange(selectedModel.value)
+        }
       }
-      if (data.active_provider) {
-        selectedProviderId.value = data.active_provider
-      }
-      if (data.active_model) {
-        selectedModel.value = data.active_model
-      }
-      onModelChange(selectedModel.value)
     }
-  } catch (e) {}
+  } catch (e) {
+    console.error('Gagal mengambil daftar model/provider:', e)
+  }
 }
 
 // Chat Handlers & Stop AI
