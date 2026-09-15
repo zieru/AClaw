@@ -551,8 +551,23 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 	defer m.mu.RUnlock()
 
 	// 1. Check if model or preferredName is a registered Combo (e.g. "combo:smart" or "smart")
-	comboName := strings.ToLower(strings.TrimPrefix(req.Model, "combo:"))
-	if combo, ok := m.combos[comboName]; ok && combo.IsActive && len(combo.Targets) > 0 {
+	isComboReq := strings.HasPrefix(strings.ToLower(req.Model), "combo:") || strings.HasPrefix(strings.ToLower(preferredName), "combo:")
+	comboName := ""
+	if isComboReq {
+		if strings.HasPrefix(strings.ToLower(req.Model), "combo:") {
+			comboName = strings.ToLower(strings.TrimPrefix(req.Model, "combo:"))
+		} else {
+			comboName = strings.ToLower(strings.TrimPrefix(preferredName, "combo:"))
+		}
+	} else if preferredName == "" || strings.EqualFold(preferredName, "auto") || strings.EqualFold(preferredName, "combo") {
+		comboName = strings.ToLower(strings.TrimPrefix(req.Model, "combo:"))
+	} else if _, isProv := m.getLocked(preferredName); !isProv {
+		// preferredName is not a registered provider, check if it's a combo name
+		comboName = strings.ToLower(preferredName)
+	}
+
+	if comboName != "" {
+		if combo, ok := m.combos[comboName]; ok && combo.IsActive && len(combo.Targets) > 0 {
 		orderedTargets := m.GetOrderedTargets(combo)
 		var attemptErrors []string
 		for idx, target := range orderedTargets {
@@ -638,6 +653,7 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 			return nil, fmt.Errorf("combo '%s' seluruh target gagal (%d/%d): %s", combo.Name, len(attemptErrors), len(orderedTargets), strings.Join(attemptErrors, " | "))
 		}
 	}
+	}
 
 	// Parse provider prefix from req.Model if specified (e.g. "provider:dahl", "resilient:dahl", or "dahl:deepseek-ai/...")
 	if req.Model != "" && !strings.HasPrefix(strings.ToLower(req.Model), "combo:") {
@@ -674,7 +690,9 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 
 		if req.Model != "" {
 			supportsModel := false
-			if strings.EqualFold(p.DefaultModel(), req.Model) {
+			if strings.EqualFold(req.Model, "auto") || strings.EqualFold(req.Model, "default") {
+				supportsModel = true
+			} else if strings.EqualFold(p.DefaultModel(), req.Model) {
 				supportsModel = true
 			} else {
 				for _, mod := range p.Models() {
@@ -770,8 +788,12 @@ func executeProviderCall(ctx context.Context, p Provider, req ChatRequest) (*Cha
 		if resp.ProviderName == "" {
 			resp.ProviderName = p.Name()
 		}
-		if resp.Model == "" {
-			resp.Model = req.Model
+		if resp.Model == "" || strings.EqualFold(resp.Model, "auto") {
+			if p.DefaultModel() != "" && !strings.HasPrefix(p.DefaultModel(), "/") && !strings.EqualFold(p.DefaultModel(), "auto") {
+				resp.Model = p.DefaultModel()
+			} else if resp.Model == "" {
+				resp.Model = req.Model
+			}
 		}
 	}
 	return resp, err

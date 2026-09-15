@@ -298,6 +298,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			activeProv = allProvs[0]
 			activeProvName = activeProv.Name()
 		}
+	} else {
+		activeProvName = activeProv.Name()
 	}
 
 	if activeModelName == "" && activeProv != nil {
@@ -337,8 +339,10 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		activeModelName = modelToUse
 	}
 
-	if activeModelName == "" && activeProv != nil {
-		activeModelName = activeProv.DefaultModel()
+	if (activeModelName == "" || strings.EqualFold(activeModelName, "auto")) && activeProv != nil {
+		if activeProv.DefaultModel() != "" && !strings.HasPrefix(activeProv.DefaultModel(), "/") && !strings.EqualFold(activeProv.DefaultModel(), "auto") {
+			activeModelName = activeProv.DefaultModel()
+		}
 	}
 
 	// 4. Exact Response Cache Check (0 Token, Instant Delivery)
@@ -583,7 +587,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		totalTokensSaved += resp.CacheReadTokens
 		totalCostUSD += resp.CostUSD
 		lastModel = resp.Model
-		if lastModel == "" {
+		if lastModel == "" || strings.EqualFold(lastModel, "auto") {
 			lastModel = activeModelName
 		}
 		lastProviderName = resp.ProviderName
