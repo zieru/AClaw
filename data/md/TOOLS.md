@@ -84,4 +84,3 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
       * 📍 **Breakdown Regional:** Bandingkan performansi Sumbagut, Sumbagteng, dan Sumbagsel.
       * ⚠️ **Highlight Anomali & Bottlenecks:** Soroti cabang dengan waktu tunggu paling lama (> 6 menit) atau lonjakan volume tinggi.
       * 💡 **Rekomendasi Operasional:** Tindakan praktis untuk mengurangi antrean dan optimalisasi loket pelayanan.
-
