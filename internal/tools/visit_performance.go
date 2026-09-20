@@ -418,68 +418,93 @@ func captureWebScreenshot(ctx context.Context, targetURL string, section string)
 		return "", err
 	}
 
-	// Set viewport desktop resolusi tinggi agar 3 kolom charts & tables tersusun rapi berdampingan
+	// Set viewport desktop 1680px agar 5 kartu KPI, 3 charts, dan 3 tables muat berdampingan tanpa terpotong
 	_ = page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
-		Width:             1440,
-		Height:            900,
+		Width:             1680,
+		Height:            1050,
 		DeviceScaleFactor: 1.5,
 		Mobile:            false,
 	})
 
-	// 1. Sembunyikan navbar aplikasi dan tandai container target via JavaScript
+	// 1. Bersihkan navbar dan rapikan layout agar tidak terpotong horizontal & vertikal
 	prepareScript := `() => {
 		// Hilangkan navbar aplikasi (header.v-app-bar), navigation drawer, dan switch-view button
 		const navbars = document.querySelectorAll('.v-app-bar, header, nav, .v-navigation-drawer, .switch-view-btn');
 		navbars.forEach(el => el.style.setProperty('display', 'none', 'important'));
 
-		// Reset padding & margin top pada v-main dan visit-perf-view agar konten menempel bersih ke atas tanpa gap
-		document.querySelectorAll('.v-main').forEach(el => {
+		// Reset padding & margin top pada v-main dan visit-perf-view agar konten menempel bersih ke atas
+		document.querySelectorAll('.v-main, .visit-perf-view').forEach(el => {
 			el.style.setProperty('padding-top', '0px', 'important');
 			el.style.setProperty('margin-top', '0px', 'important');
+			el.style.setProperty('overflow', 'visible', 'important');
 		});
 
-		const root = document.querySelector('.visit-perf-view');
-		if (root) {
-			root.style.setProperty('padding-top', '0px', 'important');
-			root.style.setProperty('margin-top', '0px', 'important');
+		// Pastikan KPI Row (Total Area + Sumatera + Sumbagut + Sumbagteng + Sumbagsel) tidak overflow atau terpotong ke kanan
+		const kpiRow = document.querySelector('.perf-kpi-row');
+		if (kpiRow) {
+			kpiRow.style.setProperty('display', 'flex', 'important');
+			kpiRow.style.setProperty('flex-wrap', 'nowrap', 'important');
+			kpiRow.style.setProperty('overflow', 'visible', 'important');
+			kpiRow.style.setProperty('gap', '10px', 'important');
 		}
+
+		// Sesuaikan kartu KPI agar 5 kartu pas sempurna dalam satu baris di 1680px
+		document.querySelectorAll('.perf-kpi-total-card').forEach(el => {
+			el.style.setProperty('min-width', '170px', 'important');
+			el.style.setProperty('flex', '1 1 170px', 'important');
+		});
+		document.querySelectorAll('.perf-kpi-regional-card').forEach(el => {
+			el.style.setProperty('min-width', '180px', 'important');
+			el.style.setProperty('flex', '1 1 180px', 'important');
+		});
 
 		// Tandai container section KPI Cards
 		const kpiHeader = document.querySelector('.perf-header');
 		if (kpiHeader) kpiHeader.id = '__ga_section_kpi';
 
-		// Tandai container 3 Bar Charts (VISIT, WAITING, SERVING)
+		// Rapikan 3 Bar Charts (VISIT, WAITING, SERVING) agar berjajar 3 kolom penuh
 		const chartCards = document.querySelectorAll('.perf-chart-card');
 		if (chartCards.length > 0) {
 			const chartRow = chartCards[0].closest('.v-row') || chartCards[0].parentElement?.parentElement;
-			if (chartRow) chartRow.id = '__ga_section_charts';
+			if (chartRow) {
+				chartRow.id = '__ga_section_charts';
+				chartRow.style.setProperty('display', 'flex', 'important');
+				chartRow.style.setProperty('flex-wrap', 'nowrap', 'important');
+				chartRow.style.setProperty('overflow', 'visible', 'important');
+			}
+			chartCards.forEach(c => {
+				const col = c.closest('.v-col') || c.parentElement;
+				if (col) {
+					col.style.setProperty('flex', '0 0 33.333%', 'important');
+					col.style.setProperty('max-width', '33.333%', 'important');
+				}
+			});
 		}
 
-		// Tandai container 3 Tables (SUMBAGUT, SUMBAGTENG, SUMBAGSEL TOP TERRITORY)
+		// Rapikan 3 Tables (SUMBAGUT, SUMBAGTENG, SUMBAGSEL TOP TERRITORY) agar berjajar 3 kolom penuh
 		const tableCards = document.querySelectorAll('.perf-table-card');
 		if (tableCards.length > 0) {
 			const tableRow = tableCards[0].closest('.v-row') || tableCards[0].parentElement?.parentElement;
-			if (tableRow) tableRow.id = '__ga_section_tables';
+			if (tableRow) {
+				tableRow.id = '__ga_section_tables';
+				tableRow.style.setProperty('display', 'flex', 'important');
+				tableRow.style.setProperty('flex-wrap', 'nowrap', 'important');
+				tableRow.style.setProperty('overflow', 'visible', 'important');
+			}
+			tableCards.forEach(t => {
+				const col = t.closest('.v-col') || t.parentElement;
+				if (col) {
+					col.style.setProperty('flex', '0 0 33.333%', 'important');
+					col.style.setProperty('max-width', '33.333%', 'important');
+				}
+			});
 		}
 
 		return true;
 	}`
 
 	_, _ = page.Eval(prepareScript)
-	time.Sleep(500 * time.Millisecond)
-
-	// Tentukan selector elemen target berdasarkan parameter section
-	targetSelector := ".visit-perf-view"
-	switch section {
-	case "kpi":
-		targetSelector = "#__ga_section_kpi"
-	case "charts":
-		targetSelector = "#__ga_section_charts"
-	case "tables":
-		targetSelector = "#__ga_section_tables"
-	default:
-		targetSelector = ".visit-perf-view"
-	}
+	time.Sleep(600 * time.Millisecond)
 
 	screenshotDir := filepath.Join("data", "screenshots")
 	_ = os.MkdirAll(screenshotDir, 0755)
@@ -489,11 +514,29 @@ func captureWebScreenshot(ctx context.Context, targetURL string, section string)
 	absOutPath, _ := filepath.Abs(outPath)
 
 	var imgBytes []byte
-	if el, errEl := page.Element(targetSelector); errEl == nil && el != nil {
-		imgBytes, err = el.Screenshot(proto.PageCaptureScreenshotFormatPng, 0)
+
+	// Jika bagian spesifik diminta (kpi, charts, tables), ambil langsung bounding box elemennya
+	if section != "" && section != "overview" {
+		targetSelector := ""
+		switch section {
+		case "kpi":
+			targetSelector = "#__ga_section_kpi"
+		case "charts":
+			targetSelector = "#__ga_section_charts"
+		case "tables":
+			targetSelector = "#__ga_section_tables"
+		}
+
+		if targetSelector != "" {
+			if el, errEl := page.Element(targetSelector); errEl == nil && el != nil {
+				imgBytes, _ = el.Screenshot(proto.PageCaptureScreenshotFormatPng, 0)
+			}
+		}
 	}
-	if err != nil || len(imgBytes) == 0 {
-		imgBytes, err = page.Screenshot(false, &proto.PageCaptureScreenshot{
+
+	// Default / overview: ambil full page secara utuh dari atas hingga bawah (tidak terpotong vertikal)
+	if len(imgBytes) == 0 {
+		imgBytes, err = page.Screenshot(true, &proto.PageCaptureScreenshot{
 			Format: proto.PageCaptureScreenshotFormatPng,
 		})
 	}
