@@ -136,6 +136,13 @@ func DescribeToolCall(name string, args map[string]interface{}) string {
 		}
 		return "Mengakses memori pengguna"
 
+	case "capture_visit_performance":
+		m := getString("month")
+		if m != "" {
+			return fmt.Sprintf("Capture & analisa Visit Performance (%s)", m)
+		}
+		return "Capture & analisa dashboard Visit Performance"
+
 	default:
 		return fmt.Sprintf("Menjalankan tool %s", name)
 	}

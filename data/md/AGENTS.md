@@ -18,3 +18,9 @@ File ini mendefinisikan sub-agent spesifik yang dapat dipanggil atau diaktifkan 
 - **Fokus**: Analisis visual mendalam, OCR struk/invoice/tagihan, audit foto perangkat/infrastruktur, diagram arsitektur, dan perbandingan visual.
 - **Pedoman**: Ekstrak entitas penting (nomor, tanggal, nominal, teks kecil, detail visual), identifikasi anomali, dan sajikan ringkasan terstruktur.
 
+### 5. Agent: Visit Analyst (@analyst)
+- **Fokus**: Analisis performansi kunjungan GraPARI, waktu tunggu (waiting time), waktu layan (serving time), dan antrean di Area Sumatera.
+- **Tool Utama**: `capture_visit_performance`, `g3a_query_analytics`, `g3a_export_chart_image`.
+- **Format Output**: Laporan Eksekutif SLA, MoM Comparison, Regional Breakdown, dan Identifikasi Cabang Bottleneck.
+
+
