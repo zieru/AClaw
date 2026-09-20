@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -449,7 +450,21 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				capText = strings.TrimSpace(parts[1])
 			}
 			if fPath != "" {
-				mediaFiles = append(mediaFiles, MediaAttachment{FilePath: fPath, Caption: capText})
+				// Deduplikasi ketat agar file yang sama tidak pernah dimasukkan dua kali (mencegah double attachment)
+				alreadyExists := false
+				cleanTarget := filepath.Clean(fPath)
+				for i, existing := range mediaFiles {
+					if strings.EqualFold(filepath.Clean(existing.FilePath), cleanTarget) {
+						alreadyExists = true
+						if capText != "" && existing.Caption == "" {
+							mediaFiles[i].Caption = capText
+						}
+						break
+					}
+				}
+				if !alreadyExists {
+					mediaFiles = append(mediaFiles, MediaAttachment{FilePath: fPath, Caption: capText})
+				}
 			}
 			s = s[idx+endIdx+1:]
 		}
@@ -750,19 +765,20 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			}
 		}
 	}
-
-	if strings.TrimSpace(finalContent) == "" {
+	// Bersihkan tag internal [ATTACH_FILE:...] dari teks agar pengguna tidak melihat format bracket teknis
+	finalCleanContent := stripAttachmentTags(finalContent)
+	if strings.TrimSpace(finalCleanContent) == "" {
 		if strings.TrimSpace(finalThinking) != "" {
 			// Fallback: use thinking/reasoning content as the main text
-			finalContent = strings.TrimSpace(finalThinking)
+			finalCleanContent = strings.TrimSpace(finalThinking)
 		} else {
-			finalContent = "(Tidak ada respon teks dari model)"
+			finalCleanContent = "(Tidak ada respon teks dari model)"
 		}
 	}
 
 	// 10. Persist User & Assistant Messages (clean content without metadata footer)
 	_ = o.sessionManager.AddMessage(session.ID, "user", req.UserPrompt, len(req.UserPrompt)/4)
-	_ = o.sessionManager.AddMessage(session.ID, "assistant", finalContent, len(finalContent)/4)
+	_ = o.sessionManager.AddMessage(session.ID, "assistant", finalCleanContent, len(finalCleanContent)/4)
 
 	// 11. Audit Logging
 	fullPayloadJSON, _ := json.Marshal(messages)
@@ -792,12 +808,12 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		ClientRequest:      req.UserPrompt,
 		SystemPrompt:       sysPrompt,
 		FullRequestPayload: string(fullPayloadJSON),
-		ProviderResponse:   finalContent,
+		ProviderResponse:   finalCleanContent,
 		Status:             "success",
 	})
 
 	// 12. Format footer according to policy
-	cleanText := strings.TrimSpace(finalContent)
+	cleanText := strings.TrimSpace(finalCleanContent)
 	footer := FormatFooter(policy.FooterMode, totalPromptTokens, totalCompletionTokens, totalThinkingTokens, totalTokensUsed, totalTokensSaved, latency, lastModel, lastProviderName, allToolsCalled)
 	finalText := cleanText
 
@@ -985,4 +1001,20 @@ func FormatUserFriendlyError(err error) string {
 	default:
 		return "❌ **Maaf, terjadi kendala teknis pada layanan AI.**\nSilakan coba lagi beberapa saat lagi (bisa gunakan `/retry`) atau gunakan `/reset` untuk memulai percakapan baru."
 	}
+}
+
+// stripAttachmentTags removes [ATTACH_FILE:path|CAPTION:text] and [ATTACH_FILE:path] tags from the content
+func stripAttachmentTags(s string) string {
+	for {
+		idx := strings.Index(s, "[ATTACH_FILE:")
+		if idx == -1 {
+			break
+		}
+		endIdx := strings.Index(s[idx:], "]")
+		if endIdx == -1 {
+			break
+		}
+		s = s[:idx] + s[idx+endIdx+1:]
+	}
+	return strings.TrimSpace(s)
 }

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,7 +38,7 @@ func (t *VisitPerformanceTool) Parameters() ParametersSchema {
 		Properties: map[string]ParameterProperty{
 			"month": {
 				Type:        "string",
-				Description: "Bulan periode yang dianalisa dalam format 'YYYY-MM' (contoh: '2026-03'). Kosongkan jika ingin data akumulatif atau bulan berjalan.",
+				Description: "Bulan periode yang dianalisa dalam format 'YYYY-MM' (contoh: '2026-07' atau 'July'). Kosongkan jika ingin data akumulatif atau bulan berjalan.",
 			},
 			"flag": {
 				Type:        "string",
@@ -73,7 +74,7 @@ type ApiResponse struct {
 func (t *VisitPerformanceTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	month := ""
 	if mVal, ok := args["month"].(string); ok {
-		month = strings.TrimSpace(mVal)
+		month = normalizeMonth(mVal)
 	}
 
 	flag := "Dilayani"
@@ -178,7 +179,10 @@ func (t *VisitPerformanceTool) Execute(ctx context.Context, args map[string]inte
 	var screenshotErr string
 	if captureScreenshot {
 		targetURL := "https://a1.tsel.my.id/visit-performance"
-		scPath, err := captureWebScreenshot(ctx, targetURL, section)
+		if month != "" {
+			targetURL = fmt.Sprintf("https://a1.tsel.my.id/visit-performance?month=%s", url.QueryEscape(month))
+		}
+		scPath, err := captureWebScreenshot(ctx, targetURL, section, month)
 		if err != nil {
 			screenshotErr = fmt.Sprintf("⚠️ <i>Gagal mengambil snapshot web: %v</i>", err)
 		} else if scPath != "" {
@@ -407,13 +411,13 @@ func fetchEndpointRows(ctx context.Context, client *http.Client, targetURL strin
 	return parsed.Output.Rows, nil
 }
 
-func captureWebScreenshot(ctx context.Context, targetURL string, section string) (string, error) {
+func captureWebScreenshot(ctx context.Context, targetURL string, section string, targetMonth string) (string, error) {
 	if globalBrowserSession == nil {
 		return "", fmt.Errorf("globalBrowserSession tidak tersedia")
 	}
 
-	// Buka halaman dan tunggu 4 detik agar animasi Vue + ECharts selesai
-	page, err := globalBrowserSession.GetPage(ctx, targetURL, 4, true)
+	// Buka halaman dan tunggu 3 detik awal agar animasi Vue + ECharts selesai
+	page, err := globalBrowserSession.GetPage(ctx, targetURL, 3, true)
 	if err != nil {
 		return "", err
 	}
@@ -425,6 +429,32 @@ func captureWebScreenshot(ctx context.Context, targetURL string, section string)
 		DeviceScaleFactor: 1.5,
 		Mobile:            false,
 	})
+
+	// Jika targetMonth dispesifikasikan, sinkronkan dropdown Vuetify di browser ke bulan tersebut
+	if targetMonth != "" {
+		monthKeywords := getMonthKeywords(targetMonth)
+		if selEl, errSel := page.Element(".header-month-select"); errSel == nil && selEl != nil {
+			_ = selEl.Click(proto.InputMouseButtonLeft, 1)
+			time.Sleep(500 * time.Millisecond)
+
+			kwJSON, _ := json.Marshal(monthKeywords)
+			selectScript := fmt.Sprintf(`() => {
+				const keywords = %s;
+				const items = Array.from(document.querySelectorAll('.v-overlay .v-list-item, .v-list-item'));
+				for (const kw of keywords) {
+					const target = items.find(it => it.innerText.toLowerCase().includes(kw.toLowerCase()));
+					if (target) {
+						target.click();
+						return target.innerText;
+					}
+				}
+				return null;
+			}`, string(kwJSON))
+			_, _ = page.Eval(selectScript)
+			// Beri jeda 2.5 detik agar fetch data baru dan re-render chart ECharts & tabel selesai
+			time.Sleep(2500 * time.Millisecond)
+		}
+	}
 
 	// 1. Bersihkan navbar dan rapikan layout agar tidak terpotong horizontal & vertikal
 	prepareScript := `() => {
@@ -621,3 +651,83 @@ func formatNumber(n int64) string {
 	}
 	return string(out)
 }
+
+func normalizeMonth(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" || raw == "semua" || raw == "all" || raw == "current" {
+		return ""
+	}
+
+	// Format YYYY-MM (e.g. 2026-07)
+	if reMatch := regexp.MustCompile(`^(\d{4})[-/.](\d{1,2})$`).FindStringSubmatch(raw); len(reMatch) == 3 {
+		m, _ := strconv.Atoi(reMatch[2])
+		return fmt.Sprintf("%s-%02d", reMatch[1], m)
+	}
+
+	// Format MM-YYYY (e.g. 07-2026)
+	if reMatch := regexp.MustCompile(`^(\d{1,2})[-/.](\d{4})$`).FindStringSubmatch(raw); len(reMatch) == 3 {
+		m, _ := strconv.Atoi(reMatch[1])
+		return fmt.Sprintf("%s-%02d", reMatch[2], m)
+	}
+
+	// Extract year if specified (default to current year 2026)
+	year := "2026"
+	if reYear := regexp.MustCompile(`\b(202\d)\b`).FindStringSubmatch(raw); len(reYear) == 2 {
+		year = reYear[1]
+	}
+
+	monthMap := map[string]string{
+		"jan": "01", "januari": "01", "january": "01",
+		"feb": "02", "februari": "02", "february": "02",
+		"mar": "03", "maret": "03", "march": "03",
+		"apr": "04", "april": "04",
+		"mei": "05", "may": "05",
+		"jun": "06", "juni": "06", "june": "06",
+		"jul": "07", "juli": "07", "july": "07",
+		"agt": "08", "aug": "08", "agustus": "08", "august": "08",
+		"sep": "09", "september": "09",
+		"okt": "10", "oct": "10", "oktober": "10", "october": "10",
+		"nov": "11", "nop": "11", "november": "11",
+		"des": "12", "dec": "12", "desember": "12", "december": "12",
+	}
+
+	// Prioritize longer matches first to avoid prefix collisions
+	candidates := []string{
+		"september", "november", "desember", "december", "februari", "february",
+		"januari", "january", "agustus", "august", "oktober", "october",
+		"maret", "march", "april", "juni", "june", "juli", "july",
+		"sep", "nov", "nop", "des", "dec", "feb", "jan", "agt", "aug", "okt", "oct", "mar", "apr", "mei", "may", "jun", "jul",
+	}
+
+	for _, name := range candidates {
+		if strings.Contains(raw, name) {
+			return fmt.Sprintf("%s-%s", year, monthMap[name])
+		}
+	}
+
+	return raw
+}
+
+func getMonthKeywords(ym string) []string {
+	parts := strings.Split(strings.TrimSpace(ym), "-")
+	if len(parts) != 2 {
+		return []string{ym}
+	}
+	y := parts[0]
+	m := parts[1]
+
+	idNames := map[string]string{
+		"01": "Januari", "02": "Februari", "03": "Maret", "04": "April",
+		"05": "Mei", "06": "Juni", "07": "Juli", "08": "Agustus",
+		"09": "September", "10": "Oktober", "11": "November", "12": "Desember",
+	}
+	name, ok := idNames[m]
+	if !ok {
+		return []string{ym}
+	}
+	return []string{
+		fmt.Sprintf("%s %s", name, y), // "Juli 2026"
+		name,                          // "Juli"
+	}
+}
+

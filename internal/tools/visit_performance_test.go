@@ -67,6 +67,29 @@ func TestVisitPerformanceTool_Helpers(t *testing.T) {
 	if where == "" {
 		t.Errorf("expected where query to not be empty")
 	}
+
+	// Test normalizeMonth
+	if m := normalizeMonth("july"); m != "2026-07" {
+		t.Errorf("expected '2026-07' for 'july', got '%s'", m)
+	}
+	if m := normalizeMonth("juli"); m != "2026-07" {
+		t.Errorf("expected '2026-07' for 'juli', got '%s'", m)
+	}
+	if m := normalizeMonth("2026-7"); m != "2026-07" {
+		t.Errorf("expected '2026-07' for '2026-7', got '%s'", m)
+	}
+	if m := normalizeMonth("2026-07"); m != "2026-07" {
+		t.Errorf("expected '2026-07' for '2026-07', got '%s'", m)
+	}
+	if m := normalizeMonth("agustus 2026"); m != "2026-08" {
+		t.Errorf("expected '2026-08' for 'agustus 2026', got '%s'", m)
+	}
+
+	// Test getMonthKeywords
+	kw := getMonthKeywords("2026-07")
+	if len(kw) < 2 || kw[0] != "Juli 2026" || kw[1] != "Juli" {
+		t.Errorf("unexpected keywords for '2026-07': %v", kw)
+	}
 }
 
 func TestVisitPerformanceTool_Execute_Mock(t *testing.T) {
