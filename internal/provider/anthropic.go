@@ -75,10 +75,17 @@ type anthropicToolDef struct {
 	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
+type anthropicImageSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // e.g. "image/jpeg", "image/png"
+	Data      string `json:"data"`       // base64 payload
+}
+
 type anthropicContentBlock struct {
-	Type      string                 `json:"type"` // text, tool_use, tool_result, thinking
+	Type      string                 `json:"type"` // text, image, tool_use, tool_result, thinking
 	Text      string                 `json:"text,omitempty"`
 	Thinking  string                 `json:"thinking,omitempty"`
+	Source    *anthropicImageSource  `json:"source,omitempty"`
 	ID        string                 `json:"id,omitempty"`
 	Name      string                 `json:"name,omitempty"`
 	Input     map[string]interface{} `json:"input,omitempty"`
@@ -157,6 +164,24 @@ func (p *AnthropicProvider) GenerateChat(ctx context.Context, req ChatRequest) (
 			blocks = append(blocks, anthropicContentBlock{
 				Type: "text",
 				Text: m.Content,
+			})
+		}
+
+		for _, img := range m.Images {
+			mimeType := "image/jpeg"
+			data := img
+			if strings.HasPrefix(img, "data:") && strings.Contains(img, ";base64,") {
+				partsMime := strings.SplitN(img[5:], ";base64,", 2)
+				mimeType = partsMime[0]
+				data = partsMime[1]
+			}
+			blocks = append(blocks, anthropicContentBlock{
+				Type: "image",
+				Source: &anthropicImageSource{
+					Type:      "base64",
+					MediaType: mimeType,
+					Data:      data,
+				},
 			})
 		}
 
@@ -413,6 +438,23 @@ func (p *AnthropicProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 		var blocks []anthropicContentBlock
 		if m.Content != "" {
 			blocks = append(blocks, anthropicContentBlock{Type: "text", Text: m.Content})
+		}
+		for _, img := range m.Images {
+			mimeType := "image/jpeg"
+			data := img
+			if strings.HasPrefix(img, "data:") && strings.Contains(img, ";base64,") {
+				partsMime := strings.SplitN(img[5:], ";base64,", 2)
+				mimeType = partsMime[0]
+				data = partsMime[1]
+			}
+			blocks = append(blocks, anthropicContentBlock{
+				Type: "image",
+				Source: &anthropicImageSource{
+					Type:      "base64",
+					MediaType: mimeType,
+					Data:      data,
+				},
+			})
 		}
 		for _, tc := range m.ToolCalls {
 			blocks = append(blocks, anthropicContentBlock{Type: "tool_use", ID: tc.ID, Name: tc.Name, Input: tc.Arguments})

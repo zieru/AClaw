@@ -189,3 +189,28 @@ func TestCustomEngineToggleAndParam(t *testing.T) {
 		t.Errorf("expected threshold_chars to be 850, got %v", val)
 	}
 }
+
+func TestCompressMessagesPreservesImages(t *testing.T) {
+	testImg := "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBD..."
+	msgs := []provider.ChatMessage{
+		{Role: provider.RoleSystem, Content: "You are a helpful assistant."},
+		{
+			Role:    provider.RoleUser,
+			Content: "Analisis gambar ini secara detail.",
+			Images:  []string{testImg},
+		},
+	}
+
+	presets := []string{PresetStandard, PresetAggressive, PresetUltra, PresetLite, PresetRTK, PresetStacked}
+	for _, p := range presets {
+		compressed, _ := CompressMessages(msgs, p, 4000)
+		if len(compressed) < 2 {
+			t.Fatalf("preset %s: expected at least 2 messages, got %d", p, len(compressed))
+		}
+		userMsg := compressed[len(compressed)-1]
+		if len(userMsg.Images) == 0 || userMsg.Images[0] != testImg {
+			t.Errorf("preset %s: user message lost Images! got: %v", p, userMsg.Images)
+		}
+	}
+}
+

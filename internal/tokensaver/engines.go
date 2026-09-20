@@ -62,6 +62,7 @@ func (e *SessionDedupEngine) Process(ctx *PipelineContext, msgs []provider.ChatM
 		result = append(result, provider.ChatMessage{
 			Role:       m.Role,
 			Content:    content,
+			Images:     m.Images,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
@@ -109,6 +110,7 @@ func (e *CCREngine) Process(ctx *PipelineContext, msgs []provider.ChatMessage) (
 		result = append(result, provider.ChatMessage{
 			Role:       m.Role,
 			Content:    content,
+			Images:     m.Images,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
@@ -156,6 +158,7 @@ func (e *LiteEngine) Process(ctx *PipelineContext, msgs []provider.ChatMessage) 
 		result = append(result, provider.ChatMessage{
 			Role:       m.Role,
 			Content:    content,
+			Images:     m.Images,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
@@ -193,6 +196,7 @@ func (e *RTKEngine) Process(ctx *PipelineContext, msgs []provider.ChatMessage) (
 		result = append(result, provider.ChatMessage{
 			Role:       m.Role,
 			Content:    content,
+			Images:     m.Images,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
@@ -233,6 +237,7 @@ func (e *ResponsesToolEngine) Process(ctx *PipelineContext, msgs []provider.Chat
 		result = append(result, provider.ChatMessage{
 			Role:       m.Role,
 			Content:    content,
+			Images:     m.Images,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
@@ -281,6 +286,7 @@ func (e *HeadroomEngine) Process(ctx *PipelineContext, msgs []provider.ChatMessa
 		result = append(result, provider.ChatMessage{
 			Role:       m.Role,
 			Content:    content,
+			Images:     m.Images,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
@@ -355,6 +361,7 @@ func (e *RelevanceEngine) Process(ctx *PipelineContext, msgs []provider.ChatMess
 		result = append(result, provider.ChatMessage{
 			Role:       m.Role,
 			Content:    content,
+			Images:     m.Images,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
@@ -438,6 +445,7 @@ func (e *CavemanEngine) Process(ctx *PipelineContext, msgs []provider.ChatMessag
 		result = append(result, provider.ChatMessage{
 			Role:       m.Role,
 			Content:    content,
+			Images:     m.Images,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
@@ -480,6 +488,7 @@ func (e *AggressiveAgingEngine) Process(ctx *PipelineContext, msgs []provider.Ch
 		result = append(result, provider.ChatMessage{
 			Role:       m.Role,
 			Content:    content,
+			Images:     m.Images,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
@@ -514,6 +523,7 @@ func (e *LLMLingua2Engine) Process(ctx *PipelineContext, msgs []provider.ChatMes
 		result = append(result, provider.ChatMessage{
 			Role:       m.Role,
 			Content:    content,
+			Images:     m.Images,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
@@ -548,6 +558,7 @@ func (e *UltraEngine) Process(ctx *PipelineContext, msgs []provider.ChatMessage)
 		result = append(result, provider.ChatMessage{
 			Role:       m.Role,
 			Content:    content,
+			Images:     m.Images,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
@@ -579,6 +590,7 @@ func (e *OmniGlyphEngine) Process(ctx *PipelineContext, msgs []provider.ChatMess
 		result = append(result, provider.ChatMessage{
 			Role:       m.Role,
 			Content:    content,
+			Images:     m.Images,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,

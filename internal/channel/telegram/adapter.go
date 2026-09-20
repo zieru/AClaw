@@ -19,6 +19,7 @@ import (
 	"goassistant/internal/storage"
 	"goassistant/internal/tgformat"
 	"goassistant/internal/tools"
+	"goassistant/internal/util"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -180,8 +181,9 @@ func (a *BotAdapter) registerHandlers() {
 		if reader, err := a.bot.File(&photo.File); err == nil {
 			defer reader.Close()
 			if imgBytes, err := io.ReadAll(reader); err == nil && len(imgBytes) > 0 {
-				fileMB = float64(len(imgBytes)) / (1024 * 1024)
-				images = append(images, "data:image/jpeg;base64,"+base64.StdEncoding.EncodeToString(imgBytes))
+				optBytes, mime, _ := util.OptimizeImageBytes(imgBytes, util.DefaultMaxDimension, util.DefaultJPEGQuality)
+				fileMB = float64(len(optBytes)) / (1024 * 1024)
+				images = append(images, fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(optBytes)))
 			}
 		}
 
@@ -208,13 +210,8 @@ func (a *BotAdapter) registerHandlers() {
 			if docBytes, err := io.ReadAll(reader); err == nil {
 				ext := strings.ToLower(filepath.Ext(doc.FileName))
 				if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp" {
-					mime := "image/jpeg"
-					if ext == ".png" {
-						mime = "image/png"
-					} else if ext == ".webp" {
-						mime = "image/webp"
-					}
-					images = append(images, fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(docBytes)))
+					optBytes, mime, _ := util.OptimizeImageBytes(docBytes, util.DefaultMaxDimension, util.DefaultJPEGQuality)
+					images = append(images, fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(optBytes)))
 				} else if isTextExt(ext) && len(docBytes) <= 150*1024 {
 					prompt = fmt.Sprintf("[📎 Berkas: %s]\n```\n%s\n```\n\n%s", doc.FileName, string(docBytes), caption)
 				}

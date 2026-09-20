@@ -451,9 +451,33 @@ func (p *FreeRouterProvider) GenerateChat(ctx context.Context, req ChatRequest) 
 				},
 			})
 		}
+		var msgContent interface{} = m.Content
+		if len(m.Images) > 0 {
+			var parts []map[string]interface{}
+			if m.Content != "" {
+				parts = append(parts, map[string]interface{}{
+					"type": "text",
+					"text": m.Content,
+				})
+			}
+			for _, img := range m.Images {
+				url := img
+				if !strings.HasPrefix(url, "data:") && !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+					url = "data:image/jpeg;base64," + img
+				}
+				parts = append(parts, map[string]interface{}{
+					"type": "image_url",
+					"image_url": map[string]interface{}{
+						"url": url,
+					},
+				})
+			}
+			msgContent = parts
+		}
+
 		msgs = append(msgs, openAIMessage{
 			Role:       string(m.Role),
-			Content:    m.Content,
+			Content:    msgContent,
 			Name:       m.Name,
 			ToolCallID: m.ToolCallID,
 			ToolCalls:  toolCalls,

@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -18,6 +19,7 @@ import (
 	"goassistant/internal/config"
 	"goassistant/internal/storage"
 	"goassistant/internal/tokensaver"
+	"goassistant/internal/util"
 	"goassistant/internal/version"
 	"goassistant/internal/waformat"
 
@@ -580,7 +582,42 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 		return
 	}
 
-	if cleanText == "" {
+	// 3. Extract Media & Images (WhatsApp Vision Support)
+	var attachedImages []string
+	var attachedFileMB float64
+	if a.client != nil && msg.Message != nil {
+		if imgMsg := msg.Message.GetImageMessage(); imgMsg != nil {
+			if data, err := a.client.Download(context.Background(), imgMsg); err == nil && len(data) > 0 {
+				optBytes, mime, _ := util.OptimizeImageBytes(data, util.DefaultMaxDimension, util.DefaultJPEGQuality)
+				attachedFileMB = float64(len(optBytes)) / (1024 * 1024)
+				attachedImages = append(attachedImages, fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(optBytes)))
+				if cleanText == "" {
+					cleanText = "Tolong analisis dan jelaskan gambar/foto terlampir."
+				}
+				log.Printf("📷 [Channel-WA] Berhasil mengunduh & mengoptimalkan foto terlampir (%.2f MB, base64 len: %d)", attachedFileMB, len(attachedImages[0]))
+			} else if err != nil {
+				log.Printf("⚠️ [Channel-WA] Gagal mengunduh gambar pesan: %v", err)
+			}
+		} else if docMsg := msg.Message.GetDocumentMessage(); docMsg != nil {
+			ext := strings.ToLower(filepath.Ext(docMsg.GetFileName()))
+			mime := docMsg.GetMimetype()
+			if strings.HasPrefix(mime, "image/") || ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp" {
+				if data, err := a.client.Download(context.Background(), docMsg); err == nil && len(data) > 0 {
+					optBytes, optMime, _ := util.OptimizeImageBytes(data, util.DefaultMaxDimension, util.DefaultJPEGQuality)
+					attachedFileMB = float64(len(optBytes)) / (1024 * 1024)
+					attachedImages = append(attachedImages, fmt.Sprintf("data:%s;base64,%s", optMime, base64.StdEncoding.EncodeToString(optBytes)))
+					if cleanText == "" {
+						cleanText = fmt.Sprintf("Tolong analisis berkas gambar terlampir: %s", docMsg.GetFileName())
+					}
+					log.Printf("📎 [Channel-WA] Berhasil mengunduh dokumen gambar %s (%.2f MB)", docMsg.GetFileName(), attachedFileMB)
+				} else if err != nil {
+					log.Printf("⚠️ [Channel-WA] Gagal mengunduh dokumen gambar: %v", err)
+				}
+			}
+		}
+	}
+
+	if cleanText == "" && len(attachedImages) == 0 {
 		return
 	}
 
@@ -627,13 +664,15 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 		}()
 
 		resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{
-			ChannelType: "whatsapp",
-			ChannelID:   a.channelID,
-			ChannelName: a.name,
-			ChatID:      chatID,
-			UserID:      senderID,
-			UserName:    senderName,
-			UserPrompt:  cleanText,
+			ChannelType:    "whatsapp",
+			ChannelID:      a.channelID,
+			ChannelName:    a.name,
+			ChatID:         chatID,
+			UserID:         senderID,
+			UserName:       senderName,
+			UserPrompt:     cleanText,
+			AttachedImages: attachedImages,
+			AttachedFileMB: attachedFileMB,
 			OnProgress: func(status string) {
 				if a.client != nil && a.client.IsConnected() {
 					_ = a.client.SendChatPresence(context.Background(), chatJID, waTypes.ChatPresenceComposing, waTypes.ChatPresenceMediaText)

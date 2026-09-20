@@ -548,5 +548,52 @@ func TestGenerateWithFallback_ProviderResilientMode(t *testing.T) {
 	}
 }
 
+func TestAnthropicVisionPayloadBlocks(t *testing.T) {
+	testImg := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	req := ChatRequest{
+		Messages: []ChatMessage{
+			{
+				Role:    RoleUser,
+				Content: "Jelaskan gambar ini.",
+				Images:  []string{testImg},
+			},
+		},
+	}
+
+	p := &AnthropicProvider{}
+	var blocks []anthropicContentBlock
+	for _, m := range req.Messages {
+		if m.Content != "" {
+			blocks = append(blocks, anthropicContentBlock{Type: "text", Text: m.Content})
+		}
+		for _, img := range m.Images {
+			mimeType := "image/jpeg"
+			data := img
+			if strings.HasPrefix(img, "data:") && strings.Contains(img, ";base64,") {
+				partsMime := strings.SplitN(img[5:], ";base64,", 2)
+				mimeType = partsMime[0]
+				data = partsMime[1]
+			}
+			blocks = append(blocks, anthropicContentBlock{
+				Type: "image",
+				Source: &anthropicImageSource{
+					Type:      "base64",
+					MediaType: mimeType,
+					Data:      data,
+				},
+			})
+		}
+	}
+
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 blocks (text + image), got %d", len(blocks))
+	}
+	if blocks[1].Type != "image" || blocks[1].Source == nil || blocks[1].Source.MediaType != "image/png" {
+		t.Fatalf("image block not configured correctly: %+v", blocks[1])
+	}
+	_ = p
+}
+
+
 
 

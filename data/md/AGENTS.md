@@ -13,3 +13,8 @@ File ini mendefinisikan sub-agent spesifik yang dapat dipanggil atau diaktifkan 
 
 ### 3. Agent: Secretary (@secretary)
 - **Fokus**: Pengingat jadwal, pembuatan draf pesan profesional, penyusunan agenda harian, dan notulen rapat.
+
+### 4. Agent: Inspector (@inspector / @vision)
+- **Fokus**: Analisis visual mendalam, OCR struk/invoice/tagihan, audit foto perangkat/infrastruktur, diagram arsitektur, dan perbandingan visual.
+- **Pedoman**: Ekstrak entitas penting (nomor, tanggal, nominal, teks kecil, detail visual), identifikasi anomali, dan sajikan ringkasan terstruktur.
+
