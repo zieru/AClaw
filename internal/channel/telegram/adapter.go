@@ -7,6 +7,7 @@ import (
 	"html"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -880,9 +881,19 @@ func sendOrEditResponse(c tele.Context, thinkingMsg *tele.Message, text string, 
 			}
 			_ = c.Send(doc)
 		}
+
+		// Hapus file screenshot sementara dari server segera setelah berhasil dikirim
+		if isTempScreenshot(mf.FilePath) {
+			_ = os.Remove(mf.FilePath)
+		}
 	}
 
 	return nil
+}
+
+func isTempScreenshot(fPath string) bool {
+	clean := filepath.ToSlash(fPath)
+	return strings.Contains(clean, "/screenshots/") || strings.HasPrefix(clean, "screenshots/") || strings.Contains(clean, "data/screenshots/")
 }
 
 func splitMessage(text string, maxLen int) []string {

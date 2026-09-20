@@ -698,10 +698,19 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 			for _, mf := range resp.MediaFiles {
 				if mf.FilePath != "" {
 					_ = a.SendFile(chatID, mf.FilePath, mf.Caption)
+					// Hapus file screenshot sementara dari server segera setelah berhasil dikirim
+					if isTempScreenshot(mf.FilePath) {
+						_ = os.Remove(mf.FilePath)
+					}
 				}
 			}
 		}
 	}()
+}
+
+func isTempScreenshot(fPath string) bool {
+	clean := filepath.ToSlash(fPath)
+	return strings.Contains(clean, "/screenshots/") || strings.HasPrefix(clean, "screenshots/") || strings.Contains(clean, "data/screenshots/")
 }
 
 // JoinedGroupInfo holds basic info about a WhatsApp group
