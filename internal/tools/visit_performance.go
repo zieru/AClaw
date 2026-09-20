@@ -53,6 +53,11 @@ func (t *VisitPerformanceTool) Parameters() ParametersSchema {
 				Type:        "boolean",
 				Description: "Apakah ingin mengambil screenshot visual dashboard web https://a1.tsel.my.id/visit-performance (Default: true).",
 			},
+			"section": {
+				Type:        "string",
+				Description: "Bagian tampilan yang ingin di-capture (bebas navbar): 'overview' (seluruh dashboard bersih: KPI cards + 3 charts + 3 tabel territory, default), 'kpi' (div kartu KPI Total Area & Sumbagut/Sumbagteng/Sumbagsel: VISIT, WAITING, SERVING), 'charts' (div 3 grafik bar: VISIT, WAITING TIME, SERVING TIME), 'tables' (div 3 tabel regional: SUMBAGUT, SUMBAGTENG, SUMBAGSEL TOP TERRITORY).",
+				Enum:        []string{"overview", "kpi", "charts", "tables"},
+			},
 		},
 	}
 }
@@ -84,6 +89,11 @@ func (t *VisitPerformanceTool) Execute(ctx context.Context, args map[string]inte
 	captureScreenshot := true
 	if csVal, ok := args["capture_screenshot"].(bool); ok {
 		captureScreenshot = csVal
+	}
+
+	section := "overview"
+	if sVal, ok := args["section"].(string); ok && strings.TrimSpace(sVal) != "" {
+		section = strings.ToLower(strings.TrimSpace(sVal))
 	}
 
 	// 1. Tentukan Base API URL (prioritaskan env, lalu local port 12110, fallback ke live prod)
@@ -163,20 +173,28 @@ func (t *VisitPerformanceTool) Execute(ctx context.Context, args map[string]inte
 
 	wg.Wait()
 
-	// 4. Capture screenshot via browser jika diminta
+	// 4. Capture screenshot via browser jika diminta (bebas navbar)
 	var screenshotTag string
 	var screenshotErr string
 	if captureScreenshot {
 		targetURL := "https://a1.tsel.my.id/visit-performance"
-		scPath, err := captureWebScreenshot(ctx, targetURL)
+		scPath, err := captureWebScreenshot(ctx, targetURL, section)
 		if err != nil {
 			screenshotErr = fmt.Sprintf("⚠️ <i>Gagal mengambil snapshot web: %v</i>", err)
 		} else if scPath != "" {
-			periodNote := "Area Sumatera"
-			if month != "" {
-				periodNote = fmt.Sprintf("Periode %s", month)
+			sectionCaption := "Dashboard Visit Performance (Area Sumatera)"
+			switch section {
+			case "kpi":
+				sectionCaption = "KPI Cards (VISIT, WAITING & SERVING TIME)"
+			case "charts":
+				sectionCaption = "Grafik Bar (VISIT, WAITING & SERVING TIME)"
+			case "tables":
+				sectionCaption = "Top Territory Tables (SUMBAGUT, SUMBAGTENG, SUMBAGSEL)"
 			}
-			screenshotTag = fmt.Sprintf("[ATTACH_FILE:%s|CAPTION:Dashboard Visit Performance - %s]", scPath, periodNote)
+			if month != "" {
+				sectionCaption += fmt.Sprintf(" - Periode %s", month)
+			}
+			screenshotTag = fmt.Sprintf("[ATTACH_FILE:%s|CAPTION:%s]", scPath, sectionCaption)
 		}
 	}
 
@@ -389,7 +407,7 @@ func fetchEndpointRows(ctx context.Context, client *http.Client, targetURL strin
 	return parsed.Output.Rows, nil
 }
 
-func captureWebScreenshot(ctx context.Context, targetURL string) (string, error) {
+func captureWebScreenshot(ctx context.Context, targetURL string, section string) (string, error) {
 	if globalBrowserSession == nil {
 		return "", fmt.Errorf("globalBrowserSession tidak tersedia")
 	}
@@ -400,16 +418,85 @@ func captureWebScreenshot(ctx context.Context, targetURL string) (string, error)
 		return "", err
 	}
 
+	// Set viewport desktop resolusi tinggi agar 3 kolom charts & tables tersusun rapi berdampingan
+	_ = page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
+		Width:             1440,
+		Height:            900,
+		DeviceScaleFactor: 1.5,
+		Mobile:            false,
+	})
+
+	// 1. Sembunyikan navbar aplikasi dan tandai container target via JavaScript
+	prepareScript := `() => {
+		// Hilangkan navbar aplikasi (header.v-app-bar), navigation drawer, dan switch-view button
+		const navbars = document.querySelectorAll('.v-app-bar, header, nav, .v-navigation-drawer, .switch-view-btn');
+		navbars.forEach(el => el.style.setProperty('display', 'none', 'important'));
+
+		// Reset padding & margin top pada v-main dan visit-perf-view agar konten menempel bersih ke atas tanpa gap
+		document.querySelectorAll('.v-main').forEach(el => {
+			el.style.setProperty('padding-top', '0px', 'important');
+			el.style.setProperty('margin-top', '0px', 'important');
+		});
+
+		const root = document.querySelector('.visit-perf-view');
+		if (root) {
+			root.style.setProperty('padding-top', '0px', 'important');
+			root.style.setProperty('margin-top', '0px', 'important');
+		}
+
+		// Tandai container section KPI Cards
+		const kpiHeader = document.querySelector('.perf-header');
+		if (kpiHeader) kpiHeader.id = '__ga_section_kpi';
+
+		// Tandai container 3 Bar Charts (VISIT, WAITING, SERVING)
+		const chartCards = document.querySelectorAll('.perf-chart-card');
+		if (chartCards.length > 0) {
+			const chartRow = chartCards[0].closest('.v-row') || chartCards[0].parentElement?.parentElement;
+			if (chartRow) chartRow.id = '__ga_section_charts';
+		}
+
+		// Tandai container 3 Tables (SUMBAGUT, SUMBAGTENG, SUMBAGSEL TOP TERRITORY)
+		const tableCards = document.querySelectorAll('.perf-table-card');
+		if (tableCards.length > 0) {
+			const tableRow = tableCards[0].closest('.v-row') || tableCards[0].parentElement?.parentElement;
+			if (tableRow) tableRow.id = '__ga_section_tables';
+		}
+
+		return true;
+	}`
+
+	_, _ = page.Eval(prepareScript)
+	time.Sleep(500 * time.Millisecond)
+
+	// Tentukan selector elemen target berdasarkan parameter section
+	targetSelector := ".visit-perf-view"
+	switch section {
+	case "kpi":
+		targetSelector = "#__ga_section_kpi"
+	case "charts":
+		targetSelector = "#__ga_section_charts"
+	case "tables":
+		targetSelector = "#__ga_section_tables"
+	default:
+		targetSelector = ".visit-perf-view"
+	}
+
 	screenshotDir := filepath.Join("data", "screenshots")
 	_ = os.MkdirAll(screenshotDir, 0755)
 	cleanupOldScreenshots(screenshotDir, 24*time.Hour)
 
-	outPath := filepath.Join(screenshotDir, fmt.Sprintf("visit_perf_%d.png", time.Now().UnixNano()))
+	outPath := filepath.Join(screenshotDir, fmt.Sprintf("visit_perf_%s_%d.png", section, time.Now().UnixNano()))
 	absOutPath, _ := filepath.Abs(outPath)
 
-	imgBytes, err := page.Screenshot(false, &proto.PageCaptureScreenshot{
-		Format: proto.PageCaptureScreenshotFormatPng,
-	})
+	var imgBytes []byte
+	if el, errEl := page.Element(targetSelector); errEl == nil && el != nil {
+		imgBytes, err = el.Screenshot(proto.PageCaptureScreenshotFormatPng, 0)
+	}
+	if err != nil || len(imgBytes) == 0 {
+		imgBytes, err = page.Screenshot(false, &proto.PageCaptureScreenshot{
+			Format: proto.PageCaptureScreenshotFormatPng,
+		})
+	}
 	if err != nil {
 		return "", err
 	}

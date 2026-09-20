@@ -36,6 +36,10 @@ func TestVisitPerformanceTool_Schema(t *testing.T) {
 	if _, ok := params.Properties["capture_screenshot"]; !ok {
 		t.Errorf("expected property 'capture_screenshot' to be defined")
 	}
+
+	if _, ok := params.Properties["section"]; !ok {
+		t.Errorf("expected property 'section' to be defined")
+	}
 }
 
 func TestVisitPerformanceTool_Helpers(t *testing.T) {
