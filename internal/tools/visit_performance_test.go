@@ -85,10 +85,10 @@ func TestVisitPerformanceTool_Helpers(t *testing.T) {
 		t.Errorf("expected '2026-08' for 'agustus 2026', got '%s'", m)
 	}
 
-	// Test getMonthKeywords
-	kw := getMonthKeywords("2026-07")
-	if len(kw) < 2 || kw[0] != "Juli 2026" || kw[1] != "Juli" {
-		t.Errorf("unexpected keywords for '2026-07': %v", kw)
+	// Test getMonthKeywordsAndExpected
+	kw, expected := getMonthKeywordsAndExpected("2026-07")
+	if len(kw) < 2 || kw[0] != "Juli 2026" || kw[1] != "Juli" || expected != "JULI" {
+		t.Errorf("unexpected keywords for '2026-07': %v, expected: %s", kw, expected)
 	}
 }
 

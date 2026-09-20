@@ -430,30 +430,70 @@ func captureWebScreenshot(ctx context.Context, targetURL string, section string,
 		Mobile:            false,
 	})
 
-	// Jika targetMonth dispesifikasikan, sinkronkan dropdown Vuetify di browser ke bulan tersebut
+	// Jika targetMonth dispesifikasikan, sinkronkan dropdown Vuetify di browser ke bulan tersebut secara robust
 	if targetMonth != "" {
-		monthKeywords := getMonthKeywords(targetMonth)
-		if selEl, errSel := page.Element(".header-month-select"); errSel == nil && selEl != nil {
-			_ = selEl.Click(proto.InputMouseButtonLeft, 1)
-			time.Sleep(500 * time.Millisecond)
+		monthKeywords, expectedWord := getMonthKeywordsAndExpected(targetMonth)
+		kwJSON, _ := json.Marshal(monthKeywords)
 
-			kwJSON, _ := json.Marshal(monthKeywords)
-			selectScript := fmt.Sprintf(`() => {
-				const keywords = %s;
-				const items = Array.from(document.querySelectorAll('.v-overlay .v-list-item, .v-list-item'));
+		switchScript := fmt.Sprintf(`async () => {
+			const keywords = %s;
+			const expectedWord = %q;
+
+			// 1. Tunggu sampai dashboard awal selesai memuat periode (max 10 detik)
+			const start = Date.now();
+			while (Date.now() - start < 10000) {
+				const p = document.querySelector('.perf-period');
+				if (p && p.innerText.trim().length > 5) break;
+				await new Promise(r => setTimeout(r, 200));
+			}
+
+			// 2. Loop klik dropdown dan cari menu item sampai periode berubah (max 12 detik)
+			const loopStart = Date.now();
+			while (Date.now() - loopStart < 12000) {
+				const currentPeriod = document.querySelector('.perf-period')?.innerText || '';
+				if (expectedWord && currentPeriod.toUpperCase().includes(expectedWord)) {
+					return { success: true, period: currentPeriod };
+				}
+
+				// Buka dropdown jika belum terbuka
+				const overlayItems = Array.from(document.querySelectorAll('.v-overlay .v-list-item, .v-list-item'));
+				if (overlayItems.length === 0) {
+					const sel = document.querySelector('.header-month-select .v-field') || document.querySelector('.header-month-select');
+					if (sel) {
+						sel.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+						sel.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+						sel.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+					}
+					await new Promise(r => setTimeout(r, 400));
+					continue;
+				}
+
+				// Cari item yang sesuai
+				let clicked = false;
 				for (const kw of keywords) {
-					const target = items.find(it => it.innerText.toLowerCase().includes(kw.toLowerCase()));
+					const target = overlayItems.find(it => it.innerText.toLowerCase().includes(kw.toLowerCase()));
 					if (target) {
-						target.click();
-						return target.innerText;
+						target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+						target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+						target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+						clicked = true;
+						break;
 					}
 				}
-				return null;
-			}`, string(kwJSON))
-			_, _ = page.Eval(selectScript)
-			// Beri jeda 2.5 detik agar fetch data baru dan re-render chart ECharts & tabel selesai
-			time.Sleep(2500 * time.Millisecond)
-		}
+
+				if (clicked) {
+					await new Promise(r => setTimeout(r, 800));
+				} else {
+					await new Promise(r => setTimeout(r, 300));
+				}
+			}
+
+			return { success: false, period: document.querySelector('.perf-period')?.innerText || '' };
+		}`, string(kwJSON), strings.ToUpper(expectedWord))
+
+		_, _ = page.Eval(switchScript)
+		// Beri jeda 1.5 detik agar fetch data baru dan render chart ECharts & tabel selesai
+		time.Sleep(1500 * time.Millisecond)
 	}
 
 	// 1. Bersihkan navbar dan rapikan layout agar tidak terpotong horizontal & vertikal
@@ -708,10 +748,10 @@ func normalizeMonth(raw string) string {
 	return raw
 }
 
-func getMonthKeywords(ym string) []string {
+func getMonthKeywordsAndExpected(ym string) ([]string, string) {
 	parts := strings.Split(strings.TrimSpace(ym), "-")
 	if len(parts) != 2 {
-		return []string{ym}
+		return []string{ym}, ""
 	}
 	y := parts[0]
 	m := parts[1]
@@ -723,11 +763,11 @@ func getMonthKeywords(ym string) []string {
 	}
 	name, ok := idNames[m]
 	if !ok {
-		return []string{ym}
+		return []string{ym}, ""
 	}
 	return []string{
 		fmt.Sprintf("%s %s", name, y), // "Juli 2026"
 		name,                          // "Juli"
-	}
+	}, strings.ToUpper(name)
 }
 
