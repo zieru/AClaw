@@ -362,9 +362,6 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 		mu.Lock()
 		customStatus = status
 		mu.Unlock()
-		if targetMsg != nil {
-			_, _ = bot.Edit(targetMsg, status, tele.ModeHTML, cancelMenu)
-		}
 	}
 
 	onChunk = func(chunk provider.StreamChunk) {
@@ -406,32 +403,23 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 				elapsedSec := int(time.Since(startTime).Seconds())
 				curThinking := strings.TrimSpace(thinkingBuf.String())
 				curContent := strings.TrimSpace(contentBuf.String())
-				status := customStatus
+				status := strings.TrimSpace(customStatus)
 
 				var text string
-				if curThinking != "" || curContent != "" {
-					// Live streaming preview mode
-					if curContent == "" && curThinking != "" {
-						// Only thinking so far
+				if curContent != "" {
+					// Final answer is actively streaming
+					if curThinking != "" {
 						previewThink := curThinking
-						if len(previewThink) > 3500 {
-							previewThink = previewThink[len(previewThink)-3500:]
-						}
-						text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s ▌</blockquote>", html.EscapeString(previewThink))
-					} else if curThinking != "" && curContent != "" {
-						// Thinking + content streaming
-						previewThink := curThinking
-						if len(previewThink) > 1500 {
-							previewThink = previewThink[:1500] + "..."
+						if len(previewThink) > 1200 {
+							previewThink = previewThink[:1200] + "..."
 						}
 						previewContent := curContent
-						if len(previewContent) > 2000 {
-							previewContent = previewContent[len(previewContent)-2000:]
+						if len(previewContent) > 2200 {
+							previewContent = previewContent[len(previewContent)-2200:]
 						}
 						formattedContent := tgformat.MarkdownToTelegramHTML(previewContent)
 						text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s</blockquote>\n\n%s ▌", html.EscapeString(previewThink), formattedContent)
 					} else {
-						// Only content
 						previewContent := curContent
 						if len(previewContent) > 3800 {
 							previewContent = previewContent[len(previewContent)-3800:]
@@ -439,9 +427,29 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 						text = tgformat.MarkdownToTelegramHTML(previewContent) + " ▌"
 					}
 				} else if status != "" {
-					text = fmt.Sprintf("%s <i>(%dd)</i>", status, elapsedSec)
+					// Tool execution / planning / checklist in progress
+					if curThinking != "" {
+						previewThink := curThinking
+						if len(previewThink) > 1000 {
+							previewThink = previewThink[:1000] + "..."
+						}
+						text = fmt.Sprintf("%s\n\n💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s</blockquote>\n\n⏱️ <i>(%dd)</i>", status, html.EscapeString(previewThink), elapsedSec)
+					} else {
+						text = fmt.Sprintf("%s\n\n⏱️ <i>(%dd)</i>", status, elapsedSec)
+					}
+				} else if curThinking != "" {
+					// Only thinking so far
+					previewThink := curThinking
+					if len(previewThink) > 3500 {
+						previewThink = previewThink[len(previewThink)-3500:]
+					}
+					text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s ▌</blockquote>\n\n⏱️ <i>(%dd)</i>", html.EscapeString(previewThink), elapsedSec)
 				} else {
 					text = fmt.Sprintf("💭 <i>Sedang berpikir... (%dd)</i>", elapsedSec)
+				}
+
+				if len(text) > 4000 {
+					text = text[:3990] + "..."
 				}
 
 				if text == lastSentText {

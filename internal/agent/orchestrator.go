@@ -455,6 +455,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		}
 	}
 
+	tracker := NewProgressTracker(req.OnProgress)
+
 	maxTurns := 8
 	for turn := 0; turn < maxTurns; turn++ {
 		if ctx.Err() != nil {
@@ -509,11 +511,14 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				strings.Contains(errStr, "token limit") ||
 				strings.Contains(errStr, "rate limit")
 
+			retrySeconds := 120
+			if cfg := config.Get(); cfg != nil && cfg.Timeouts.RetrySeconds > 0 {
+				retrySeconds = cfg.Timeouts.RetrySeconds
+			}
+
 			// If error happened and we had history turns in the request, try auto-compacting and retrying once with minimal context
 			if isContextOrTimeout && len(history) > 0 {
-				if req.OnProgress != nil {
-					req.OnProgress("🧹 <i>Konteks percakapan penuh/timeout, merampingkan riwayat & mencoba ulang...</i>")
-				}
+				tracker.SetCurrent("Konteks penuh/timeout, merampingkan riwayat & mencoba ulang")
 
 				// Auto clean old session messages in DB (keep only the very latest 2 messages)
 				_ = o.db.TruncateOldMessages(session.ID, 2)
@@ -544,23 +549,21 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 					OnProgress:     req.OnProgress,
 				}
 
-				// Fresh 2-minute context if original ctx was timed out
+				// Fresh context if original ctx was timed out
 				retryCtx, cancelRetry := context.WithTimeout(context.Background(),
-					time.Duration(config.Get().Timeouts.RetrySeconds)*time.Second)
+					time.Duration(retrySeconds)*time.Second)
 				genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, retryChatReq)
 				cancelRetry()
 			} else if ctx.Err() == nil {
 				// Auto-retry once for transient provider/network glitches before failing
-				if req.OnProgress != nil {
-					req.OnProgress("🔄 <i>Kendala koneksi/server sementara, mencoba ulang otomatis...</i>")
-				}
+				tracker.SetCurrent("Kendala koneksi/server sementara, mencoba ulang otomatis")
 				select {
 				case <-time.After(1200 * time.Millisecond):
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				}
 				retryCtx, cancelRetry := context.WithTimeout(context.Background(),
-					time.Duration(config.Get().Timeouts.RetrySeconds)*time.Second)
+					time.Duration(retrySeconds)*time.Second)
 				genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, chatReq)
 				cancelRetry()
 			}
@@ -621,15 +624,17 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 					Role:    provider.RoleUser,
 					Content: "Lanjutkan dan berikan jawaban teks akhirmu berdasarkan analisis atau pemikiran di atas secara lengkap dan jelas.",
 				})
-				if req.OnProgress != nil {
-					req.OnProgress("✍️ <i>Menyusun respon akhir...</i>")
-				}
+				tracker.SetCurrent("Menyusun respon akhir")
 				continue
 			}
 			break
 		}
 
 		// Assistant called tools
+		if turn == 0 && strings.TrimSpace(resp.Content) != "" {
+			tracker.SetPlan(resp.Content)
+		}
+
 		assistantMsg := provider.ChatMessage{
 			Role:      provider.RoleAssistant,
 			Content:   resp.Content,
@@ -642,15 +647,21 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				return nil, ctx.Err()
 			}
 			allToolsCalled = append(allToolsCalled, tc.Name)
-			if req.OnProgress != nil {
-				req.OnProgress(fmt.Sprintf("🔍 <i>Sedang menjalankan tool: <b>%s</b>...</i>", tc.Name))
-			}
-			toolCtx := WithProgressReporter(ctx, req.OnProgress)
+			toolDesc := DescribeToolCall(tc.Name, tc.Arguments)
+			tracker.StartStep(toolDesc)
+
+			toolCtx := WithProgressReporter(ctx, func(status string) {
+				cleanStatus := strings.TrimSpace(status)
+				if cleanStatus != "" {
+					tracker.SetCurrent(fmt.Sprintf("%s: %s", toolDesc, cleanStatus))
+				}
+			})
 			toolOut, toolErr := o.toolRegistry.Execute(toolCtx, tc.Name, tc.Arguments)
 			if toolErr != nil {
 				toolOut = fmt.Sprintf("Error eksekusi tool %s: %v", tc.Name, toolErr)
 			}
 
+			tracker.CompleteStep(toolDesc, toolErr)
 			extractAttachments(toolOut)
 
 			// Pre-compress tool output before appending to message history
@@ -669,8 +680,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			}
 		}
 
-		if req.OnProgress != nil && len(resp.ToolCalls) > 0 {
-			req.OnProgress("🤔 <i>Menganalisis hasil data...</i>")
+		if len(resp.ToolCalls) > 0 {
+			tracker.SetCurrent("Menganalisis hasil data")
 		}
 	}
 
@@ -680,9 +691,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if req.OnProgress != nil {
-			req.OnProgress("✍️ <i>Menyusun kesimpulan & analisis akhir...</i>")
-		}
+		tracker.SetCurrent("Menyusun kesimpulan & analisis akhir")
 
 		synthMsgs := append([]provider.ChatMessage{}, messages...)
 		synthMsgs = append(synthMsgs, provider.ChatMessage{

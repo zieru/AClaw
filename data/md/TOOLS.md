@@ -64,3 +64,7 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
      * Gunakan action `'delete'` jika pengguna meminta untuk melupakan atau menghapus catatan tertentu.
      * Gunakan action `'clear'` jika pengguna meminta untuk membersihkan seluruh memorinya.
 
+9. **Rencana Pengerjaan Awal (Summary Plan) & Tugas Multi-Langkah**:
+   - Jika pengguna meminta investigasi, scraping web, analitik data, atau tugas multi-langkah:
+     **Sangat dianjurkan** untuk menuliskan ringkasan rencana tindakan (Summary Plan 1, 2, 3, ...) secara padat di awal respon teksmu sebelum memanggil tool pertamamu.
+     Rencana ini akan otomatis ditangkap oleh sistem dan ditampilkan secara live di layar pengguna bersamaan dengan checklist progres langkah kerja yang sedang berjalan.
