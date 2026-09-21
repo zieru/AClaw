@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"goassistant/internal/agent"
@@ -22,6 +24,31 @@ type ChatRequest struct {
 	SessionID      string `json:"session_id"`
 	ThinkingLevel  string `json:"thinking_level"`
 	ThinkingBudget int    `json:"thinking_budget"`
+}
+
+// stripHTML converts Telegram-style HTML progress text into plain, readable text for WebAdmin.
+// Line structure is preserved so step checklists remain clear.
+func stripHTML(s string) string {
+	// Break lines on block-level tags
+	s = strings.ReplaceAll(s, "<br>", "\n")
+	s = strings.ReplaceAll(s, "<br/>", "\n")
+	s = strings.ReplaceAll(s, "<br />", "\n")
+	s = strings.ReplaceAll(s, "</blockquote>", "\n")
+
+	// Remove all remaining HTML tags
+	tagRe := regexp.MustCompile(`(?s)<[^>]*>`)
+	s = tagRe.ReplaceAllString(s, "")
+
+	// Unescape entities (& etc.)
+	s = html.UnescapeString(s)
+
+	// Collapse multiple blank lines and trim
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		out = append(out, strings.TrimRight(ln, " \t"))
+	}
+	return strings.Trim(strings.Join(out, "\n"), "\n")
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -133,9 +160,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		PreferredProv:  chatReq.Provider,
 		ThinkingLevel:  chatReq.ThinkingLevel,
 		ThinkingBudget: chatReq.ThinkingBudget,
-		OnProgress: func(status string) {
-			sendSSE("progress", map[string]string{"status": status})
-		},
+	OnProgress: func(status string) {
+		sendSSE("progress", map[string]string{"status": stripHTML(status)})
+	},
 		OnStreamChunk: func(chunk provider.StreamChunk) {
 			if chunk.Thinking != "" {
 				sendSSE("thinking", map[string]string{"text": chunk.Thinking})

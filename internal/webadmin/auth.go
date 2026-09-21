@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"goassistant/internal/config"
+	"goassistant/internal/storage"
 )
 
 var (
@@ -46,17 +49,58 @@ type Session struct {
 type AuthManager struct {
 	cfg      *config.AppConfig
 	sender   TelegramSender
+	db       *storage.DB
 	mu       sync.RWMutex
 	otps     map[int64]*otpRecord
 	sessions map[string]*Session
 }
 
-func NewAuthManager(cfg *config.AppConfig, sender TelegramSender) *AuthManager {
-	return &AuthManager{
+func NewAuthManager(cfg *config.AppConfig, sender TelegramSender, db *storage.DB) *AuthManager {
+	a := &AuthManager{
 		cfg:      cfg,
 		sender:   sender,
+		db:       db,
 		otps:     make(map[int64]*otpRecord),
 		sessions: make(map[string]*Session),
+	}
+	a.loadSessions()
+	return a
+}
+
+// loadSessions memuat sesi yang tersimpan di DB agar login tetap valid
+// setelah aplikasi/webadmin direstart (durasi sesi sesuai TTL).
+func (a *AuthManager) loadSessions() {
+	if a.db == nil {
+		return
+	}
+	raw, err := a.db.GetSetting("webadmin_sessions", "")
+	if err != nil || raw == "" {
+		return
+	}
+	var stored map[string]*Session
+	if err := json.Unmarshal([]byte(raw), &stored); err != nil {
+		log.Printf("⚠️ [WebAdmin] Gagal memuat sesi tersimpan: %v", err)
+		return
+	}
+	now := time.Now()
+	for token, sess := range stored {
+		if sess != nil && now.Before(sess.ExpiresAt) {
+			a.sessions[token] = sess
+		}
+	}
+}
+
+// persistSessions menyimpan daftar sesi aktif ke DB (dipanggil dengan lock aktif).
+func (a *AuthManager) persistSessionsLocked() {
+	if a.db == nil {
+		return
+	}
+	data, err := json.Marshal(a.sessions)
+	if err != nil {
+		return
+	}
+	if err := a.db.SetSetting("webadmin_sessions", string(data)); err != nil {
+		log.Printf("⚠️ [WebAdmin] Gagal menyimpan sesi: %v", err)
 	}
 }
 
@@ -152,6 +196,7 @@ func (a *AuthManager) VerifyOTP(telegramID int64, code string) (*Session, error)
 		ExpiresAt:  time.Now().Add(time.Duration(sessionTTL) * time.Minute),
 	}
 	a.sessions[token] = sess
+	a.persistSessionsLocked()
 
 	return sess, nil
 }
@@ -172,6 +217,7 @@ func (a *AuthManager) ValidateSession(token string) (*Session, bool) {
 	if time.Now().After(sess.ExpiresAt) {
 		a.mu.Lock()
 		delete(a.sessions, token)
+		a.persistSessionsLocked()
 		a.mu.Unlock()
 		return nil, false
 	}
@@ -187,6 +233,7 @@ func (a *AuthManager) RevokeSession(token string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.sessions, token)
+	a.persistSessionsLocked()
 }
 
 // RequireAuth middleware protects handler endpoints

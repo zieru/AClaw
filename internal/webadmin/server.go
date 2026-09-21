@@ -64,7 +64,7 @@ func NewServer(
 		}
 	}
 
-	authMgr := NewAuthManager(cfg, sender)
+	authMgr := NewAuthManager(cfg, sender, db)
 
 	return &Server{
 		bindAddress:  bindAddress,
@@ -165,28 +165,57 @@ func (s *Server) Restart(bindAddress string, newPort int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if strings.TrimSpace(bindAddress) == "" {
+	bindAddress = strings.TrimSpace(bindAddress)
+	if bindAddress == "" {
 		bindAddress = s.bindAddress
 	}
 	if bindAddress == "" {
 		bindAddress = "0.0.0.0"
 	}
 
-	// 1. Test listening on new address and port first
+	// Normalisasi: "localhost" bukan address yang valid untuk net.Listen di semua platform
+	if bindAddress == "localhost" {
+		bindAddress = "127.0.0.1"
+	}
+
+	// Validasi format address lebih awal agar gagal cepat & jelas
+	if net.ParseIP(bindAddress) == nil {
+		return fmt.Errorf("alamat binding tidak valid: %q (gunakan IP, mis. 0.0.0.0 atau 127.0.0.1)", bindAddress)
+	}
+
+	// 1. Tutup listener lama TERLEBIH DAHULU agar alamat yang sama bisa di-rebind
+	//    (mis. pindah 0.0.0.0 -> 127.0.0.1 pada port yang sama tidak gagal "address in use").
+	oldListener := s.listener
+	oldServer := s.httpServer
+	if oldListener != nil {
+		_ = oldListener.Close()
+	}
+
+	// 2. Bind alamat baru
 	newAddr := fmt.Sprintf("%s:%d", bindAddress, newPort)
 	newLn, err := net.Listen("tcp", newAddr)
 	if err != nil {
+		// Rollback: buka kembali listener lama supaya web admin tidak mati
+		if oldServer != nil && oldListener != nil {
+			s.httpServer = oldServer
+			s.listener = oldListener
+			go func(ln net.Listener, srv *http.Server) {
+				if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+					log.Printf("⚠️ [WebAdmin] Rollback server error: %v", err)
+				}
+			}(oldListener, oldServer)
+		}
 		return fmt.Errorf("alamat %s:%d sedang digunakan atau tidak dapat dibuka: %w", bindAddress, newPort, err)
 	}
 
-	// 2. Shut down old server gracefully
-	if s.httpServer != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_ = s.httpServer.Shutdown(shutdownCtx)
+	// 3. Shut down old http server gracefully (setelah bind baru sukses)
+	if oldServer != nil && oldServer != s.httpServer {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = oldServer.Shutdown(shutdownCtx)
 		cancel()
 	}
 
-	// 3. Save new settings to DB
+	// 4. Save new settings to DB
 	if s.db != nil {
 		_ = s.db.SetSetting("webadmin_bind_address", bindAddress)
 		_ = s.db.SetSetting("webadmin_port", strconv.Itoa(newPort))

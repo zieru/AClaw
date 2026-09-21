@@ -20,7 +20,7 @@ func TestAuthManager_OTPWorkflow(t *testing.T) {
 		return nil
 	}
 
-	auth := NewAuthManager(cfg, sender)
+	auth := NewAuthManager(cfg, sender, nil)
 
 	// 1. Unauthorized user should be rejected
 	err := auth.RequestOTP(999999999)
@@ -84,7 +84,7 @@ func TestAuthManager_MaxAttempts(t *testing.T) {
 	cfg.AdminTelegram.AllowedUserIDs = []int64{123456789}
 	cfg.WebAdmin.OTPTTLMinutes = 5
 
-	auth := NewAuthManager(cfg, nil)
+	auth := NewAuthManager(cfg, nil, nil)
 	_ = auth.RequestOTP(123456789)
 
 	// Fail 3 times
