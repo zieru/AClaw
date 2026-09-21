@@ -50,6 +50,21 @@ func TestDescribeToolCall(t *testing.T) {
 			},
 			expected: "Eksekusi perintah: ls -la",
 		},
+		{
+			name: "delegate_task",
+			args: map[string]interface{}{
+				"role":        "analyst",
+				"instruction": "Analisa data visit",
+			},
+			expected: "Delegasi tugas ke sub-agen @analyst",
+		},
+		{
+			name: "delegate_task",
+			args: map[string]interface{}{
+				"tasks": `[{"role":"analyst"}]`,
+			},
+			expected: "Delegasi tugas paralel ke sub-agen",
+		},
 	}
 
 	for _, tt := range tests {

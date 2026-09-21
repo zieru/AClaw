@@ -103,7 +103,6 @@ func TestSubagentPromptAndTool(t *testing.T) {
 		t.Errorf("expected visit performance instructions in analyst prompt, got:\n%s", analystPrompt)
 	}
 
-
 	// Test Subagent Tool Metadata
 	subTool := NewSubagentTool(pb, nil, nil)
 	if subTool.Name() != "delegate_task" {
@@ -337,6 +336,3 @@ func TestProcessMessage_TimeoutAuditLog(t *testing.T) {
 		t.Errorf("audit log for prompt %q was not found in DB", userPrompt)
 	}
 }
-
-
-

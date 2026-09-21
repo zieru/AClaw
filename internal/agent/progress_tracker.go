@@ -143,6 +143,17 @@ func DescribeToolCall(name string, args map[string]interface{}) string {
 		}
 		return "Capture & analisa dashboard Visit Performance"
 
+	case "delegate_task":
+		role := getString("role")
+		tasks := getString("tasks")
+		if tasks != "" {
+			return "Delegasi tugas paralel ke sub-agen"
+		}
+		if role != "" {
+			return fmt.Sprintf("Delegasi tugas ke sub-agen @%s", role)
+		}
+		return "Delegasi tugas ke sub-agen"
+
 	default:
 		return fmt.Sprintf("Menjalankan tool %s", name)
 	}
@@ -272,10 +283,12 @@ func (p *ProgressTracker) Render() string {
 		// Current running step
 		if p.currentStep != "" {
 			curNum := len(p.steps) + 1
-			sb.WriteString(fmt.Sprintf("⏳ [%d/%d] <i>%s...</i>\n", curNum, totalCount, html.EscapeString(p.currentStep)))
+			cleanCur := strings.TrimRight(strings.TrimSpace(p.currentStep), ". ")
+			sb.WriteString(fmt.Sprintf("⏳ [%d/%d] <i>%s...</i>\n", curNum, totalCount, html.EscapeString(cleanCur)))
 		}
 	} else if p.currentStep != "" {
-		sb.WriteString(fmt.Sprintf("⏳ <i>%s...</i>", html.EscapeString(p.currentStep)))
+		cleanCur := strings.TrimRight(strings.TrimSpace(p.currentStep), ". ")
+		sb.WriteString(fmt.Sprintf("⏳ <i>%s...</i>", html.EscapeString(cleanCur)))
 	}
 
 	return strings.TrimSpace(sb.String())

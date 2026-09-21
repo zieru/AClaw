@@ -403,7 +403,6 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 	}
 	allowedTools := o.toolRegistry.ListAllowed(effectivePerms)
 
-
 	// 7. Build Memory & System Prompt
 	memContext, _ := o.memoryManager.GetContextMemory(req.ChannelID, req.UserID)
 
@@ -681,7 +680,11 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			toolCtx := WithProgressReporter(ctx, func(status string) {
 				cleanStatus := strings.TrimSpace(status)
 				if cleanStatus != "" {
-					tracker.SetCurrent(fmt.Sprintf("%s: %s", toolDesc, cleanStatus))
+					if tc.Name == "delegate_task" {
+						tracker.SetCurrent(cleanStatus)
+					} else {
+						tracker.SetCurrent(fmt.Sprintf("%s: %s", toolDesc, cleanStatus))
+					}
 				}
 			})
 			toolOut, toolErr := o.toolRegistry.Execute(toolCtx, tc.Name, tc.Arguments)

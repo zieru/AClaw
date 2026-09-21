@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"html"
 	"strings"
 	"sync"
 	"time"
@@ -284,11 +283,15 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 
 	progress := GetProgressReporter(ctx)
 	if progress != nil {
-		shortInst := task.Instruction
-		if len(shortInst) > 85 {
-			shortInst = shortInst[:82] + "..."
+		shortInst := strings.TrimSpace(task.Instruction)
+		shortInst = strings.ReplaceAll(shortInst, "\n", " ")
+		for strings.Contains(shortInst, "  ") {
+			shortInst = strings.ReplaceAll(shortInst, "  ", " ")
 		}
-		progress(fmt.Sprintf("🤖 <b>[Sub-agen @%s]</b> Ditugaskan\n🎯 <b>Goal:</b> <i>%s</i>", role, html.EscapeString(shortInst)))
+		if len(shortInst) > 75 {
+			shortInst = shortInst[:72] + "..."
+		}
+		progress(fmt.Sprintf("Sub-agen @%s: %s", role, shortInst))
 	}
 
 	// 4. Execute subagent inference loop (up to 3 turns)
@@ -329,8 +332,8 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 		if resp.Thinking != "" {
 			collectedThinking = append(collectedThinking, resp.Thinking)
 			if progress != nil {
-				thinkPreview := cleanThinkingPreview(resp.Thinking, 85)
-				progress(fmt.Sprintf("🤖 <b>[@%s]</b> 💭 <i>%s</i>", role, html.EscapeString(thinkPreview)))
+				thinkPreview := cleanThinkingPreview(resp.Thinking, 75)
+				progress(fmt.Sprintf("Sub-agen @%s 💭 %s", role, thinkPreview))
 			}
 		}
 
@@ -352,7 +355,8 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 				continue // Guard against recursion
 			}
 			if progress != nil {
-				progress(fmt.Sprintf("🤖 <b>[@%s]</b> 🔍 <i>Menjalankan tool: <b>%s</b>...</i>", role, tc.Name))
+				subToolDesc := DescribeToolCall(tc.Name, tc.Arguments)
+				progress(fmt.Sprintf("Sub-agen @%s 🔍 %s", role, subToolDesc))
 			}
 			toolOut, toolErr := s.toolRegistry.Execute(subCtx, tc.Name, tc.Arguments)
 			if toolErr != nil {
@@ -368,7 +372,7 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 		}
 
 		if progress != nil && turn < maxTurns-1 {
-			progress(fmt.Sprintf("🤖 <b>[@%s]</b> ✍️ <i>Menganalisis data & menyusun kesimpulan...</i>", role))
+			progress(fmt.Sprintf("Sub-agen @%s ✍️ Menyusun analisis & kesimpulan", role))
 		}
 	}
 
