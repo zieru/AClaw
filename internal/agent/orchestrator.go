@@ -388,8 +388,21 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		return nil, fmt.Errorf("gagal mengambil riwayat sesi: %w", err)
 	}
 
-	perms, _ := o.db.GetChannelToolPerms(req.ChannelID)
-	allowedTools := o.toolRegistry.ListAllowed(perms)
+	var perms map[string]bool
+	if o.db != nil {
+		perms, _ = o.db.GetChannelToolPerms(req.ChannelID)
+	}
+	// Exclude dedicated subagent tools (capture_visit_performance) from root orchestrator
+	// to prevent tool schema and prompt bloat on non-visit interactions, unless explicitly allowed or role is analyst.
+	effectivePerms := make(map[string]bool)
+	for k, v := range perms {
+		effectivePerms[k] = v
+	}
+	if _, exists := effectivePerms["capture_visit_performance"]; !exists && strings.ToLower(req.PreferredRole) != "analyst" {
+		effectivePerms["capture_visit_performance"] = false
+	}
+	allowedTools := o.toolRegistry.ListAllowed(effectivePerms)
+
 
 	// 7. Build Memory & System Prompt
 	memContext, _ := o.memoryManager.GetContextMemory(req.ChannelID, req.UserID)

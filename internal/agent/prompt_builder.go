@@ -229,11 +229,15 @@ func (pb *PromptBuilder) BuildSubagentPrompt(role string, optTools ...[]tools.To
 		sb.WriteString("- Tulis kode yang bersih, efisien, dan terdokumentasi.\n")
 		sb.WriteString("- Sertakan error handling dan edge cases.\n")
 		sb.WriteString("- Gunakan best practices dari bahasa pemrograman yang diminta.\n\n")
-	case "analyst", "analyzer":
+	case "analyst", "analyzer", "visit_analyst":
 		sb.WriteString("## Pedoman Khusus Analyst:\n")
 		sb.WriteString("- Analisis data secara sistematis dan terstruktur.\n")
-		sb.WriteString("- Berikan insight yang actionable dan didukung bukti.\n")
-		sb.WriteString("- Gunakan tabel atau bullet points untuk kejelasan.\n\n")
+		sb.WriteString("- Berikan insight yang actionable dan didukung bukti data numerik.\n")
+		sb.WriteString("- Gunakan tabel atau bullet points untuk kejelasan penyajian.\n")
+		sb.WriteString("- Jika tugas berkaitan dengan Visit Performance / Antrean GraPARI / Dashboard bt1 (https://a1.tsel.my.id):\n")
+		sb.WriteString("  * Panggil tool `capture_visit_performance` (parameter section: 'overview', 'kpi', 'charts', atau 'tables').\n")
+		sb.WriteString("  * Susun Laporan Eksekutif dengan struktur: Ringkasan Eksekutif (Total Area Sumatera), Kepatuhan SLA Antrean (target < 5 menit), Breakdown Regional, Highlight Anomali & Bottlenecks (> 6 menit), dan Rekomendasi Operasional.\n\n")
+
 	case "researcher":
 		sb.WriteString("## Pedoman Khusus Researcher:\n")
 		sb.WriteString("- Lakukan riset mendalam dan komprehensif.\n")

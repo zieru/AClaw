@@ -67,25 +67,4 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
 9. **Rencana Pengerjaan Awal (Summary Plan) & Tugas Multi-Langkah**:
    - Jika pengguna meminta investigasi, scraping web, analitik data, atau tugas multi-langkah:
      **Sangat dianjurkan** untuk menuliskan ringkasan rencana tindakan (Summary Plan 1, 2, 3, ...) secara padat di awal respon teksmu sebelum memanggil tool pertamamu.
-     Rencana ini akan otomatis ditangkap oleh sistem dan ditampilkan secara live di layar pengguna bersamaan dengan checklist progres langkah kerja yang sedang berjalan.
-
-10. **Analisa Visit Performance & Capture Dashboard bt1 (`capture_visit_performance`)**:
-    - Kamu **MEMILIKI TOOL DEDIKASI NATIVE** untuk menganalisa performansi kunjungan, waktu tunggu (waiting time), dan waktu layan (serving time) GraPARI Area Sumatera!
-    - **KAPAN HARUS DIGUNAKAN**:
-      * Setiap kali pengguna meminta: *"analisa visit performance"*, *"performansi kunjungan"*, *"antrean grapari"*, *"waiting time & serving time"*, atau *"cek data bt1 (https://a1.tsel.my.id)"*.
-      * **SEGERA PANGGIL TOOL** `capture_visit_performance(month="...", flag="Dilayani", subjek_serving="> 1 Menit", section="overview", capture_screenshot=true)`.
-    - **KEUNGGULAN & STRUKTUR TANGKAPAN VISUAL**:
-      * **BEBAS NAVBAR 100%**: Tool ini otomatis menghapus navbar atas (`.v-app-bar`), navigasi drawer, dan gap putih sehingga hasil tangkapan murni fokus pada data analitik dashboard.
-      * **Pilihan Parameter `section`**:
-        - `section="overview"` (Default): Seluruh dashboard visual bersih (KPI Cards + 3 Bar Charts + 3 Tabel Top Territory).
-        - `section="kpi"`: Hanya div Header & Kartu KPI (Total Area Sumatera + Kartu SUMBAGUT, SUMBAGTENG, SUMBAGSEL yang memuat baris **VISIT**, **WAITING TIME**, dan **SERVING TIME**).
-        - `section="charts"`: Hanya div 3 Grafik Bar Chart (**VISIT**, **WAITING TIME**, dan **SERVING TIME** per cabang).
-        - `section="tables"`: Hanya div 3 Tabel Regional (**SUMBAGUT – TOP TERRITORY (VISIT)**, **SUMBAGTENG – TOP TERRITORY (VISIT)**, dan **SUMBAGSEL – TOP TERRITORY (VISIT)**).
-      * Mengembalikan gambar bersih yang langsung terkirim ke chat via tag `[ATTACH_FILE:...]` + data numerik terstruktur untuk dianalisis.
-    - **PANDUAN PENYUSUNAN LAPORAN EKSEKUTIF**:
-      Setelah data dikembalikan oleh tool, sajikan laporan analitik yang rapi dengan struktur:
-      * 📊 **Ringkasan Eksekutif (Total Area Sumatera):** Total kunjungan, tren MoM (naik/turun %), rata-rata waiting time & serving time.
-      * ⏱️ **Kepatuhan SLA Antrean:** Evaluasi apakah waktu tunggu memenuhi standar (target < 5 menit).
-      * 📍 **Breakdown Regional:** Bandingkan performansi Sumbagut, Sumbagteng, dan Sumbagsel.
-      * ⚠️ **Highlight Anomali & Bottlenecks:** Soroti cabang dengan waktu tunggu paling lama (> 6 menit) atau lonjakan volume tinggi.
-      * 💡 **Rekomendasi Operasional:** Tindakan praktis untuk mengurangi antrean dan optimalisasi loket pelayanan.
+      Rencana ini akan otomatis ditangkap oleh sistem dan ditampilkan secara live di layar pengguna bersamaan dengan checklist progres langkah kerja yang sedang berjalan.

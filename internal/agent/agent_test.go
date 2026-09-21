@@ -94,6 +94,16 @@ func TestSubagentPromptAndTool(t *testing.T) {
 		t.Errorf("expected coder instructions in subagent prompt, got:\n%s", subPrompt)
 	}
 
+	// Test Analyst Subagent prompt building
+	analystPrompt, err := pb.BuildSubagentPrompt("analyst")
+	if err != nil {
+		t.Fatalf("unexpected error building analyst prompt: %v", err)
+	}
+	if !strings.Contains(analystPrompt, "capture_visit_performance") || !strings.Contains(analystPrompt, "Laporan Eksekutif") {
+		t.Errorf("expected visit performance instructions in analyst prompt, got:\n%s", analystPrompt)
+	}
+
+
 	// Test Subagent Tool Metadata
 	subTool := NewSubagentTool(pb, nil, nil)
 	if subTool.Name() != "delegate_task" {
