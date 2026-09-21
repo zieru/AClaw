@@ -233,7 +233,7 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 
 	// Get timeout and default provider/model from config
 	cfg := config.Get()
-	timeout := 35 * time.Second
+	timeout := 75 * time.Second
 	tokenBudget := 2048
 	preferredProv := ""
 	if cfg != nil {
@@ -247,6 +247,28 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 			modelOverride = cfg.Defaults.DefaultModel
 		}
 		preferredProv = cfg.Defaults.DefaultProvider
+	}
+
+	// Inherit active model and provider from parent context if not explicitly overridden
+	parentProv, parentModel := GetActiveModelInfo(ctx)
+	if modelOverride == "" || (cfg != nil && modelOverride == cfg.Defaults.DefaultModel && parentModel != "") {
+		if parentModel != "" {
+			modelOverride = parentModel
+		}
+	}
+	if preferredProv == "" || (cfg != nil && preferredProv == cfg.Defaults.DefaultProvider && parentProv != "") {
+		if parentProv != "" {
+			preferredProv = parentProv
+		}
+	}
+
+	// Clamp completion max_tokens to a safe limit (max 4096) to prevent provider rejection
+	completionMaxTokens := tokenBudget
+	if completionMaxTokens > 4096 {
+		completionMaxTokens = 4096
+	}
+	if completionMaxTokens <= 0 {
+		completionMaxTokens = 2048
 	}
 
 	// 1. Resolve tools for subagent (prevent recursive delegate_task)
@@ -311,7 +333,7 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 			Messages:        compressedMsgs,
 			Tools:           allowedTools,
 			Temperature:     0.5,
-			MaxTokens:       tokenBudget,
+			MaxTokens:       completionMaxTokens,
 			ThinkingEnabled: true,
 		}
 

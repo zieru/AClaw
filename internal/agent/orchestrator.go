@@ -77,6 +77,8 @@ type UserRequest struct {
 }
 
 type progressKey struct{}
+type activeModelKey struct{}
+type activeProvKey struct{}
 
 // WithProgressReporter attaches an OnProgress callback to context
 func WithProgressReporter(ctx context.Context, fn func(string)) context.Context {
@@ -92,6 +94,23 @@ func GetProgressReporter(ctx context.Context) func(string) {
 		return fn
 	}
 	return nil
+}
+
+// WithActiveModelInfo attaches the active provider and model to context for tool/subagent inheritance
+func WithActiveModelInfo(ctx context.Context, prov, model string) context.Context {
+	ctx = context.WithValue(ctx, activeProvKey{}, prov)
+	return context.WithValue(ctx, activeModelKey{}, model)
+}
+
+// GetActiveModelInfo retrieves the active provider and model from context
+func GetActiveModelInfo(ctx context.Context) (prov, model string) {
+	if p, ok := ctx.Value(activeProvKey{}).(string); ok {
+		prov = p
+	}
+	if m, ok := ctx.Value(activeModelKey{}).(string); ok {
+		model = m
+	}
+	return
 }
 
 type MediaAttachment struct {
@@ -687,6 +706,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 					}
 				}
 			})
+			toolCtx = WithActiveModelInfo(toolCtx, provToCall, modelToUse)
 			toolOut, toolErr := o.toolRegistry.Execute(toolCtx, tc.Name, tc.Arguments)
 			if toolErr != nil {
 				toolOut = fmt.Sprintf("Error eksekusi tool %s: %v", tc.Name, toolErr)
