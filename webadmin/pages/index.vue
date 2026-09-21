@@ -1830,7 +1830,11 @@ function scrollChatBottom() {
 async function handleResetChat() {
   if (!confirm('Bersihkan riwayat obrolan topik ini?')) return
   try {
-    await fetch('/api/chat/clear', { method: 'POST' })
+    await fetch('/api/chat/clear', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: activeTopicId.value })
+    })
     chatMessages.value = [
       {
         role: 'assistant',
