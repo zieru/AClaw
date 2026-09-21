@@ -320,6 +320,7 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 	maxTurns := 3
 	var finalOutput string
 	var collectedThinking []string
+	var collectedAttachments []string
 	totalTokens := 0
 
 	subCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -383,6 +384,22 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 			toolOut, toolErr := s.toolRegistry.Execute(subCtx, tc.Name, tc.Arguments)
 			if toolErr != nil {
 				toolOut = fmt.Sprintf("Error tool %s: %v", tc.Name, toolErr)
+			} else if strings.Contains(toolOut, "[ATTACH_FILE:") {
+				// Bubble up media attachments (like screenshots or exported charts) to parent orchestrator
+				sTag := toolOut
+				for {
+					idx := strings.Index(sTag, "[ATTACH_FILE:")
+					if idx == -1 {
+						break
+					}
+					endIdx := strings.Index(sTag[idx:], "]")
+					if endIdx == -1 {
+						break
+					}
+					fullTag := sTag[idx : idx+endIdx+1]
+					collectedAttachments = append(collectedAttachments, fullTag)
+					sTag = sTag[idx+endIdx+1:]
+				}
 			}
 			toolMsg := provider.ChatMessage{
 				Role:       provider.RoleTool,
@@ -400,6 +417,11 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 
 	if finalOutput == "" {
 		finalOutput = "(Sub-agen selesai tanpa menghasilkan teks)"
+	}
+
+	// Prepend collected media attachments so parent orchestrator extracts and sends them to chat
+	if len(collectedAttachments) > 0 {
+		finalOutput = strings.Join(collectedAttachments, "\n") + "\n\n" + finalOutput
 	}
 
 	return SubTaskResult{
