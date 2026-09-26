@@ -136,6 +136,7 @@ func (s *Server) Start() error {
 
 	go func() {
 		log.Printf("🌐 [WebAdmin] Server aktif mendengarkan di http://%s:%d/admin", s.bindAddress, s.port)
+		log.Printf("🤖 [AI API] OpenAI-Compatible HTTP API aktif di http://%s:%d/v1 (Auth: Bearer sk-*)", s.bindAddress, s.port)
 		if err := s.httpServer.Serve(s.listener); err != nil && err != http.ErrServerClosed {
 			log.Printf("⚠️ [WebAdmin] Server error: %v", err)
 		}
@@ -347,6 +348,7 @@ func (s *Server) buildRoutes() http.Handler {
 	mux.HandleFunc("/api/system/stats", s.authMgr.RequireAuth(s.handleSystemStats))
 	mux.HandleFunc("/api/system/port", s.authMgr.RequireAuth(s.handleUpdateAddress))
 	mux.HandleFunc("/api/system/address", s.authMgr.RequireAuth(s.handleUpdateAddress))
+	mux.HandleFunc("/api/system/apikey", s.authMgr.RequireAuth(s.handleAPIKey))
 
 	// Topic Endpoints
 	mux.HandleFunc("/api/topics", s.authMgr.RequireAuth(s.handleListTopics))
@@ -361,6 +363,10 @@ func (s *Server) buildRoutes() http.Handler {
 	mux.HandleFunc("/api/chat/clear", s.authMgr.RequireAuth(s.handleClearChat))
 	mux.HandleFunc("/api/models", s.authMgr.RequireAuth(s.handleListModels))
 
+	// OpenAI-Compatible HTTP API Endpoints (/v1/*)
+	mux.HandleFunc("/v1/models", s.authMgr.RequireAuth(s.handleOpenAIModels))
+	mux.HandleFunc("/v1/chat/completions", s.authMgr.RequireAuth(s.handleOpenAIChatCompletions))
+
 	return s.corsMiddleware(s.gzipMiddleware(mux))
 }
 
@@ -372,7 +378,7 @@ func (s *Server) gzipMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Skip gzip for SSE streaming endpoint or WebSocket
-		if r.URL.Path == "/api/chat" || r.Header.Get("Upgrade") != "" {
+		if r.URL.Path == "/api/chat" || r.URL.Path == "/v1/chat/completions" || r.Header.Get("Upgrade") != "" {
 			next.ServeHTTP(w, r)
 			return
 		}

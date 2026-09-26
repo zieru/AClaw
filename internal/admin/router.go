@@ -57,6 +57,18 @@ func (a *AdminBot) registerRoutes() {
 		}
 		return c.Send("⚠️ Layanan Web Admin belum diaktifkan.", tele.ModeHTML)
 	})
+	a.bot.Handle("/setapikey", func(c tele.Context) error {
+		if a.webAdminUI != nil {
+			return a.webAdminUI.HandleSetAPIKeyCommand(c)
+		}
+		return c.Send("⚠️ Layanan Web Admin belum diaktifkan.", tele.ModeHTML)
+	})
+	a.bot.Handle("/genapikey", func(c tele.Context) error {
+		if a.webAdminUI != nil {
+			return a.webAdminUI.HandleGenAPIKeyCommand(c)
+		}
+		return c.Send("⚠️ Layanan Web Admin belum diaktifkan.", tele.ModeHTML)
+	})
 
 	// Topic / Multi-Chat Commands
 	a.bot.Handle("/topic", a.topicUI.HandleTopicDashboard)
@@ -85,6 +97,18 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle(&tele.Btn{Unique: "btn_webadmin_restart"}, func(c tele.Context) error {
 		if a.webAdminUI != nil {
 			return a.webAdminUI.HandleRestartCallback(c)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "btn_webadmin_setkey"}, func(c tele.Context) error {
+		if a.webAdminUI != nil {
+			return a.webAdminUI.HandleSetKeyCallback(c)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "btn_webadmin_genkey"}, func(c tele.Context) error {
+		if a.webAdminUI != nil {
+			return a.webAdminUI.HandleGenKeyCallback(c)
 		}
 		return nil
 	})

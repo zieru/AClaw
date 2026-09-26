@@ -61,6 +61,7 @@ web_admin:
   port: 12111                # Port Web Admin (bisa diubah dinamis lewat Telegram: /setwebport [ip] <port>)
   session_ttl_minutes: 1440  # Masa aktif login admin (menit)
   otp_ttl_minutes: 5         # Masa berlaku kode OTP Telegram (menit)
+  api_key: "sk-goassist-default-admin-key" # Bearer token untuk programmatic AI HTTP API (prefix: sk-)
 
 # Auto-Updater Configuration (GitHub Releases)
 updater:

@@ -3,6 +3,7 @@ package webadmin
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -42,6 +43,7 @@ type otpRecord struct {
 type Session struct {
 	Token      string    `json:"token"`
 	TelegramID int64     `json:"telegram_id"`
+	IsAPIKey   bool      `json:"is_api_key,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	ExpiresAt  time.Time `json:"expires_at"`
 }
@@ -53,6 +55,8 @@ type AuthManager struct {
 	mu       sync.RWMutex
 	otps     map[int64]*otpRecord
 	sessions map[string]*Session
+	apiKey   string
+	apiKeyMu sync.RWMutex
 }
 
 func NewAuthManager(cfg *config.AppConfig, sender TelegramSender, db *storage.DB) *AuthManager {
@@ -64,6 +68,7 @@ func NewAuthManager(cfg *config.AppConfig, sender TelegramSender, db *storage.DB
 		sessions: make(map[string]*Session),
 	}
 	a.loadSessions()
+	a.initAPIKey()
 	return a
 }
 
@@ -236,7 +241,78 @@ func (a *AuthManager) RevokeSession(token string) {
 	a.persistSessionsLocked()
 }
 
-// RequireAuth middleware protects handler endpoints
+// initAPIKey loads the API Key from DB or config
+func (a *AuthManager) initAPIKey() {
+	a.apiKeyMu.Lock()
+	defer a.apiKeyMu.Unlock()
+
+	// 1. Highest priority: DB system_settings
+	if a.db != nil {
+		if val, err := a.db.GetSetting("webadmin_api_key", ""); err == nil && val != "" {
+			a.apiKey = normalizeAPIKey(val)
+			return
+		}
+	}
+
+	// 2. YAML Config or ENV
+	if a.cfg != nil && a.cfg.WebAdmin.APIKey != "" {
+		a.apiKey = normalizeAPIKey(a.cfg.WebAdmin.APIKey)
+		return
+	}
+
+	// 3. Fallback standard default
+	a.apiKey = "sk-goassist-default-admin-key"
+}
+
+// normalizeAPIKey ensures the key has the standard "sk-" prefix
+func normalizeAPIKey(key string) string {
+	k := strings.TrimSpace(key)
+	if k == "" {
+		return ""
+	}
+	if !strings.HasPrefix(k, "sk-") {
+		return "sk-" + k
+	}
+	return k
+}
+
+// GetAPIKey returns the active API key
+func (a *AuthManager) GetAPIKey() string {
+	a.apiKeyMu.RLock()
+	defer a.apiKeyMu.RUnlock()
+	return a.apiKey
+}
+
+// SetAPIKey updates the active API key and persists it to SQLite DB
+func (a *AuthManager) SetAPIKey(key string) (string, error) {
+	norm := normalizeAPIKey(key)
+	if len(norm) < 6 {
+		return "", fmt.Errorf("api key minimal 6 karakter dan harus berformat 'sk-...'")
+	}
+
+	a.apiKeyMu.Lock()
+	a.apiKey = norm
+	a.apiKeyMu.Unlock()
+
+	if a.db != nil {
+		if err := a.db.SetSetting("webadmin_api_key", norm); err != nil {
+			log.Printf("⚠️ [WebAdmin] Gagal menyimpan API key ke database: %v", err)
+		}
+	}
+	return norm, nil
+}
+
+// GenerateAPIKey generates a cryptographically secure random key with standard 'sk-goassist-' prefix
+func (a *AuthManager) GenerateAPIKey() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("gagal menghasilkan token acak: %w", err)
+	}
+	newKey := fmt.Sprintf("sk-goassist-%s", hex.EncodeToString(b))
+	return a.SetAPIKey(newKey)
+}
+
+// RequireAuth middleware protects handler endpoints (supporting Bearer sk-* API keys and web admin sessions)
 func (a *AuthManager) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := ""
@@ -245,9 +321,31 @@ func (a *AuthManager) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 		authHeader := r.Header.Get("Authorization")
 		if strings.HasPrefix(authHeader, "Bearer ") {
 			token = strings.TrimPrefix(authHeader, "Bearer ")
+		} else if strings.HasPrefix(authHeader, "bearer ") {
+			token = strings.TrimPrefix(authHeader, "bearer ")
+		} else if xKey := r.Header.Get("X-API-Key"); xKey != "" {
+			token = xKey
 		}
 
-		// 2. Check Cookie
+		// 2. Validate against active API Key
+		activeKey := a.GetAPIKey()
+		if activeKey != "" && token != "" {
+			// Compare in constant time
+			if subtle.ConstantTimeCompare([]byte(token), []byte(activeKey)) == 1 {
+				apiSess := &Session{
+					Token:      token,
+					TelegramID: 0,
+					IsAPIKey:   true,
+					CreatedAt:  time.Now(),
+					ExpiresAt:  time.Now().Add(24 * time.Hour),
+				}
+				ctx := context.WithValue(r.Context(), sessionContextKey, apiSess)
+				next(w, r.WithContext(ctx))
+				return
+			}
+		}
+
+		// 3. Fallback: Check Cookie (for web admin UI)
 		if token == "" {
 			if cookie, err := r.Cookie("goassist_admin_session"); err == nil {
 				token = cookie.Value
@@ -258,7 +356,7 @@ func (a *AuthManager) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 		if !ok {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"error":"Sesi tidak valid atau telah kedaluwarsa. Silakan login kembali."}`))
+			_, _ = w.Write([]byte(`{"error":"Sesi atau API Key tidak valid. Sertakan header 'Authorization: Bearer sk-...' yang sah."}`))
 			return
 		}
 

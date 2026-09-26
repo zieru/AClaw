@@ -80,6 +80,7 @@ type AppConfig struct {
 		Port              int    `yaml:"port"`
 		SessionTTLMinutes int    `yaml:"session_ttl_minutes"`
 		OTPTTLMinutes     int    `yaml:"otp_ttl_minutes"`
+		APIKey            string `yaml:"api_key"`
 	} `yaml:"web_admin"`
 
 	Updater struct {
@@ -204,6 +205,11 @@ func Load(configPath string) (*AppConfig, error) {
 		}
 		if envWebshare := os.Getenv("WEBSHARE_API_KEY"); envWebshare != "" {
 			cfg.Webshare.APIKey = envWebshare
+		}
+		if envWebAdminKey := os.Getenv("WEBADMIN_API_KEY"); envWebAdminKey != "" {
+			cfg.WebAdmin.APIKey = envWebAdminKey
+		} else if envGoAssistKey := os.Getenv("GOASSISTANT_API_KEY"); envGoAssistKey != "" {
+			cfg.WebAdmin.APIKey = envGoAssistKey
 		}
 
 		// Ensure directories exist
