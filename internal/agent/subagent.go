@@ -186,9 +186,18 @@ func (s *SubagentTool) executeParallel(ctx context.Context, tasksJSON string, mo
 		go func(idx int, t SubTask) {
 			defer wg.Done()
 
-			// Acquire semaphore
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			// Acquire semaphore with context cancellation awareness
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[idx] = SubTaskResult{
+					Role:    t.Role,
+					Error:   "dibatalkan: context canceled",
+					Success: false,
+				}
+				return
+			}
 
 			results[idx] = s.executeSingleTask(ctx, t, modelOverride)
 		}(i, task)
@@ -220,6 +229,9 @@ func (s *SubagentTool) executeParallel(ctx context.Context, tasksJSON string, mo
 
 	sb.WriteString(fmt.Sprintf("=== [RINGKASAN: %d/%d berhasil | ~%d total tokens] ===", successCount, len(tasks), totalTokens))
 
+	if ctx.Err() != nil {
+		return sb.String(), ctx.Err()
+	}
 	return sb.String(), nil
 }
 

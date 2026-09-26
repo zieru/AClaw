@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -299,7 +300,7 @@ func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPr
 	if err != nil {
 		log.Printf("⚠️ [Telegram Bot] Request gagal/timeout (Chat: %d, User: %s, Prompt: %q): %v",
 			c.Chat().ID, c.Sender().Username, userPrompt, err)
-		if ctx.Err() == context.Canceled {
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			text := "🛑 <b>PROSES DIBATALKAN</b>\n\nRespon AI berhasil dihentikan atas permintaan pengguna."
 			if thinkingMsg != nil {
 				_, _ = a.bot.Edit(thinkingMsg, text, tele.ModeHTML)
@@ -308,7 +309,7 @@ func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPr
 			return c.Reply(text, tele.ModeHTML)
 		}
 
-		friendlyErr := agent.FormatUserFriendlyError(err)
+		friendlyErr := tgformat.MarkdownToTelegramHTML(agent.FormatUserFriendlyError(err))
 		errMenu := &tele.ReplyMarkup{}
 		retryBtn := errMenu.Data("🔄 Coba Lagi", "retry_task")
 		newBtn := errMenu.Data("✨ Reset Sesi", "reset_session")

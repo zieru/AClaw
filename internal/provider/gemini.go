@@ -523,6 +523,7 @@ func (p *GeminiProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 
 	buf := make([]byte, 4096)
 	var lineBuffer strings.Builder
+	var readErr error
 
 	for {
 		select {
@@ -531,7 +532,8 @@ func (p *GeminiProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		default:
 		}
 
-		n, readErr := resp.Body.Read(buf)
+		var n int
+		n, readErr = resp.Body.Read(buf)
 		if n > 0 {
 			lineBuffer.Write(buf[:n])
 			text := lineBuffer.String()
@@ -614,6 +616,13 @@ func (p *GeminiProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		if readErr != nil {
 			break
 		}
+	}
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if readErr != nil && readErr != io.EOF {
+		return nil, fmt.Errorf("gemini stream read error: %w", readErr)
 	}
 
 	cost := (float64(promptTokens)*0.00010 + float64(compTokens)*0.00040) / 1000.0

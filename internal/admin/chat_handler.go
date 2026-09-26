@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"goassistant/internal/agent"
+	"goassistant/internal/config"
 	"goassistant/internal/provider"
 	"goassistant/internal/tgformat"
 	tele "gopkg.in/telebot.v3"
@@ -46,7 +48,11 @@ func (a *AdminBot) handleDirectChatWithMedia(c tele.Context, msg string, images 
 	}
 	defer stopUpdater()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	timeoutSec := 180
+	if cfg := config.Get(); cfg != nil && cfg.Timeouts.HandlerSeconds > 0 {
+		timeoutSec = cfg.Timeouts.HandlerSeconds
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	a.activeTasks.Store(c.Chat().ID, cancel)
 	defer func() {
 		a.activeTasks.Delete(c.Chat().ID)
@@ -78,7 +84,7 @@ func (a *AdminBot) handleDirectChatWithMedia(c tele.Context, msg string, images 
 	if err != nil {
 		log.Printf("⚠️ [Telegram Admin PM] Request gagal/timeout (User: %s, Prompt: %q): %v",
 			c.Sender().Username, msg, err)
-		if ctx.Err() == context.Canceled {
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			text := "🛑 <b>PROSES DIBATALKAN</b>\n\nRespon AI berhasil dihentikan atas permintaan pengguna."
 			if thinkingMsg != nil {
 				_, _ = a.bot.Edit(thinkingMsg, text, tele.ModeHTML)
@@ -87,7 +93,7 @@ func (a *AdminBot) handleDirectChatWithMedia(c tele.Context, msg string, images 
 			return c.Reply(text, tele.ModeHTML)
 		}
 
-		friendlyErr := agent.FormatUserFriendlyError(err)
+		friendlyErr := tgformat.MarkdownToTelegramHTML(agent.FormatUserFriendlyError(err))
 		errMenu := &tele.ReplyMarkup{}
 		retryBtn := errMenu.Data("🔄 Coba Lagi", "retry_admin_task")
 		errMenu.Inline(errMenu.Row(retryBtn))

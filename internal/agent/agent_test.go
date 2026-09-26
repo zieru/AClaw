@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -280,6 +281,11 @@ func TestProcessMessage_TimeoutAuditLog(t *testing.T) {
 
 	orch := NewOrchestrator(db, sm, mm, pb, tr, pm)
 
+	sess, _ := sm.GetOrCreate("tg_test_chan", "chat_123", "user_456")
+	for i := 0; i < 6; i++ {
+		_ = sm.AddMessage(sess.ID, "user", fmt.Sprintf("message %d", i), 10)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
@@ -305,6 +311,12 @@ func TestProcessMessage_TimeoutAuditLog(t *testing.T) {
 	friendly := FormatUserFriendlyError(err)
 	if !strings.Contains(friendly, "Waktu Tunggu Habis (Timeout)") {
 		t.Errorf("expected friendly timeout message, got: %s", friendly)
+	}
+
+	// Verify that session messages were truncated to 2 in DB
+	cnt, _ := db.CountSessionMessages(sess.ID)
+	if cnt > 2 {
+		t.Errorf("expected session messages to be truncated to 2 on timeout, got %d", cnt)
 	}
 
 	// Verify that audit log was inserted into DB
@@ -334,5 +346,63 @@ func TestProcessMessage_TimeoutAuditLog(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("audit log for prompt %q was not found in DB", userPrompt)
+	}
+}
+
+func TestProcessMessage_CanceledImmediateExit(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_cancel.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+	defer db.Close()
+
+	sm := memory.NewSessionManager(db)
+	mm := memory.NewManager(db)
+	loader := NewMDLoader(tempDir)
+	pb := NewPromptBuilder(loader)
+	tr := tools.GetRegistry()
+	pm := provider.GetManager()
+
+	orch := NewOrchestrator(db, sm, mm, pb, tr, pm)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately before execution
+
+	userPrompt := "test stop process"
+	resp, err := orch.ProcessMessage(ctx, UserRequest{
+		ChannelType: "telegram",
+		ChannelID:   "tg_test_chan",
+		ChatID:      "chat_cancel",
+		UserID:      "user_cancel",
+		UserName:    "Cancel User",
+		UserPrompt:  userPrompt,
+	})
+
+	if err == nil {
+		t.Fatalf("expected error from canceled ProcessMessage, got nil")
+	}
+	if resp != nil {
+		t.Fatalf("expected nil response on cancellation, got %+v", resp)
+	}
+
+	// Verify audit log status is 'canceled'
+	logs, err := db.GetRecentAuditLogs(5)
+	if err != nil {
+		t.Fatalf("failed to get audit logs: %v", err)
+	}
+	found := false
+	for _, l := range logs {
+		if l.ClientRequest == userPrompt {
+			found = true
+			if l.Status != "canceled" {
+				t.Errorf("expected status 'canceled', got '%s'", l.Status)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("audit log for canceled prompt was not found in DB")
 	}
 }

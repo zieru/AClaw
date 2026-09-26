@@ -595,6 +595,7 @@ func (p *AnthropicProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 
 	buf := make([]byte, 4096)
 	var lineBuffer strings.Builder
+	var readErr error
 
 	for {
 		select {
@@ -603,7 +604,8 @@ func (p *AnthropicProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 		default:
 		}
 
-		n, readErr := resp.Body.Read(buf)
+		var n int
+		n, readErr = resp.Body.Read(buf)
 		if n > 0 {
 			lineBuffer.Write(buf[:n])
 			text := lineBuffer.String()
@@ -708,6 +710,13 @@ func (p *AnthropicProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 		if readErr != nil {
 			break
 		}
+	}
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if readErr != nil && readErr != io.EOF {
+		return nil, fmt.Errorf("anthropic stream read error: %w", readErr)
 	}
 
 	if req.StreamCallback != nil {

@@ -184,7 +184,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			sendSSE("chunk", map[string]string{"text": "\n\n🛑 *[Proses dihentikan oleh pengguna /stop]*"})
 			sendSSE("done", map[string]string{"response": "\n\n🛑 *[Proses dihentikan oleh pengguna /stop]*", "status": "stopped"})
 		} else {
-			sendSSE("error", map[string]string{"error": err.Error()})
+			friendly := agent.FormatUserFriendlyError(err)
+			sendSSE("error", map[string]string{"error": friendly, "raw_error": err.Error()})
 		}
 	} else {
 		respText := ""

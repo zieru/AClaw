@@ -863,6 +863,7 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 	// Read line by line from SSE stream
 	buf := make([]byte, 4096)
 	var lineBuffer strings.Builder
+	var readErr error
 
 	for {
 		select {
@@ -871,7 +872,8 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		default:
 		}
 
-		n, readErr := httpResp.Body.Read(buf)
+		var n int
+		n, readErr = httpResp.Body.Read(buf)
 		if n > 0 {
 			lineBuffer.Write(buf[:n])
 
@@ -948,6 +950,13 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		if readErr != nil {
 			break
 		}
+	}
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if readErr != nil && readErr != io.EOF {
+		return nil, fmt.Errorf("stream read error: %w", readErr)
 	}
 
 	thinkFilter.Flush()

@@ -1,8 +1,13 @@
 package admin
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
+
+	"goassistant/internal/agent"
+	"goassistant/internal/tgformat"
 )
 
 func TestFormatDuration(t *testing.T) {
@@ -24,5 +29,18 @@ func TestFormatDuration(t *testing.T) {
 	d4 := 26*time.Hour + 10*time.Minute + 5*time.Second
 	if s := formatDuration(d4); s != "1h 2j 10m 5s" {
 		t.Errorf("expected '1h 2j 10m 5s', got '%s'", s)
+	}
+}
+
+func TestAdminFriendlyErrorHTMLFormatting(t *testing.T) {
+	errTimeout := context.DeadlineExceeded
+	friendlyRaw := agent.FormatUserFriendlyError(errTimeout)
+	friendlyHTML := tgformat.MarkdownToTelegramHTML(friendlyRaw)
+
+	if strings.Contains(friendlyHTML, "**") {
+		t.Errorf("expected friendly error markdown to be converted to HTML, found raw asterisks: %s", friendlyHTML)
+	}
+	if !strings.Contains(friendlyHTML, "<b>Waktu Tunggu Habis (Timeout)</b>") {
+		t.Errorf("expected <b>Waktu Tunggu Habis (Timeout)</b> in Telegram HTML, got: %s", friendlyHTML)
 	}
 }

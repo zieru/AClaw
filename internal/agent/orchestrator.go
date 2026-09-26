@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -164,15 +165,19 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 	var modelToUse string
 	var activeProvName string
 	var activeModelName string
+	var activeSession *storage.ChatSessionRecord
 
 	defer func() {
 		if err != nil {
 			latency := time.Since(start)
 			errStatus := "error"
 			errLower := strings.ToLower(err.Error())
-			if ctx.Err() == context.DeadlineExceeded || strings.Contains(errLower, "deadline") || strings.Contains(errLower, "timeout") {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) || strings.Contains(errLower, "deadline") || strings.Contains(errLower, "timeout") {
 				errStatus = "timeout"
-			} else if ctx.Err() == context.Canceled || strings.Contains(errLower, "canceled") {
+				if activeSession != nil && o.db != nil {
+					_ = o.db.TruncateOldMessages(activeSession.ID, 2)
+				}
+			} else if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) || strings.Contains(errLower, "canceled") {
 				errStatus = "canceled"
 			}
 
@@ -377,6 +382,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 	if err != nil {
 		return nil, fmt.Errorf("gagal inisialisasi sesi percakapan: %w", err)
 	}
+	activeSession = session
 	if o.sessionManager != nil {
 		o.sessionManager.MaybeAutoTitleTopic(session, req.UserPrompt)
 	}
@@ -545,6 +551,9 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		var genErr error
 		genResp, genErr = o.providerManager.GenerateWithFallback(ctx, provToCall, chatReq)
 		if genErr != nil {
+			if errors.Is(ctx.Err(), context.Canceled) || errors.Is(genErr, context.Canceled) {
+				return nil, context.Canceled
+			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
@@ -595,8 +604,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 					OnProgress:     req.OnProgress,
 				}
 
-				// Fresh context if original ctx was timed out
-				retryCtx, cancelRetry := context.WithTimeout(context.Background(),
+				// Linked context that respects parent cancellation and timeout budget
+				retryCtx, cancelRetry := context.WithTimeout(ctx,
 					time.Duration(retrySeconds)*time.Second)
 				genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, retryChatReq)
 				cancelRetry()
@@ -608,7 +617,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				}
-				retryCtx, cancelRetry := context.WithTimeout(context.Background(),
+				retryCtx, cancelRetry := context.WithTimeout(ctx,
 					time.Duration(retrySeconds)*time.Second)
 				genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, chatReq)
 				cancelRetry()

@@ -2,9 +2,13 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"goassistant/internal/storage"
 )
@@ -592,6 +596,54 @@ func TestAnthropicVisionPayloadBlocks(t *testing.T) {
 		t.Fatalf("image block not configured correctly: %+v", blocks[1])
 	}
 	_ = p
+}
+
+func TestOpenAIProvider_StreamContextCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if ok {
+			flusher.Flush()
+		}
+		// Send initial chunk
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Halo \"}}]}\n\n")
+		if ok {
+			flusher.Flush()
+		}
+		// Wait until client context cancels
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	prov := NewOpenAIProvider("test_openai", "openai", server.URL, "dummy_key", "gpt-4o")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	receivedChunks := 0
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel() // Cancel context while stream is active
+	}()
+
+	_, err := prov.GenerateChatStream(ctx, ChatRequest{
+		Model: "gpt-4o",
+		Messages: []ChatMessage{
+			{Role: RoleUser, Content: "test"},
+		},
+		Stream:         true,
+		StreamCallback: func(chunk StreamChunk) {
+			if chunk.Content != "" {
+				receivedChunks++
+			}
+		},
+	})
+
+	if err == nil {
+		t.Fatalf("expected error when context is canceled during stream, got nil")
+	}
+	if !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "canceled") {
+		t.Errorf("expected context.Canceled error, got: %v", err)
+	}
 }
 
 
