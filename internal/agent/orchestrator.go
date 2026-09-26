@@ -868,8 +868,14 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 	finalText := cleanText
 
 	// Prepend thinking content if enabled and available (and not already used as main content fallback)
-	if finalThinking != "" && policy.ThinkingEnabled && cleanText != strings.TrimSpace(finalThinking) {
-		switch strings.ToLower(policy.ThinkingDisplay) {
+	isTelegram := req.ChannelType == "telegram" || req.ChannelType == "telegram_admin"
+	thinkingAllowed := policy.ThinkingEnabled || isTelegram
+	if finalThinking != "" && thinkingAllowed && cleanText != strings.TrimSpace(finalThinking) {
+		displayMode := strings.ToLower(policy.ThinkingDisplay)
+		if isTelegram && (displayMode == "hidden" || displayMode == "") {
+			displayMode = "full" // On Telegram, never drop thinking result
+		}
+		switch displayMode {
 		case "full":
 			if req.ChannelType == "whatsapp" {
 				// For WhatsApp, default to a clean summary / first 64 chars to avoid message bloating

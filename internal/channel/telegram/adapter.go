@@ -260,11 +260,12 @@ func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPr
 	var stopUpdater func()
 	var onProgressStatus func(string)
 	var onStreamChunk func(provider.StreamChunk)
+	var getStreamThinking func() string
 
 	if policy.StreamingEnabled {
-		stopUpdater, onProgressStatus, onStreamChunk = createProgressiveThinkingManager(a.bot, thinkingMsg, "🤔 <i>Sedang berpikir...</i>")
+		stopUpdater, onProgressStatus, onStreamChunk, getStreamThinking = createProgressiveThinkingManager(a.bot, thinkingMsg, "🤔 <i>Sedang berpikir...</i>")
 	} else {
-		stopUpdater, onProgressStatus, _ = createProgressiveThinkingManager(a.bot, thinkingMsg, "🤔 <i>Sedang memproses respon...</i>")
+		stopUpdater, onProgressStatus, _, getStreamThinking = createProgressiveThinkingManager(a.bot, thinkingMsg, "🤔 <i>Sedang memproses respon...</i>")
 		onStreamChunk = nil
 	}
 	defer stopUpdater()
@@ -327,7 +328,20 @@ func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPr
 		return c.Reply(friendlyErr, tele.ModeHTML, errMenu)
 	}
 
-	return a.sendOrEditResponse(c, thinkingMsg, resp.Text, resp.MediaFiles)
+	finalText := resp.Text
+	streamThink := ""
+	if getStreamThinking != nil {
+		streamThink = strings.TrimSpace(getStreamThinking())
+	}
+	if streamThink == "" && resp != nil {
+		streamThink = strings.TrimSpace(resp.ThinkingContent)
+	}
+	// Pastikan hasil stream thinking tidak dihapus dari tampilan pesan Telegram
+	if streamThink != "" && !strings.Contains(finalText, "Proses Berpikir") {
+		finalText = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s</blockquote>\n\n%s", streamThink, finalText)
+	}
+
+	return a.sendOrEditResponse(c, thinkingMsg, finalText, resp.MediaFiles)
 }
 
 func (a *BotAdapter) handleRetry(c tele.Context) error {
@@ -346,10 +360,9 @@ func (a *BotAdapter) handleRetry(c tele.Context) error {
 	return a.executePrompt(c, c.Message(), lastPrompt, nil, 0)
 }
 
-// createProgressiveThinkingManager runs a periodic ticker that updates thinking and streaming text dynamically
-func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, initialPrefix string) (stopFunc func(), updateStatus func(string), onChunk func(chunk provider.StreamChunk)) {
+func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, initialPrefix string) (stopFunc func(), updateStatus func(string), onChunk func(chunk provider.StreamChunk), getThinking func() string) {
 	if targetMsg == nil {
-		return func() {}, func(string) {}, func(provider.StreamChunk) {}
+		return func() {}, func(string) {}, func(provider.StreamChunk) {}, func() string { return "" }
 	}
 
 	cancelMenu := &tele.ReplyMarkup{}
@@ -364,6 +377,7 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 	stopped := false
 	doneChan := make(chan struct{})
 	startTime := time.Now()
+	var floodWaitUntil time.Time
 
 	updateStatus = func(status string) {
 		mu.Lock()
@@ -394,7 +408,8 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 	}
 
 	go func() {
-		ticker := time.NewTicker(2 * time.Second)
+		// Minimum 3 seconds throttle to avoid Telegram rate limits
+		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()
 
 		for {
@@ -407,6 +422,11 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 					mu.Unlock()
 					return
 				}
+				if time.Now().Before(floodWaitUntil) {
+					mu.Unlock()
+					continue
+				}
+
 				elapsedSec := int(time.Since(startTime).Seconds())
 				curThinking := strings.TrimSpace(thinkingBuf.String())
 				curContent := strings.TrimSpace(contentBuf.String())
@@ -467,13 +487,31 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 				mu.Unlock()
 
 				if targetMsg != nil {
-					_, _ = bot.Edit(targetMsg, text, tele.ModeHTML, cancelMenu)
+					_, err := bot.Edit(targetMsg, text, tele.ModeHTML, cancelMenu)
+					if err != nil {
+						errStr := strings.ToLower(err.Error())
+						if strings.Contains(errStr, "flood") || strings.Contains(errStr, "429") {
+							mu.Lock()
+							floodWaitUntil = time.Now().Add(5 * time.Second)
+							mu.Unlock()
+						} else {
+							// If HTML parsing failed on partial stream chunk, retry edit as plain text
+							cleanText := regexp.MustCompile(`<[^>]*>`).ReplaceAllString(text, "")
+							_, _ = bot.Edit(targetMsg, cleanText, cancelMenu)
+						}
+					}
 				}
 			}
 		}
 	}()
 
-	return stopFunc, updateStatus, onChunk
+	getThinking = func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.TrimSpace(thinkingBuf.String())
+	}
+
+	return stopFunc, updateStatus, onChunk, getThinking
 }
 
 func (a *BotAdapter) handleNew(c tele.Context) error {
@@ -1036,6 +1074,53 @@ func isTempScreenshot(fPath string) bool {
 }
 
 func splitMessage(text string, maxLen int) []string {
+	if maxLen <= 0 {
+		maxLen = 4000
+	}
+	text = strings.TrimSpace(text)
+	if len(text) <= maxLen {
+		return []string{text}
+	}
+
+	// Check if text starts with an expandable blockquote (e.g. thinking block)
+	bqStart := "<blockquote expandable>"
+	bqEnd := "</blockquote>"
+	if strings.Contains(text, bqStart) && strings.Contains(text, bqEnd) {
+		startIdx := strings.Index(text, bqStart)
+		endIdx := strings.Index(text, bqEnd)
+		if startIdx < endIdx {
+			blockPrefix := text[:startIdx] // e.g. "💭 <b>Proses Berpikir:</b>\n"
+			blockContent := text[startIdx+len(bqStart) : endIdx]
+			afterBlock := strings.TrimSpace(text[endIdx+len(bqEnd):])
+
+			// If the blockquote alone is longer than maxLen - 200, cap blockContent
+			maxBlockContent := maxLen - len(blockPrefix) - len(bqStart) - len(bqEnd) - 50
+			if maxBlockContent > 500 && len(blockContent) > maxBlockContent {
+				blockContent = blockContent[:maxBlockContent] + "..."
+			}
+
+			fullBlock := fmt.Sprintf("%s%s%s%s", blockPrefix, bqStart, blockContent, bqEnd)
+
+			// If full block + afterBlock fits within maxLen, keep them together in one message!
+			if len(fullBlock)+2+len(afterBlock) <= maxLen {
+				return []string{fullBlock + "\n\n" + afterBlock}
+			}
+
+			// Otherwise, chunk 0 is the full blockquote, and remaining chunks are afterBlock
+			var chunks []string
+			chunks = append(chunks, fullBlock)
+			if afterBlock != "" {
+				restChunks := splitMessageSimple(afterBlock, maxLen)
+				chunks = append(chunks, restChunks...)
+			}
+			return chunks
+		}
+	}
+
+	return splitMessageSimple(text, maxLen)
+}
+
+func splitMessageSimple(text string, maxLen int) []string {
 	var chunks []string
 	for len(text) > 0 {
 		if len(text) <= maxLen {

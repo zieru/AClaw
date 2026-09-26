@@ -131,8 +131,10 @@ func Open(dbPath string) (*DB, error) {
 	_, _ = db.Exec("INSERT OR IGNORE INTO channel_policies (id, scope, scope_id, footer_mode, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold) VALUES ('global', 'global', 'system', 'full', 10, 2048, 20, 1, 15)")
 	// Ensure any stale non-global policies with default 'off' don't override global
 	_, _ = db.Exec("UPDATE channel_policies SET footer_mode = '' WHERE scope != 'global' AND footer_mode = 'off'")
-	// Ensure any accidental zero-value streaming_enabled on chat policies are healed to 1
+	// Ensure any accidental zero-value streaming_enabled & thinking_enabled on chat policies are healed to 1
 	_, _ = db.Exec("UPDATE channel_policies SET streaming_enabled = 1 WHERE scope = 'chat' AND streaming_enabled = 0")
+	_, _ = db.Exec("UPDATE channel_policies SET thinking_enabled = 1 WHERE scope = 'chat' AND thinking_enabled = 0")
+	_, _ = db.Exec("UPDATE channel_policies SET thinking_display = 'full' WHERE scope = 'chat' AND (thinking_display IS NULL OR thinking_display = '' OR thinking_display = 'off')")
 
 	return &DB{db: db}, nil
 }
