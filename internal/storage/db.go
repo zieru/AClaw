@@ -131,6 +131,8 @@ func Open(dbPath string) (*DB, error) {
 	_, _ = db.Exec("INSERT OR IGNORE INTO channel_policies (id, scope, scope_id, footer_mode, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold) VALUES ('global', 'global', 'system', 'full', 10, 2048, 20, 1, 15)")
 	// Ensure any stale non-global policies with default 'off' don't override global
 	_, _ = db.Exec("UPDATE channel_policies SET footer_mode = '' WHERE scope != 'global' AND footer_mode = 'off'")
+	// Ensure any accidental zero-value streaming_enabled on chat policies are healed to 1
+	_, _ = db.Exec("UPDATE channel_policies SET streaming_enabled = 1 WHERE scope = 'chat' AND streaming_enabled = 0")
 
 	return &DB{db: db}, nil
 }
@@ -410,6 +412,45 @@ func (d *DB) GetPolicy(scope, scopeID string) (*PolicyRecord, error) {
 	p.ThinkingEnabled = thinkingInt == 1
 	p.ResponseCacheEnabled = respCacheInt == 1
 	return &p, nil
+}
+
+// GetOrCreatePolicy returns an existing PolicyRecord, or initializes one with inherited defaults from resolved policy
+func (d *DB) GetOrCreatePolicy(scope, scopeID string) *PolicyRecord {
+	pol, err := d.GetPolicy(scope, scopeID)
+	if err == nil && pol != nil {
+		return pol
+	}
+	channelID := ""
+	chatID := ""
+	if scope == "channel" {
+		channelID = scopeID
+	} else if scope == "chat" {
+		chatID = scopeID
+	}
+	resolved := d.GetResolvedPolicy(channelID, chatID)
+	return &PolicyRecord{
+		ID:                   scope + "_" + scopeID,
+		Scope:                scope,
+		ScopeID:              scopeID,
+		MaxUploadFileMB:      resolved.MaxUploadFileMB,
+		MaxTokens:            resolved.MaxTokens,
+		MaxHistoryTurns:      resolved.MaxHistoryTurns,
+		AutoCompaction:       resolved.AutoCompaction,
+		CompactionThreshold:  resolved.CompactionThreshold,
+		ModelOverride:        resolved.ModelOverride,
+		FooterMode:           resolved.FooterMode,
+		TokenSaverMode:       resolved.TokenSaverMode,
+		ProxyPoolEnabled:     resolved.ProxyPoolEnabled,
+		StreamingEnabled:     resolved.StreamingEnabled,
+		ThinkingEnabled:      resolved.ThinkingEnabled,
+		ThinkingDisplay:      resolved.ThinkingDisplay,
+		TimeoutAPISeconds:    resolved.TimeoutAPISeconds,
+		TimeoutHandlerSec:    resolved.TimeoutHandlerSec,
+		MaxAuditLogs:         resolved.MaxAuditLogs,
+		TokenBudget:          resolved.TokenBudget,
+		ResponseCacheEnabled: resolved.ResponseCacheEnabled,
+		ResponseCacheTTLSec:  resolved.ResponseCacheTTLSec,
+	}
 }
 
 func (d *DB) SavePolicy(p *PolicyRecord) error {

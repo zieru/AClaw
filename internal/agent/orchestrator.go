@@ -519,7 +519,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		compressedMsgs, saverReport := tokensaver.CompressMessages(messages, policy.TokenSaverMode, policy.MaxTokens*4)
 		totalTokensSaved += saverReport.TokensSaved
 
-		isStreaming := policy.StreamingEnabled && req.OnStreamChunk != nil
+		isStreaming := (policy.StreamingEnabled || req.ChannelType == "web") && req.OnStreamChunk != nil
 		thinkingEnabled := policy.ThinkingEnabled
 		if req.ThinkingLevel != "" {
 			if req.ThinkingLevel == "disabled" || req.ThinkingLevel == "none" {
@@ -595,13 +595,18 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				totalTokensSaved += retrySaverReport.TokensSaved
 
 				retryChatReq := provider.ChatRequest{
-					Model:          modelToUse,
-					PreferredModel: req.PreferredModel,
-					Messages:       retryCompressedMsgs,
-					Tools:          allowedTools,
-					Temperature:    0.7,
-					MaxTokens:      policy.MaxTokens,
-					OnProgress:     req.OnProgress,
+					Model:           modelToUse,
+					PreferredModel:  req.PreferredModel,
+					Messages:        retryCompressedMsgs,
+					Tools:           allowedTools,
+					Temperature:     0.7,
+					MaxTokens:       policy.MaxTokens,
+					ThinkingEnabled: thinkingEnabled,
+					ThinkingLevel:   req.ThinkingLevel,
+					ThinkingBudget:  req.ThinkingBudget,
+					OnProgress:      req.OnProgress,
+					Stream:          isStreaming,
+					StreamCallback:  req.OnStreamChunk,
 				}
 
 				// Linked context that respects parent cancellation and timeout budget
@@ -771,7 +776,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			MaxTokens:       policy.MaxTokens,
 			ThinkingEnabled: policy.ThinkingEnabled,
 			OnProgress:      req.OnProgress,
-			Stream:          policy.StreamingEnabled && req.OnStreamChunk != nil,
+			Stream:          (policy.StreamingEnabled || req.ChannelType == "web") && req.OnStreamChunk != nil,
 			StreamCallback:  req.OnStreamChunk,
 		}
 

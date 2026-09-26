@@ -162,13 +162,7 @@ func engineBtnLabel(name string, enabled bool) string {
 
 // HandleToggleCacheCallback toggles local ResponseCache ON/OFF
 func (h *TokenSaverUIHandler) HandleToggleCacheCallback(c tele.Context) error {
-	globPol, _ := h.db.GetPolicy("global", "system")
-	if globPol == nil {
-		globPol = &storage.PolicyRecord{
-			Scope:   "global",
-			ScopeID: "system",
-		}
-	}
+	globPol := h.db.GetOrCreatePolicy("global", "system")
 	globPol.ResponseCacheEnabled = !globPol.ResponseCacheEnabled
 	_ = h.db.SavePolicy(globPol)
 	return h.HandleTokenSaverStatus(c)
@@ -194,13 +188,7 @@ func (h *TokenSaverUIHandler) HandleFlushToolCacheCallback(c tele.Context) error
 
 // HandlePresetCallback handles 1-click preset switching
 func (h *TokenSaverUIHandler) HandlePresetCallback(c tele.Context, preset string) error {
-	globPol, _ := h.db.GetPolicy("global", "system")
-	if globPol == nil {
-		globPol = &storage.PolicyRecord{
-			Scope:   "global",
-			ScopeID: "system",
-		}
-	}
+	globPol := h.db.GetOrCreatePolicy("global", "system")
 
 	cfg := tokensaver.GetPresetConfig(preset)
 	globPol.TokenSaverMode = cfg.SerializeToJSON()
@@ -211,13 +199,7 @@ func (h *TokenSaverUIHandler) HandlePresetCallback(c tele.Context, preset string
 
 // HandleToggleEngineCallback toggles a specific engine ON/OFF
 func (h *TokenSaverUIHandler) HandleToggleEngineCallback(c tele.Context, engineID string) error {
-	globPol, _ := h.db.GetPolicy("global", "system")
-	if globPol == nil {
-		globPol = &storage.PolicyRecord{
-			Scope:   "global",
-			ScopeID: "system",
-		}
-	}
+	globPol := h.db.GetOrCreatePolicy("global", "system")
 
 	cfg := tokensaver.ParseStackConfig(globPol.TokenSaverMode)
 	currentState := cfg.IsEngineEnabled(engineID)
@@ -231,13 +213,7 @@ func (h *TokenSaverUIHandler) HandleToggleEngineCallback(c tele.Context, engineI
 
 // HandleStyleCallback sets the output-axis steering style
 func (h *TokenSaverUIHandler) HandleStyleCallback(c tele.Context, style string) error {
-	globPol, _ := h.db.GetPolicy("global", "system")
-	if globPol == nil {
-		globPol = &storage.PolicyRecord{
-			Scope:   "global",
-			ScopeID: "system",
-		}
-	}
+	globPol := h.db.GetOrCreatePolicy("global", "system")
 
 	cfg := tokensaver.ParseStackConfig(globPol.TokenSaverMode)
 	cfg.OutputStyle = style
@@ -249,13 +225,7 @@ func (h *TokenSaverUIHandler) HandleStyleCallback(c tele.Context, style string) 
 
 // HandleToggleDialCallback toggles the adaptive context budget dial
 func (h *TokenSaverUIHandler) HandleToggleDialCallback(c tele.Context) error {
-	globPol, _ := h.db.GetPolicy("global", "system")
-	if globPol == nil {
-		globPol = &storage.PolicyRecord{
-			Scope:   "global",
-			ScopeID: "system",
-		}
-	}
+	globPol := h.db.GetOrCreatePolicy("global", "system")
 
 	cfg := tokensaver.ParseStackConfig(globPol.TokenSaverMode)
 	cfg.AdaptiveDial = !cfg.AdaptiveDial
@@ -273,10 +243,7 @@ func (h *TokenSaverUIHandler) HandleSetPresetCommand(c tele.Context) error {
 	}
 
 	preset := strings.ToLower(args[0])
-	globPol, _ := h.db.GetPolicy("global", "system")
-	if globPol == nil {
-		globPol = &storage.PolicyRecord{Scope: "global", ScopeID: "system"}
-	}
+	globPol := h.db.GetOrCreatePolicy("global", "system")
 
 	cfg := tokensaver.GetPresetConfig(preset)
 	globPol.TokenSaverMode = cfg.SerializeToJSON()
@@ -301,10 +268,7 @@ func (h *TokenSaverUIHandler) HandleSetEngineCommand(c tele.Context) error {
 		return c.Reply(fmt.Sprintf("❌ Engine <code>%s</code> tidak ditemukan.", engineID), tele.ModeHTML)
 	}
 
-	globPol, _ := h.db.GetPolicy("global", "system")
-	if globPol == nil {
-		globPol = &storage.PolicyRecord{Scope: "global", ScopeID: "system"}
-	}
+	globPol := h.db.GetOrCreatePolicy("global", "system")
 
 	cfg := tokensaver.ParseStackConfig(globPol.TokenSaverMode)
 	cfg.SetEngineToggle(engineID, state)
@@ -333,10 +297,7 @@ func (h *TokenSaverUIHandler) HandleSetStyleCommand(c tele.Context) error {
 		intensity = strings.ToLower(args[1])
 	}
 
-	globPol, _ := h.db.GetPolicy("global", "system")
-	if globPol == nil {
-		globPol = &storage.PolicyRecord{Scope: "global", ScopeID: "system"}
-	}
+	globPol := h.db.GetOrCreatePolicy("global", "system")
 
 	cfg := tokensaver.ParseStackConfig(globPol.TokenSaverMode)
 	cfg.OutputStyle = style
@@ -356,10 +317,7 @@ func (h *TokenSaverUIHandler) HandleSetDialCommand(c tele.Context) error {
 		return c.Reply("⚠️ Format: <code>/tokensaverdial &lt;budget_tokens|off&gt;</code>\nContoh: <code>/tokensaverdial 4000</code>", tele.ModeHTML)
 	}
 
-	globPol, _ := h.db.GetPolicy("global", "system")
-	if globPol == nil {
-		globPol = &storage.PolicyRecord{Scope: "global", ScopeID: "system"}
-	}
+	globPol := h.db.GetOrCreatePolicy("global", "system")
 
 	cfg := tokensaver.ParseStackConfig(globPol.TokenSaverMode)
 	if strings.ToLower(args[0]) == "off" {

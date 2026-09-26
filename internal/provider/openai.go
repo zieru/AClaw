@@ -196,6 +196,7 @@ func (p *OpenAIProvider) getResilientModelCandidates(requestedModel string) []st
 }
 
 type openAIToolCall struct {
+	Index    *int   `json:"index,omitempty"`
 	ID       string `json:"id"`
 	Type     string `json:"type"`
 	Function struct {
@@ -857,6 +858,14 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 	// Parse SSE stream
 	thinkFilter := NewStreamingThinkingFilter(req.StreamCallback)
 	var toolCalls []ToolCall
+	type streamToolCallAccumulator struct {
+		id   string
+		name string
+		args strings.Builder
+	}
+	accumulatedTools := make(map[int]*streamToolCallAccumulator)
+	var orderedToolIndices []int
+
 	var promptTokens, completionTokens, totalTokens, thinkingTokens int
 	actualModel := selectedModel
 
@@ -920,16 +929,26 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 
 					thinkFilter.Feed(delta.Content, thinkText)
 
-					// Accumulate tool calls from stream
+					// Accumulate tool calls from stream across chunks
 					for _, tc := range delta.ToolCalls {
+						idx := 0
+						if tc.Index != nil {
+							idx = *tc.Index
+						}
+						acc, exists := accumulatedTools[idx]
+						if !exists {
+							acc = &streamToolCallAccumulator{}
+							accumulatedTools[idx] = acc
+							orderedToolIndices = append(orderedToolIndices, idx)
+						}
 						if tc.ID != "" {
-							var args map[string]interface{}
-							_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
-							toolCalls = append(toolCalls, ToolCall{
-								ID:        tc.ID,
-								Name:      tc.Function.Name,
-								Arguments: args,
-							})
+							acc.id = tc.ID
+						}
+						if tc.Function.Name != "" {
+							acc.name += tc.Function.Name
+						}
+						if tc.Function.Arguments != "" {
+							acc.args.WriteString(tc.Function.Arguments)
 						}
 					}
 				}
@@ -957,6 +976,21 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 	}
 	if readErr != nil && readErr != io.EOF {
 		return nil, fmt.Errorf("stream read error: %w", readErr)
+	}
+
+	// Finalize tool calls from accumulated chunks
+	for _, idx := range orderedToolIndices {
+		acc := accumulatedTools[idx]
+		var args map[string]interface{}
+		argsStr := strings.TrimSpace(acc.args.String())
+		if argsStr != "" {
+			_ = json.Unmarshal([]byte(argsStr), &args)
+		}
+		toolCalls = append(toolCalls, ToolCall{
+			ID:        acc.id,
+			Name:      acc.name,
+			Arguments: args,
+		})
 	}
 
 	thinkFilter.Flush()

@@ -645,7 +645,7 @@
                     <!-- Bubble Card -->
                     <div style="max-width: 85%;">
                       <!-- Thinking Details if present -->
-                      <v-expansion-panels v-if="msg.thinking" class="mb-2" variant="inset">
+                      <v-expansion-panels v-if="msg.thinking" v-model="msg.thinkingOpen" class="mb-2" variant="inset">
                         <v-expansion-panel
                           title="💭 Proses Berpikir Model AI"
                           elevation="0"
@@ -1711,7 +1711,8 @@ async function sendChatMessage() {
     role: 'assistant',
     content: '',
     status: 'Memproses permintaan...',
-    thinking: ''
+    thinking: '',
+    thinkingOpen: 0
   })
 
   chatStreaming.value = true
@@ -1741,6 +1742,7 @@ async function sendChatMessage() {
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    let currentEvent = 'message'
 
     while (true) {
       const { value, done } = await reader.read()
@@ -1750,12 +1752,17 @@ async function sendChatMessage() {
       const lines = buffer.split('\n')
       buffer = lines.pop()
 
-      let currentEvent = 'message'
       for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          currentEvent = line.substring(7).trim()
-        } else if (line.startsWith('data: ')) {
-          const dataStr = line.substring(6).trim()
+        const trimmed = line.trim()
+        if (trimmed === '') {
+          currentEvent = 'message'
+          continue
+        }
+
+        if (line.startsWith('event:')) {
+          currentEvent = line.slice(6).trim()
+        } else if (line.startsWith('data:')) {
+          const dataStr = line.slice(5).trim()
           if (!dataStr) continue
 
           try {
@@ -1765,11 +1772,16 @@ async function sendChatMessage() {
             if ((currentEvent === 'start' || currentEvent === 'progress') && parsed.status) {
               chatMessages.value[assistantMsgIndex].status = parsed.status
               chatSubtitle.value = '⏳ ' + parsed.status
+            } else if (currentEvent === 'thinking' && parsed.text) {
+              chatMessages.value[assistantMsgIndex].thinking += parsed.text
+              chatMessages.value[assistantMsgIndex].status = '💭 Model sedang berpikir...'
             } else if (currentEvent === 'chunk' && parsed.text) {
               chatMessages.value[assistantMsgIndex].status = '' // Clear status once content chunks stream
               chatMessages.value[assistantMsgIndex].content += parsed.text
-            } else if (currentEvent === 'thinking' && parsed.text) {
-              chatMessages.value[assistantMsgIndex].thinking += parsed.text
+              // Auto-collapse thinking panel when answer begins
+              if (chatMessages.value[assistantMsgIndex].thinkingOpen === 0) {
+                chatMessages.value[assistantMsgIndex].thinkingOpen = undefined
+              }
             } else if (currentEvent === 'done') {
               chatMessages.value[assistantMsgIndex].status = ''
               if (!chatMessages.value[assistantMsgIndex].content && parsed.response) {

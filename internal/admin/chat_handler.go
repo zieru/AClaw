@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -328,14 +329,12 @@ func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stop
 	stopped := false
 	doneChan := make(chan struct{})
 	startTime := time.Now()
+	var floodWaitUntil time.Time
 
 	updateStatus = func(status string) {
 		mu.Lock()
 		customStatus = status
 		mu.Unlock()
-		if targetMsg != nil {
-			_, _ = bot.Edit(targetMsg, status, tele.ModeHTML, cancelMenu)
-		}
 	}
 
 	onChunk = func(chunk provider.StreamChunk) {
@@ -361,7 +360,8 @@ func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stop
 	}
 
 	go func() {
-		ticker := time.NewTicker(2 * time.Second)
+		// Minimum 3 seconds throttle to strictly avoid Telegram flood limits (429)
+		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()
 
 		for {
@@ -374,40 +374,53 @@ func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stop
 					mu.Unlock()
 					return
 				}
+				if time.Now().Before(floodWaitUntil) {
+					mu.Unlock()
+					continue
+				}
+
 				elapsedSec := int(time.Since(startTime).Seconds())
 				curThinking := strings.TrimSpace(thinkingBuf.String())
 				curContent := strings.TrimSpace(contentBuf.String())
-				status := customStatus
+				status := strings.TrimSpace(customStatus)
 
 				var text string
-				if curThinking != "" || curContent != "" {
-					if curContent == "" && curThinking != "" {
+				if curContent != "" {
+					if curThinking != "" {
 						previewThink := curThinking
-						if len(previewThink) > 3500 {
-							previewThink = previewThink[len(previewThink)-3500:]
-						}
-						text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s ▌</blockquote>", html.EscapeString(previewThink))
-					} else if curThinking != "" && curContent != "" {
-						previewThink := curThinking
-						if len(previewThink) > 1500 {
-							previewThink = previewThink[:1500] + "..."
+						if len(previewThink) > 1200 {
+							previewThink = previewThink[:1200] + "..."
 						}
 						previewContent := curContent
-						if len(previewContent) > 2000 {
-							previewContent = previewContent[len(previewContent)-2000:]
+						if len(previewContent) > 2200 {
+							previewContent = previewContent[len(previewContent)-2200:]
 						}
 						formattedContent := tgformat.MarkdownToTelegramHTML(previewContent)
 						text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s</blockquote>\n\n%s ▌", html.EscapeString(previewThink), formattedContent)
 					} else {
 						previewContent := curContent
-						if len(previewContent) > 3800 {
-							previewContent = previewContent[len(previewContent)-3800:]
+						if len(previewContent) > 3500 {
+							previewContent = previewContent[len(previewContent)-3500:]
 						}
 						formattedContent := tgformat.MarkdownToTelegramHTML(previewContent)
 						text = fmt.Sprintf("%s ▌", formattedContent)
 					}
 				} else if status != "" {
-					text = fmt.Sprintf("%s <i>(%dd)</i>", status, elapsedSec)
+					if curThinking != "" {
+						previewThink := curThinking
+						if len(previewThink) > 1200 {
+							previewThink = previewThink[len(previewThink)-1200:]
+						}
+						text = fmt.Sprintf("%s\n\n💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s ▌</blockquote>\n\n⏱️ <i>(%dd)</i>", status, html.EscapeString(previewThink), elapsedSec)
+					} else {
+						text = fmt.Sprintf("%s <i>(%dd)</i>", status, elapsedSec)
+					}
+				} else if curThinking != "" {
+					previewThink := curThinking
+					if len(previewThink) > 3500 {
+						previewThink = previewThink[len(previewThink)-3500:]
+					}
+					text = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s ▌</blockquote>", html.EscapeString(previewThink))
 				} else {
 					text = fmt.Sprintf("🤔 <i>Sedang berpikir... (%dd)</i>", elapsedSec)
 				}
@@ -415,7 +428,19 @@ func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stop
 
 				if targetMsg != nil && text != lastSentText {
 					lastSentText = text
-					_, _ = bot.Edit(targetMsg, text, tele.ModeHTML, cancelMenu)
+					_, err := bot.Edit(targetMsg, text, tele.ModeHTML, cancelMenu)
+					if err != nil {
+						errStr := strings.ToLower(err.Error())
+						if strings.Contains(errStr, "flood") || strings.Contains(errStr, "429") {
+							mu.Lock()
+							floodWaitUntil = time.Now().Add(5 * time.Second)
+							mu.Unlock()
+						} else {
+							// If HTML parsing failed on partial stream chunk, retry edit as plain text
+							cleanText := regexp.MustCompile(`<[^>]*>`).ReplaceAllString(text, "")
+							_, _ = bot.Edit(targetMsg, cleanText, cancelMenu)
+						}
+					}
 				}
 			}
 		}

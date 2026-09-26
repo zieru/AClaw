@@ -771,13 +771,7 @@ func (ui *ModelUI) saveModelOverride(scope, chatIDStr, modelOverride string) (st
 		scopeLabel = "Global (Seluruh Sistem)"
 	}
 
-	pol, err := ui.db.GetPolicy(scopeType, scopeID)
-	if err != nil || pol == nil {
-		pol = &storage.PolicyRecord{
-			Scope:   scopeType,
-			ScopeID: scopeID,
-		}
-	}
+	pol := ui.db.GetOrCreatePolicy(scopeType, scopeID)
 
 	pol.ModelOverride = modelOverride
 	if err := ui.db.SavePolicy(pol); err != nil {

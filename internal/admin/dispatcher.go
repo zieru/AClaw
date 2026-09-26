@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"goassistant/internal/channel/whatsapp"
-	"goassistant/internal/storage"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -461,10 +460,7 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 	if strings.HasPrefix(data, "lim_mod_set_") {
 		modVal := strings.TrimPrefix(data, "lim_mod_set_")
 		if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
-			pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
-			if pol == nil {
-				pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
-			}
+			pol := a.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
 			pol.ModelOverride = modVal
 			_ = a.db.SavePolicy(pol)
 			_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🔀 Combo '%s' aktif!", modVal)})

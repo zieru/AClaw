@@ -6,7 +6,6 @@ import (
 	"log"
 	"strings"
 
-	"goassistant/internal/storage"
 	"goassistant/internal/tokensaver"
 	tele "gopkg.in/telebot.v3"
 )
@@ -217,28 +216,19 @@ func (a *AdminBot) registerRoutes() {
 
 	// Global Footer Settings Callbacks
 	a.bot.Handle(&tele.Btn{Unique: "set_footer_global_off"}, func(c tele.Context) error {
-		pol, _ := a.db.GetPolicy("global", "system")
-		if pol == nil {
-			pol = &storage.PolicyRecord{Scope: "global", ScopeID: "system"}
-		}
+		pol := a.db.GetOrCreatePolicy("global", "system")
 		pol.FooterMode = "off"
 		_ = a.db.SavePolicy(pol)
 		return c.EditOrSend(a.limitsUI.RenderLimitsSummary(), a.limitsUI.LimitsKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "set_footer_global_tokens"}, func(c tele.Context) error {
-		pol, _ := a.db.GetPolicy("global", "system")
-		if pol == nil {
-			pol = &storage.PolicyRecord{Scope: "global", ScopeID: "system"}
-		}
+		pol := a.db.GetOrCreatePolicy("global", "system")
 		pol.FooterMode = "tokens"
 		_ = a.db.SavePolicy(pol)
 		return c.EditOrSend(a.limitsUI.RenderLimitsSummary(), a.limitsUI.LimitsKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "set_footer_global_full"}, func(c tele.Context) error {
-		pol, _ := a.db.GetPolicy("global", "system")
-		if pol == nil {
-			pol = &storage.PolicyRecord{Scope: "global", ScopeID: "system"}
-		}
+		pol := a.db.GetOrCreatePolicy("global", "system")
 		pol.FooterMode = "full"
 		_ = a.db.SavePolicy(pol)
 		return c.EditOrSend(a.limitsUI.RenderLimitsSummary(), a.limitsUI.LimitsKeyboard(), tele.ModeHTML)
@@ -709,10 +699,7 @@ func (a *AdminBot) registerRoutes() {
 		val := tok
 		a.bot.Handle(&tele.Btn{Unique: fmt.Sprintf("lim_ltok_%d", val)}, func(c tele.Context) error {
 			if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
-				pol, _ := a.db.GetPolicy(sess.Scope, sess.ScopeID)
-				if pol == nil {
-					pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
-				}
+				pol := a.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
 				pol.MaxTokens = val
 				_ = a.db.SavePolicy(pol)
 				return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)

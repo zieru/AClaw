@@ -823,5 +823,295 @@ func (p *FreeRouterProvider) GetEndpointStats() string {
 	return sb.String()
 }
 
-// Ensure FreeRouterProvider implements Provider
+// GenerateChatStream implements StreamingProvider for FreeRouterProvider
+func (p *FreeRouterProvider) GenerateChatStream(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	start := time.Now()
+
+	model := req.Model
+	if model == "" {
+		model = p.defaultModel
+	}
+
+	needTools := len(req.Tools) > 0
+	candidates := p.selectEndpoints(model, needTools)
+
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("FreeRouter: tidak ada endpoint free yang tersedia atau sehat")
+	}
+
+	msgs := buildOpenAIMessages(req.Messages)
+
+	var toolDefs []openAIToolDef
+	for _, t := range req.Tools {
+		toolDefs = append(toolDefs, openAIToolDef{
+			Type: "function",
+			Function: openAIFunctionDef{
+				Name:        t.Name(),
+				Description: t.Description(),
+				Parameters:  t.Parameters(),
+			},
+		})
+	}
+
+	useModel := model
+	var lastErr error
+
+	for _, ep := range candidates {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		epModel := useModel
+		modelFound := false
+		for _, m := range ep.Models {
+			if strings.EqualFold(m, useModel) {
+				modelFound = true
+				break
+			}
+		}
+		if !modelFound && ep.DefaultModel != "" {
+			epModel = ep.DefaultModel
+		}
+
+		resp, err := p.callEndpointStream(ctx, ep, epModel, msgs, toolDefs, req)
+		if err == nil && resp != nil {
+			resp.Latency = time.Since(start)
+			resp.ProviderName = fmt.Sprintf("%s→%s", p.name, ep.Name)
+			return resp, nil
+		}
+
+		lastErr = fmt.Errorf("[%s] %v", ep.Name, err)
+	}
+
+	return nil, fmt.Errorf("FreeRouter stream: semua %d endpoint gagal: %w", len(candidates), lastErr)
+}
+
+func (p *FreeRouterProvider) callEndpointStream(ctx context.Context, ep *FreeEndpoint, model string, msgs []openAIMessage, toolDefs []openAIToolDef, req ChatRequest) (*ChatResponse, error) {
+	callStart := time.Now()
+	ep.MarkRequest()
+
+	baseURL := strings.TrimSuffix(ep.BaseURL, "/")
+	baseURL = strings.TrimSuffix(baseURL, "/chat/completions")
+	baseURL = strings.TrimSuffix(baseURL, "/chat")
+	baseURL = strings.TrimSuffix(baseURL, "/completions")
+
+	reqPayload := openAIReqBody{
+		Model:       model,
+		Messages:    msgs,
+		Tools:       toolDefs,
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+		Stream:      true,
+		StreamOptions: &struct {
+			IncludeUsage bool `json:"include_usage"`
+		}{IncludeUsage: true},
+	}
+
+	payloadBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal error: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/chat/completions", baseURL)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("User-Agent", "GoAssistant/1.2")
+
+	if ep.APIKey != "" {
+		if ep.AuthHeader != "" {
+			httpReq.Header.Set(ep.AuthHeader, ep.APIKey)
+		} else {
+			httpReq.Header.Set("Authorization", "Bearer "+ep.APIKey)
+		}
+	}
+
+	httpResp, err := p.client.Do(httpReq)
+	if err != nil {
+		ep.MarkFail(false)
+		return nil, fmt.Errorf("http error: %w", err)
+	}
+
+	if httpResp.StatusCode == 429 {
+		httpResp.Body.Close()
+		ep.MarkFail(true)
+		return nil, fmt.Errorf("rate limited (429)")
+	}
+
+	if httpResp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(httpResp.Body)
+		httpResp.Body.Close()
+		ep.MarkFail(false)
+		return nil, fmt.Errorf("status %d: %s", httpResp.StatusCode, string(bodyBytes))
+	}
+	defer httpResp.Body.Close()
+
+	thinkFilter := NewStreamingThinkingFilter(req.StreamCallback)
+	var toolCalls []ToolCall
+	type streamToolCallAccumulator struct {
+		id   string
+		name string
+		args strings.Builder
+	}
+	accumulatedTools := make(map[int]*streamToolCallAccumulator)
+	var orderedToolIndices []int
+
+	var promptTokens, completionTokens, totalTokens, thinkingTokens int
+	actualModel := model
+
+	buf := make([]byte, 4096)
+	var lineBuffer strings.Builder
+	var readErr error
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		var n int
+		n, readErr = httpResp.Body.Read(buf)
+		if n > 0 {
+			lineBuffer.Write(buf[:n])
+			rawStr := lineBuffer.String()
+			lines := strings.Split(rawStr, "\n")
+			lineBuffer.Reset()
+			if !strings.HasSuffix(rawStr, "\n") && len(lines) > 0 {
+				lineBuffer.WriteString(lines[len(lines)-1])
+				lines = lines[:len(lines)-1]
+			}
+
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if !strings.HasPrefix(line, "data:") {
+					continue
+				}
+				data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+				if data == "[DONE]" || data == "" {
+					continue
+				}
+
+				var chunk openAIRespBody
+				if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+					continue
+				}
+
+				if chunk.Model != "" {
+					actualModel = chunk.Model
+				}
+
+				if len(chunk.Choices) > 0 {
+					delta := chunk.Choices[0].Delta
+					thinkText := delta.ReasoningContent
+					if thinkText == "" {
+						thinkText = delta.Reasoning
+					}
+					if thinkText == "" {
+						thinkText = delta.Thought
+					}
+
+					thinkFilter.Feed(delta.Content, thinkText)
+
+					for _, tc := range delta.ToolCalls {
+						idx := 0
+						if tc.Index != nil {
+							idx = *tc.Index
+						}
+						acc, exists := accumulatedTools[idx]
+						if !exists {
+							acc = &streamToolCallAccumulator{}
+							accumulatedTools[idx] = acc
+							orderedToolIndices = append(orderedToolIndices, idx)
+						}
+						if tc.ID != "" {
+							acc.id = tc.ID
+						}
+						if tc.Function.Name != "" {
+							acc.name += tc.Function.Name
+						}
+						if tc.Function.Arguments != "" {
+							acc.args.WriteString(tc.Function.Arguments)
+						}
+					}
+				}
+
+				if chunk.Usage.TotalTokens > 0 {
+					promptTokens = chunk.Usage.PromptTokens
+					completionTokens = chunk.Usage.CompletionTokens
+					totalTokens = chunk.Usage.TotalTokens
+					thinkingTokens = chunk.Usage.ReasoningTokens
+					if thinkingTokens == 0 && chunk.Usage.CompletionTokensDetails != nil {
+						thinkingTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
+					}
+				}
+			}
+		}
+
+		if readErr != nil {
+			break
+		}
+	}
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if readErr != nil && readErr != io.EOF {
+		return nil, fmt.Errorf("stream read error: %w", readErr)
+	}
+
+	for _, idx := range orderedToolIndices {
+		acc := accumulatedTools[idx]
+		var args map[string]interface{}
+		argsStr := strings.TrimSpace(acc.args.String())
+		if argsStr != "" {
+			_ = json.Unmarshal([]byte(argsStr), &args)
+		}
+		toolCalls = append(toolCalls, ToolCall{
+			ID:        acc.id,
+			Name:      acc.name,
+			Arguments: args,
+		})
+	}
+
+	thinkFilter.Flush()
+
+	if req.StreamCallback != nil {
+		req.StreamCallback(StreamChunk{Done: true})
+	}
+
+	latencyMs := time.Since(callStart).Milliseconds()
+	ep.MarkSuccess(latencyMs)
+
+	finalContent := thinkFilter.Content()
+	finalThinking := thinkFilter.Thinking()
+
+	if totalTokens == 0 {
+		totalTokens = (len(finalContent) + len(finalThinking)) / 4
+	}
+	if thinkingTokens == 0 && len(finalThinking) > 0 {
+		thinkingTokens = len(finalThinking) / 4
+	}
+
+	return &ChatResponse{
+		Content:          finalContent,
+		Thinking:         finalThinking,
+		Model:            actualModel,
+		ProviderName:     p.name,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		ThinkingTokens:   thinkingTokens,
+		TotalTokens:      totalTokens,
+		ToolCalls:        toolCalls,
+		Latency:          time.Since(callStart),
+	}, nil
+}
+
+// Ensure FreeRouterProvider implements Provider and StreamingProvider
 var _ Provider = (*FreeRouterProvider)(nil)
+var _ StreamingProvider = (*FreeRouterProvider)(nil)

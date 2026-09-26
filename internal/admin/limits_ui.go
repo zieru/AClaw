@@ -231,20 +231,7 @@ func (ui *LimitsUI) RenderChannelPickMenu(c tele.Context) error {
 
 // RenderScopeLimitsDashboard renders full limits dashboard for given scope
 func (ui *LimitsUI) RenderScopeLimitsDashboard(c tele.Context, scope, scopeID string) error {
-	pol, err := ui.db.GetPolicy(scope, scopeID)
-	if err != nil || pol == nil {
-		pol = &storage.PolicyRecord{
-			Scope:               scope,
-			ScopeID:             scopeID,
-			MaxUploadFileMB:     10,
-			MaxTokens:           2048,
-			MaxHistoryTurns:     20,
-			AutoCompaction:      true,
-			CompactionThreshold: 15,
-			FooterMode:          "off",
-			MaxAuditLogs:        5000,
-		}
-	}
+	pol := ui.db.GetOrCreatePolicy(scope, scopeID)
 
 	if c.Sender() != nil {
 		ui.mu.Lock()
@@ -372,10 +359,7 @@ func (ui *LimitsUI) HandleTextMessage(c tele.Context) (bool, error) {
 		if err != nil || n <= 0 {
 			return true, c.Reply("⚠️ Harap masukkan angka positif (dalam MB). Cth: <code>20</code>", tele.ModeHTML)
 		}
-		pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
-		if pol == nil {
-			pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
-		}
+		pol := ui.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
 		pol.MaxUploadFileMB = n
 		_ = ui.db.SavePolicy(pol)
 		sess.Step = LimitsStepNone
@@ -387,10 +371,7 @@ func (ui *LimitsUI) HandleTextMessage(c tele.Context) (bool, error) {
 		if err != nil || n <= 0 {
 			return true, c.Reply("⚠️ Harap masukkan angka token positif. Cth: <code>4096</code>", tele.ModeHTML)
 		}
-		pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
-		if pol == nil {
-			pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
-		}
+		pol := ui.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
 		pol.MaxTokens = n
 		_ = ui.db.SavePolicy(pol)
 		sess.Step = LimitsStepNone
@@ -402,10 +383,7 @@ func (ui *LimitsUI) HandleTextMessage(c tele.Context) (bool, error) {
 		if err != nil || n <= 0 {
 			return true, c.Reply("⚠️ Harap masukkan jumlah turn positif. Cth: <code>25</code>", tele.ModeHTML)
 		}
-		pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
-		if pol == nil {
-			pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
-		}
+		pol := ui.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
 		pol.MaxHistoryTurns = n
 		_ = ui.db.SavePolicy(pol)
 		sess.Step = LimitsStepNone
@@ -417,10 +395,7 @@ func (ui *LimitsUI) HandleTextMessage(c tele.Context) (bool, error) {
 		if err != nil || n <= 0 {
 			return true, c.Reply("⚠️ Harap masukkan angka turn threshold positif. Cth: <code>15</code>", tele.ModeHTML)
 		}
-		pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
-		if pol == nil {
-			pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
-		}
+		pol := ui.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
 		pol.CompactionThreshold = n
 		_ = ui.db.SavePolicy(pol)
 		sess.Step = LimitsStepNone
@@ -428,10 +403,7 @@ func (ui *LimitsUI) HandleTextMessage(c tele.Context) (bool, error) {
 		return true, ui.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
 
 	case LimitsStepCustomModel:
-		pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
-		if pol == nil {
-			pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
-		}
+		pol := ui.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
 		pol.ModelOverride = msgText
 		_ = ui.db.SavePolicy(pol)
 		sess.Step = LimitsStepNone
@@ -443,10 +415,7 @@ func (ui *LimitsUI) HandleTextMessage(c tele.Context) (bool, error) {
 		if err != nil || n <= 0 {
 			return true, c.Reply("⚠️ Harap masukkan angka timeout positif dalam detik (contoh: <code>90</code>):", tele.ModeHTML)
 		}
-		pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
-		if pol == nil {
-			pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
-		}
+		pol := ui.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
 		pol.TimeoutAPISeconds = n
 		_ = ui.db.SavePolicy(pol)
 		sess.Step = LimitsStepNone
@@ -458,10 +427,7 @@ func (ui *LimitsUI) HandleTextMessage(c tele.Context) (bool, error) {
 		if err != nil || n <= 0 {
 			return true, c.Reply("⚠️ Harap masukkan angka timeout handler positif dalam detik (contoh: <code>120</code>):", tele.ModeHTML)
 		}
-		pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
-		if pol == nil {
-			pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
-		}
+		pol := ui.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
 		pol.TimeoutHandlerSec = n
 		_ = ui.db.SavePolicy(pol)
 		sess.Step = LimitsStepNone
@@ -473,10 +439,7 @@ func (ui *LimitsUI) HandleTextMessage(c tele.Context) (bool, error) {
 		if err != nil || n <= 0 {
 			return true, c.Reply("⚠️ Harap masukkan batas baris log positif (contoh: <code>5000</code>):", tele.ModeHTML)
 		}
-		pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
-		if pol == nil {
-			pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
-		}
+		pol := ui.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
 		pol.MaxAuditLogs = n
 		_ = ui.db.SavePolicy(pol)
 		sess.Step = LimitsStepNone
@@ -488,10 +451,7 @@ func (ui *LimitsUI) HandleTextMessage(c tele.Context) (bool, error) {
 		if err != nil || n <= 0 {
 			return true, c.Reply("⚠️ Harap masukkan token budget positif (contoh: <code>8000</code>):", tele.ModeHTML)
 		}
-		pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
-		if pol == nil {
-			pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
-		}
+		pol := ui.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
 		pol.TokenBudget = n
 		_ = ui.db.SavePolicy(pol)
 		sess.Step = LimitsStepNone
@@ -546,20 +506,7 @@ func (ui *LimitsUI) HandleSetLimit(c tele.Context) error {
 		return c.Reply("❌ Scope harus berupa: <code>global</code>, <code>channel</code>, atau <code>chat</code>", tele.ModeHTML)
 	}
 
-	pol, err := ui.db.GetPolicy(scope, scopeID)
-	if err != nil || pol == nil {
-		pol = &storage.PolicyRecord{
-			Scope:               scope,
-			ScopeID:             scopeID,
-			MaxUploadFileMB:     10,
-			MaxTokens:           2048,
-			MaxHistoryTurns:     20,
-			AutoCompaction:      true,
-			CompactionThreshold: 15,
-			FooterMode:          "off",
-			MaxAuditLogs:        5000,
-		}
-	}
+	pol := ui.db.GetOrCreatePolicy(scope, scopeID)
 
 	switch param {
 	case "stream", "streaming", "stream_response", "streaming_enabled":
@@ -674,18 +621,7 @@ func (ui *LimitsUI) HandleSetFooter(c tele.Context) error {
 		mode = "off"
 	}
 
-	pol, err := ui.db.GetPolicy(scope, scopeID)
-	if err != nil || pol == nil {
-		pol = &storage.PolicyRecord{
-			Scope:               scope,
-			ScopeID:             scopeID,
-			MaxUploadFileMB:     10,
-			MaxTokens:           2048,
-			MaxHistoryTurns:     20,
-			AutoCompaction:      true,
-			CompactionThreshold: 15,
-		}
-	}
+	pol := ui.db.GetOrCreatePolicy(scope, scopeID)
 
 	pol.FooterMode = mode
 	if err := ui.db.SavePolicy(pol); err != nil {
@@ -1111,10 +1047,7 @@ func (ui *LimitsUI) HandlePickProviderModel(c tele.Context, provName string, mod
 	}
 
 	chosenModel := allModels[modelIdx]
-	pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
-	if pol == nil {
-		pol = &storage.PolicyRecord{Scope: sess.Scope, ScopeID: sess.ScopeID}
-	}
+	pol := ui.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
 	pol.ModelOverride = chosenModel
 	_ = ui.db.SavePolicy(pol)
 
@@ -1247,20 +1180,7 @@ func (ui *LimitsUI) HandleSetVal(c tele.Context, param, val string) error {
 	if !ok || sess.Scope == "" {
 		return ui.StartLimitsWizard(c)
 	}
-	pol, _ := ui.db.GetPolicy(sess.Scope, sess.ScopeID)
-	if pol == nil {
-		pol = &storage.PolicyRecord{
-			Scope:               sess.Scope,
-			ScopeID:             sess.ScopeID,
-			MaxUploadFileMB:     10,
-			MaxTokens:           2048,
-			MaxHistoryTurns:     20,
-			AutoCompaction:      true,
-			CompactionThreshold: 15,
-			FooterMode:          "off",
-			MaxAuditLogs:        5000,
-		}
-	}
+	pol := ui.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
 
 	switch param {
 	case "stream":
