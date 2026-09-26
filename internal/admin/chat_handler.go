@@ -115,9 +115,10 @@ func (a *AdminBot) handleDirectChatWithMedia(c tele.Context, msg string, images 
 	if streamThink == "" && resp != nil {
 		streamThink = strings.TrimSpace(resp.ThinkingContent)
 	}
-	// Pastikan hasil stream thinking tidak dihapus dari tampilan pesan Telegram
+	// Pastikan hasil stream thinking tidak dihapus dari tampilan pesan Telegram dan tidak dibungkus dalam code
 	if streamThink != "" && !strings.Contains(finalText, "Proses Berpikir") {
-		finalText = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s</blockquote>\n\n%s", streamThink, finalText)
+		cleanThink := tgformat.CleanThinkingForTelegram(streamThink)
+		finalText = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s</blockquote>\n\n%s", cleanThink, finalText)
 	}
 
 	return sendOrEditSplitMessage(c, thinkingMsg, finalText, resp.MediaFiles...)
@@ -448,7 +449,7 @@ func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stop
 				var text string
 				if curContent != "" {
 					if curThinking != "" {
-						previewThink := curThinking
+						previewThink := tgformat.CleanThinkingForTelegram(curThinking)
 						if len(previewThink) > 1200 {
 							previewThink = previewThink[:1200] + "..."
 						}
@@ -468,7 +469,7 @@ func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stop
 					}
 				} else if status != "" {
 					if curThinking != "" {
-						previewThink := curThinking
+						previewThink := tgformat.CleanThinkingForTelegram(curThinking)
 						if len(previewThink) > 1200 {
 							previewThink = previewThink[len(previewThink)-1200:]
 						}
@@ -477,7 +478,7 @@ func startAdminProgressiveThinking(bot *tele.Bot, targetMsg *tele.Message) (stop
 						text = fmt.Sprintf("%s <i>(%dd)</i>", status, elapsedSec)
 					}
 				} else if curThinking != "" {
-					previewThink := curThinking
+					previewThink := tgformat.CleanThinkingForTelegram(curThinking)
 					if len(previewThink) > 3500 {
 						previewThink = previewThink[len(previewThink)-3500:]
 					}

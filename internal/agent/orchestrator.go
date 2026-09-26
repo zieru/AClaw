@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -886,7 +887,11 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				}
 				finalText = "💭 <i>" + thinkPreview + "</i>\n\n" + finalText
 			} else {
-				finalText = "💭 <b>Proses Berpikir:</b>\n<blockquote expandable>" + strings.TrimSpace(finalThinking) + "</blockquote>\n\n" + finalText
+				cleanThinking := strings.TrimSpace(finalThinking)
+				if isTelegram {
+					cleanThinking = cleanThinkingForTelegram(cleanThinking)
+				}
+				finalText = "💭 <b>Proses Berpikir:</b>\n<blockquote expandable>" + cleanThinking + "</blockquote>\n\n" + finalText
 			}
 		case "summary":
 			// Truncate thinking to single-line preview (64 chars)
@@ -1073,4 +1078,37 @@ func stripAttachmentTags(s string) string {
 		s = s[:idx] + s[idx+endIdx+1:]
 	}
 	return strings.TrimSpace(s)
+}
+
+// cleanThinkingForTelegram ensures thinking content is clean readable text without code block fences or code tags
+func cleanThinkingForTelegram(think string) string {
+	think = strings.TrimSpace(think)
+	if think == "" {
+		return ""
+	}
+
+	// 1. Strip HTML code/pre tags if present
+	reCodeTags := regexp.MustCompile(`(?i)</?(?:pre|code)[^>]*>`)
+	think = reCodeTags.ReplaceAllString(think, "")
+
+	// 2. Strip outer markdown code blocks: ```thinking ... ``` or ``` ... ```
+	for strings.HasPrefix(think, "```") {
+		firstNL := strings.Index(think, "\n")
+		if firstNL != -1 {
+			think = strings.TrimSpace(think[firstNL+1:])
+			if strings.HasSuffix(think, "```") {
+				think = strings.TrimSpace(think[:len(think)-3])
+			}
+		} else {
+			think = strings.TrimPrefix(think, "```")
+			think = strings.TrimSuffix(think, "```")
+			break
+		}
+	}
+
+	// 3. Remove any remaining ``` fences so thinking is not rendered as a code block
+	reFences := regexp.MustCompile("(?m)^```[a-zA-Z0-9_-]*$")
+	think = reFences.ReplaceAllString(think, "")
+
+	return strings.TrimSpace(think)
 }

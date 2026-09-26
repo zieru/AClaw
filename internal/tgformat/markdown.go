@@ -262,3 +262,36 @@ func formatTableAsAscii(headers []string, rows [][]string) string {
 
 	return sb.String()
 }
+
+// CleanThinkingForTelegram ensures thinking content is clean readable text without code block fences or code tags
+func CleanThinkingForTelegram(think string) string {
+	think = strings.TrimSpace(think)
+	if think == "" {
+		return ""
+	}
+
+	// 1. Strip HTML code/pre tags if present
+	reCodeTags := regexp.MustCompile(`(?i)</?(?:pre|code)[^>]*>`)
+	think = reCodeTags.ReplaceAllString(think, "")
+
+	// 2. Strip outer markdown code blocks: ```thinking ... ``` or ``` ... ```
+	for strings.HasPrefix(think, "```") {
+		firstNL := strings.Index(think, "\n")
+		if firstNL != -1 {
+			think = strings.TrimSpace(think[firstNL+1:])
+			if strings.HasSuffix(think, "```") {
+				think = strings.TrimSpace(think[:len(think)-3])
+			}
+		} else {
+			think = strings.TrimPrefix(think, "```")
+			think = strings.TrimSuffix(think, "```")
+			break
+		}
+	}
+
+	// 3. Remove any remaining ``` fences so thinking is not rendered as a code block
+	reFences := regexp.MustCompile("(?m)^```[a-zA-Z0-9_-]*$")
+	think = reFences.ReplaceAllString(think, "")
+
+	return strings.TrimSpace(think)
+}

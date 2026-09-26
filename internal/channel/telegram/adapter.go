@@ -336,9 +336,10 @@ func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPr
 	if streamThink == "" && resp != nil {
 		streamThink = strings.TrimSpace(resp.ThinkingContent)
 	}
-	// Pastikan hasil stream thinking tidak dihapus dari tampilan pesan Telegram
+	// Pastikan hasil stream thinking tidak dihapus dari tampilan pesan Telegram dan tidak dibungkus dalam code
 	if streamThink != "" && !strings.Contains(finalText, "Proses Berpikir") {
-		finalText = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s</blockquote>\n\n%s", streamThink, finalText)
+		cleanThink := tgformat.CleanThinkingForTelegram(streamThink)
+		finalText = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s</blockquote>\n\n%s", cleanThink, finalText)
 	}
 
 	return a.sendOrEditResponse(c, thinkingMsg, finalText, resp.MediaFiles)
@@ -436,7 +437,7 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 				if curContent != "" {
 					// Final answer is actively streaming
 					if curThinking != "" {
-						previewThink := curThinking
+						previewThink := tgformat.CleanThinkingForTelegram(curThinking)
 						if len(previewThink) > 1200 {
 							previewThink = previewThink[:1200] + "..."
 						}
@@ -456,7 +457,7 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 				} else if status != "" {
 					// Tool execution / planning / checklist in progress
 					if curThinking != "" {
-						previewThink := curThinking
+						previewThink := tgformat.CleanThinkingForTelegram(curThinking)
 						if len(previewThink) > 1000 {
 							previewThink = previewThink[:1000] + "..."
 						}
@@ -466,7 +467,7 @@ func createProgressiveThinkingManager(bot *tele.Bot, targetMsg *tele.Message, in
 					}
 				} else if curThinking != "" {
 					// Only thinking so far
-					previewThink := curThinking
+					previewThink := tgformat.CleanThinkingForTelegram(curThinking)
 					if len(previewThink) > 3500 {
 						previewThink = previewThink[len(previewThink)-3500:]
 					}
