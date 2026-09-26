@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,14 +27,15 @@ import (
 )
 
 type BotAdapter struct {
-	channelID    string
-	name         string
-	token        string
-	bot          *tele.Bot
-	orchestrator *agent.Orchestrator
-	db           *storage.DB
-	activeTasks  sync.Map
-	stopChan     chan struct{}
+	channelID      string
+	name           string
+	token          string
+	bot            *tele.Bot
+	orchestrator   *agent.Orchestrator
+	db             *storage.DB
+	activeTasks    sync.Map
+	pendingOptions sync.Map
+	stopChan       chan struct{}
 }
 
 func NewBotAdapter(channelID, name, token string, orch *agent.Orchestrator, db *storage.DB) (*BotAdapter, error) {
@@ -138,6 +140,9 @@ func (a *BotAdapter) registerHandlers() {
 		if strings.HasPrefix(data, "reset_session") {
 			_ = c.Respond(&tele.CallbackResponse{Text: "✨ Mereset sesi percakapan..."})
 			return a.handleNew(c)
+		}
+		if strings.HasPrefix(data, "opt_") {
+			return a.handleOptionCallback(c, data)
 		}
 		return nil
 	})
@@ -322,7 +327,7 @@ func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPr
 		return c.Reply(friendlyErr, tele.ModeHTML, errMenu)
 	}
 
-	return sendOrEditResponse(c, thinkingMsg, resp.Text, resp.MediaFiles)
+	return a.sendOrEditResponse(c, thinkingMsg, resp.Text, resp.MediaFiles)
 }
 
 func (a *BotAdapter) handleRetry(c tele.Context) error {
@@ -827,37 +832,170 @@ func (a *BotAdapter) handleTopicCallback(c tele.Context, data string) error {
 	return nil
 }
 
-func sendOrEditResponse(c tele.Context, thinkingMsg *tele.Message, text string, mediaFiles []agent.MediaAttachment) error {
+var (
+	reOptionsTag   = regexp.MustCompile(`(?is)\[(?:OPSI|OPTIONS):\s*([^\]]+)\]`)
+	reOptNumbering = regexp.MustCompile(`^(?:\d+[\.\)]\s*|[•\-\*]\s*)`)
+)
+
+func extractInteractiveOptions(text string) (string, []string) {
+	match := reOptionsTag.FindStringSubmatch(text)
+	if len(match) < 2 {
+		return text, nil
+	}
+
+	rawOptions := match[1]
+	cleanText := strings.TrimSpace(reOptionsTag.ReplaceAllString(text, ""))
+
+	var parts []string
+	if strings.Contains(rawOptions, "|") {
+		parts = strings.Split(rawOptions, "|")
+	} else if strings.Contains(rawOptions, "\n") {
+		parts = strings.Split(rawOptions, "\n")
+	} else {
+		parts = []string{rawOptions}
+	}
+
+	var options []string
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		trimmed = reOptNumbering.ReplaceAllString(trimmed, "")
+		trimmed = strings.TrimSpace(trimmed)
+		if trimmed != "" {
+			options = append(options, trimmed)
+		}
+	}
+
+	return cleanText, options
+}
+
+func (a *BotAdapter) handleOptionCallback(c tele.Context, data string) error {
+	optKey := strings.TrimPrefix(data, "opt_")
+	val, ok := a.pendingOptions.Load(optKey)
+	if !ok {
+		return c.Respond(&tele.CallbackResponse{Text: "⚠️ Pilihan sudah kadaluarsa atau tidak ditemukan."})
+	}
+	optPrompt, _ := val.(string)
+	_ = c.Respond(&tele.CallbackResponse{Text: "✅ Dipilih: " + optPrompt})
+
+	// Tampilkan pilihan pengguna di chat
+	chosenMsg, _ := a.bot.Send(c.Chat(), fmt.Sprintf("👉 <b>%s</b>", html.EscapeString(optPrompt)), tele.ModeHTML)
+
+	// Jalankan permintaan AI berdasarkan opsi yang dipilih
+	return a.executePrompt(c, chosenMsg, optPrompt, nil, 0)
+}
+
+func (a *BotAdapter) sendOrEditResponse(c tele.Context, thinkingMsg *tele.Message, text string, mediaFiles []agent.MediaAttachment) error {
 	if strings.TrimSpace(text) == "" {
 		text = "(Tidak ada respon dari model)"
 	}
 
+	var menu *tele.ReplyMarkup
+	cleanText, options := extractInteractiveOptions(text)
+	if len(options) > 0 {
+		text = cleanText
+		menu = &tele.ReplyMarkup{}
+		var rows []tele.Row
+		var currentRow []tele.Btn
+
+		count := 0
+		a.pendingOptions.Range(func(k, v interface{}) bool {
+			count++
+			return true
+		})
+		if count > 500 {
+			a.pendingOptions = sync.Map{}
+		}
+
+		for i, opt := range options {
+			optKey := fmt.Sprintf("%d_%d", time.Now().UnixNano()%10000000, i)
+			a.pendingOptions.Store(optKey, opt)
+
+			btnLabel := opt
+			if len(btnLabel) > 35 {
+				btnLabel = btnLabel[:32] + "..."
+			}
+			btn := menu.Data(btnLabel, "opt_"+optKey)
+
+			if len(btnLabel) > 18 || len(currentRow) == 2 {
+				if len(currentRow) > 0 {
+					rows = append(rows, menu.Row(currentRow...))
+					currentRow = nil
+				}
+			}
+			if len(btnLabel) > 18 {
+				rows = append(rows, menu.Row(btn))
+			} else {
+				currentRow = append(currentRow, btn)
+			}
+		}
+		if len(currentRow) > 0 {
+			rows = append(rows, menu.Row(currentRow...))
+		}
+		if len(rows) > 0 {
+			menu.Inline(rows...)
+		} else {
+			menu = nil
+		}
+	}
+
 	chunks := splitMessage(text, 4000)
 	if len(chunks) > 0 {
-		formattedFirst := tgformat.MarkdownToTelegramHTML(chunks[0])
 		if thinkingMsg != nil {
-			_, err := c.Bot().Edit(thinkingMsg, formattedFirst, tele.ModeHTML)
+			isLast := len(chunks) == 1
+			var firstOpts []interface{}
+			firstOpts = append(firstOpts, tele.ModeHTML)
+			if isLast && menu != nil {
+				firstOpts = append(firstOpts, menu)
+			}
+
+			formattedFirst := tgformat.MarkdownToTelegramHTML(chunks[0])
+			_, err := c.Bot().Edit(thinkingMsg, formattedFirst, firstOpts...)
 			if err != nil {
 				// Fallback to plain text edit if HTML fails
-				_, err = c.Bot().Edit(thinkingMsg, chunks[0])
+				var plainOpts []interface{}
+				if isLast && menu != nil {
+					plainOpts = append(plainOpts, menu)
+				}
+				_, err = c.Bot().Edit(thinkingMsg, chunks[0], plainOpts...)
 				if err != nil {
 					// Fallback to reply HTML, then plain text
-					if err := c.Reply(formattedFirst, tele.ModeHTML); err != nil {
-						_ = c.Reply(chunks[0])
+					if err := c.Reply(formattedFirst, firstOpts...); err != nil {
+						_ = c.Reply(chunks[0], plainOpts...)
 					}
 				}
 			}
-			for _, chunk := range chunks[1:] {
+
+			for i, chunk := range chunks[1:] {
+				isChunkLast := (i + 1) == len(chunks)-1
+				var chunkOpts []interface{}
+				chunkOpts = append(chunkOpts, tele.ModeHTML)
+				if isChunkLast && menu != nil {
+					chunkOpts = append(chunkOpts, menu)
+				}
 				formattedChunk := tgformat.MarkdownToTelegramHTML(chunk)
-				if err := c.Reply(formattedChunk, tele.ModeHTML); err != nil {
-					_ = c.Reply(chunk)
+				if err := c.Reply(formattedChunk, chunkOpts...); err != nil {
+					var plainChunkOpts []interface{}
+					if isChunkLast && menu != nil {
+						plainChunkOpts = append(plainChunkOpts, menu)
+					}
+					_ = c.Reply(chunk, plainChunkOpts...)
 				}
 			}
 		} else {
-			for _, chunk := range chunks {
+			for i, chunk := range chunks {
+				isChunkLast := i == len(chunks)-1
+				var chunkOpts []interface{}
+				chunkOpts = append(chunkOpts, tele.ModeHTML)
+				if isChunkLast && menu != nil {
+					chunkOpts = append(chunkOpts, menu)
+				}
 				formattedChunk := tgformat.MarkdownToTelegramHTML(chunk)
-				if err := c.Reply(formattedChunk, tele.ModeHTML); err != nil {
-					_ = c.Reply(chunk)
+				if err := c.Reply(formattedChunk, chunkOpts...); err != nil {
+					var plainChunkOpts []interface{}
+					if isChunkLast && menu != nil {
+						plainChunkOpts = append(plainChunkOpts, menu)
+					}
+					_ = c.Reply(chunk, plainChunkOpts...)
 				}
 			}
 		}

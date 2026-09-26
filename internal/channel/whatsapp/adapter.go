@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -693,7 +694,8 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 
 		if resp != nil {
 			if resp.Text != "" {
-				_ = a.SendMessage(chatID, resp.Text)
+				formattedText := formatWhatsAppOptions(resp.Text)
+				_ = a.SendMessage(chatID, formattedText)
 			}
 			for _, mf := range resp.MediaFiles {
 				if mf.FilePath != "" {
@@ -711,6 +713,50 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 func isTempScreenshot(fPath string) bool {
 	clean := filepath.ToSlash(fPath)
 	return strings.Contains(clean, "/screenshots/") || strings.HasPrefix(clean, "screenshots/") || strings.Contains(clean, "data/screenshots/")
+}
+
+var (
+	reOptionsTagWA   = regexp.MustCompile(`(?is)\[(?:OPSI|OPTIONS):\s*([^\]]+)\]`)
+	reOptNumberingWA = regexp.MustCompile(`^(?:\d+[\.\)]\s*|[•\-\*]\s*)`)
+)
+
+func formatWhatsAppOptions(text string) string {
+	matches := reOptionsTagWA.FindStringSubmatch(text)
+	if len(matches) < 2 {
+		return text
+	}
+	rawOptions := matches[1]
+	cleanText := strings.TrimSpace(reOptionsTagWA.ReplaceAllString(text, ""))
+
+	var parts []string
+	if strings.Contains(rawOptions, "|") {
+		parts = strings.Split(rawOptions, "|")
+	} else if strings.Contains(rawOptions, "\n") {
+		parts = strings.Split(rawOptions, "\n")
+	} else {
+		parts = []string{rawOptions}
+	}
+
+	var opts []string
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		trimmed = reOptNumberingWA.ReplaceAllString(trimmed, "")
+		trimmed = strings.TrimSpace(trimmed)
+		if trimmed != "" {
+			opts = append(opts, trimmed)
+		}
+	}
+	if len(opts) == 0 {
+		return cleanText
+	}
+
+	var sb strings.Builder
+	sb.WriteString(cleanText)
+	sb.WriteString("\n\n💡 *Pilihan Tindak Lanjut:*\n")
+	for i, opt := range opts {
+		sb.WriteString(fmt.Sprintf("%d️⃣ %s\n", i+1, opt))
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 // JoinedGroupInfo holds basic info about a WhatsApp group
