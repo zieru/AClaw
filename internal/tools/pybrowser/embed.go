@@ -28,11 +28,18 @@ func EnsureScriptsExtracted(targetDir string) error {
 			continue
 		}
 		targetFile := filepath.Join(targetDir, entry.Name())
-		if _, err := os.Stat(targetFile); os.IsNotExist(err) {
-			data, err := ScriptFS.ReadFile(entry.Name())
-			if err != nil {
-				return fmt.Errorf("failed to read embedded %s: %w", entry.Name(), err)
-			}
+		data, err := ScriptFS.ReadFile(entry.Name())
+		if err != nil {
+			return fmt.Errorf("failed to read embedded %s: %w", entry.Name(), err)
+		}
+
+		shouldWrite := false
+		existingData, readErr := os.ReadFile(targetFile)
+		if readErr != nil || string(existingData) != string(data) {
+			shouldWrite = true
+		}
+
+		if shouldWrite {
 			perm := os.FileMode(0644)
 			if filepath.Ext(entry.Name()) == ".sh" || filepath.Ext(entry.Name()) == ".bat" {
 				perm = 0755
