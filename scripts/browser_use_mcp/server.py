@@ -19,10 +19,30 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 mcp = FastMCP("browser-use-server")
 
+def get_db_providers():
+    """Mengambil provider aktif dari database SQLite goassistant.db"""
+    db_path = os.path.join(project_root, "data", "goassistant.db")
+    if not os.path.exists(db_path):
+        return []
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("SELECT name, base_url, api_key, default_model FROM providers WHERE is_active = 1 ORDER BY priority ASC")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+def is_valid_key(val: Optional[str]) -> bool:
+    return bool(val and not val.startswith("${") and val.strip() != "")
+
 def resolve_llm_and_vision(model_name: str, requested_vision: Optional[bool] = None):
     """
     Menyelesaikan LLM dan mode vision.
     Untuk DeepSeek / model text-only, use_vision otomatis diatur ke False (hemat token, cepat, anti-error).
+    Mendukung auto-fallback ke database GoAssistant (dahl, HCNSEC, dll).
     """
     model_lower = model_name.lower().strip()
     
@@ -30,49 +50,56 @@ def resolve_llm_and_vision(model_name: str, requested_vision: Optional[bool] = N
     if requested_vision is not None:
         use_vision = requested_vision
     elif any(k in model_lower for k in ["deepseek", "qwen", "llama", "mistral", "gemma"]):
-        # Model teks murni tidak membutuhkan vision
         use_vision = False
     else:
-        # Default True untuk model multimodal (gemini, gpt-4o, claude)
         use_vision = True
 
-    # 2. Khusus DeepSeek Model
-    if "deepseek" in model_lower:
-        deepseek_key = os.getenv("DEEPSEEK_API_KEY")
-        if deepseek_key:
-            llm = ChatOpenAI(
-                model=model_name,
-                base_url="https://api.deepseek.com",
-                api_key=deepseek_key
-            )
-            return llm, use_vision
-
-        # Fallback ke OmniRoute lokal (:20128)
-        omni_base = os.getenv("OMNIROUTE_BASE_URL", "http://localhost:20128/v1")
-        omni_key = os.getenv("OMNIROUTE_API_KEY") or os.getenv("OPENAI_API_KEY", "sk-omniroute")
-        llm = ChatOpenAI(
-            model=model_name,
-            base_url=omni_base,
-            api_key=omni_key
-        )
-        return llm, use_vision
-
-    # 3. Model Gemini (Official Google AI)
-    if "gemini" in model_lower:
-        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if gemini_key:
-            return ChatGoogleGenerativeAI(model=model_name, google_api_key=gemini_key), use_vision
-
-    # 4. Model OpenAI (Official atau OmniRoute)
+    # 2. Cek API Key dari Environment Variable
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
-    openai_base = os.getenv("OPENAI_BASE_URL")
-    if openai_key:
+
+    if "deepseek" in model_lower and is_valid_key(deepseek_key):
+        return ChatOpenAI(
+            model=model_name,
+            base_url="https://api.deepseek.com",
+            api_key=deepseek_key
+        ), use_vision
+
+    if "gemini" in model_lower and is_valid_key(gemini_key):
+        return ChatGoogleGenerativeAI(model=model_name, google_api_key=gemini_key), use_vision
+
+    if is_valid_key(openai_key):
         kwargs = {"model": model_name, "api_key": openai_key}
-        if openai_base:
-            kwargs["base_url"] = openai_base
+        if os.getenv("OPENAI_BASE_URL"):
+            kwargs["base_url"] = os.getenv("OPENAI_BASE_URL")
         return ChatOpenAI(**kwargs), use_vision
 
-    # 5. Default Fallback ke Gateway OmniRoute lokal GoAssistant (:20128)
+    # 3. Cari dari Database SQLite GoAssistant (misal: dahl, HCNSEC)
+    db_provs = get_db_providers()
+    if db_provs:
+        # Prioritaskan provider yang sesuai dengan model atau provider pertama
+        target_prov = db_provs[0]
+        for p in db_provs:
+            p_name, p_base, p_key, p_model = p
+            if "deepseek" in model_lower and ("dahl" in p_name.lower() or "deepseek" in p_name.lower() or "hcnsec" in p_name.lower()):
+                target_prov = p
+                break
+
+        p_name, p_base, p_key, p_model = target_prov
+        actual_model = model_name
+        # Jika model_name adalah generic "deepseek-chat" tapi DB memiliki model spesifik
+        if model_name in ["deepseek-chat", "default", ""] and p_model and p_model != "auto":
+            actual_model = p_model
+
+        if is_valid_key(p_key) and p_base:
+            return ChatOpenAI(
+                model=actual_model,
+                base_url=p_base,
+                api_key=p_key
+            ), use_vision
+
+    # 4. Fallback ke OmniRoute lokal (:20128)
     omni_base = os.getenv("OMNIROUTE_BASE_URL", "http://localhost:20128/v1")
     return ChatOpenAI(
         model=model_name,
@@ -80,17 +107,20 @@ def resolve_llm_and_vision(model_name: str, requested_vision: Optional[bool] = N
         api_key=os.getenv("OMNIROUTE_API_KEY", "sk-omniroute")
     ), use_vision
 
+
 @mcp.tool(
-    name="run_browser_task",
+    name="browser",
     description=(
-        "Jalankan tugas penjelajahan web otonom menggunakan Python browser-use. "
-        "Mendukung model teks murni seperti DeepSeek (use_vision=False otomatis, sangat hemat token) "
-        "maupun model multimodal (Gemini/GPT-4o). Mampu menyelesaikan alur multi-langkah seperti "
-        "pencarian tiket, pembandingan harga toko online, pengisian form bertingkat, dan scraping interaktif."
+        "Browser otonom (autonomous web agent) berbasis Python browser-use. "
+        "AI dapat menjelajahi web secara mandiri untuk mencari informasi, membandingkan harga/tiket (Traveloka, Tokopedia, dll), "
+        "membuka URL, mengisi form formulir, mengekstrak data dari berbagai halaman web, dan menavigasi situs interaktif. "
+        "Mendukung model DeepSeek (Text-DOM mode hemat token), Gemini, dan OpenAI."
     )
 )
-async def run_browser_task(
-    task: str,
+async def browser(
+    task: str = "",
+    url: Optional[str] = None,
+    action: Optional[str] = None,
     model: str = "deepseek-chat",
     headless: bool = True,
     max_steps: int = 15,
@@ -101,6 +131,15 @@ async def run_browser_task(
     Eksekusi tugas browser otonom dengan kontrol dinamis dan dukungan DeepSeek.
     """
     try:
+        clean_task = (task or "").strip()
+        if not clean_task:
+            if url:
+                clean_task = f"Kunjungi situs {url} dan baca informasi atau selesaikan kebutuhan halaman tersebut."
+            else:
+                return "❌ Parameter 'task' atau 'url' wajib diisi untuk menjalankan browser."
+        elif url and url not in clean_task:
+            clean_task = f"Buka {url} dan selesaikan tugas berikut: {clean_task}"
+
         llm, vision_enabled = resolve_llm_and_vision(model, use_vision)
         
         profile = BrowserProfile(
@@ -109,7 +148,7 @@ async def run_browser_task(
         )
         
         agent = Agent(
-            task=task,
+            task=clean_task,
             llm=llm,
             browser_profile=profile,
             max_actions_per_step=3,

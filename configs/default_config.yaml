@@ -97,7 +97,7 @@ mcp_servers:
     transport: "stdio"
     command: "uv"
     args: ["run", "--directory", "scripts/browser_use_mcp", "python", "server.py"]
-    prefix: "bu"
+    prefix: ""
     env:
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}"
       GEMINI_API_KEY: "${GEMINI_API_KEY}"

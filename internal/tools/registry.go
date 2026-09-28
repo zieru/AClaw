@@ -21,11 +21,10 @@ func GetRegistry() *Registry {
 		defaultRegistry = &Registry{
 			tools: make(map[string]Tool),
 		}
-		// Register built-in tools
+		// Register built-in tools (Browser is provided by Python browser-use via MCP)
 		defaultRegistry.Register(&DateTimeTool{})
 		defaultRegistry.Register(&WebSearchTool{})
 		defaultRegistry.Register(&TavilySearchTool{})
-		defaultRegistry.Register(&BrowserAutomationTool{})
 		defaultRegistry.Register(&HTTPClientTool{})
 		defaultRegistry.Register(&BashTool{})
 		defaultRegistry.Register(&SendFileTool{})

@@ -119,10 +119,11 @@ func (s *browserSession) GetPage(ctx context.Context, targetURL string, waitSeco
 		}
 
 		if s.browser == nil {
+			isWindows := runtime.GOOS == "windows"
 			l := launcher.New().
 				Headless(true).
 				NoSandbox(true).
-				Leakless(true).
+				Leakless(!isWindows).
 				Set("disable-gpu").
 				Set("disable-dev-shm-usage").
 				Set("disable-software-rasterizer").
@@ -141,7 +142,12 @@ func (s *browserSession) GetPage(ctx context.Context, targetURL string, waitSeco
 
 			controlURL, errLaunch := l.Launch()
 			if errLaunch != nil {
-				return nil, fmt.Errorf("gagal menjalankan browser: %w", errLaunch)
+				// Retry without leakless supervisor if failed
+				l = l.Leakless(false)
+				controlURL, errLaunch = l.Launch()
+				if errLaunch != nil {
+					return nil, fmt.Errorf("gagal menjalankan browser: %w", errLaunch)
+				}
 			}
 			s.launcher = l
 

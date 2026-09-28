@@ -220,7 +220,7 @@ func TestLiveBrowserUseMCPConnection(t *testing.T) {
 			Transport: "stdio",
 			Command:   "uv",
 			Args:      []string{"run", "--directory", scriptsDir, "python", "server.py"},
-			Prefix:    "bu",
+			Prefix:    "",
 		},
 	})
 	defer mgr.Close()
@@ -236,13 +236,13 @@ func TestLiveBrowserUseMCPConnection(t *testing.T) {
 		t.Fatalf("failed to start and register browser_use MCP: %v", err)
 	}
 
-	tool, ok := reg.Get("bu_run_browser_task")
+	tool, ok := reg.Get("browser")
 	if !ok {
-		t.Fatalf("expected tool 'bu_run_browser_task' to be registered in Registry")
+		t.Fatalf("expected tool 'browser' to be registered in Registry")
 	}
 
-	if tool.Name() != "bu_run_browser_task" {
-		t.Errorf("expected tool name 'bu_run_browser_task', got %s", tool.Name())
+	if tool.Name() != "browser" {
+		t.Errorf("expected tool name 'browser', got %s", tool.Name())
 	}
 
 	params := tool.Parameters()

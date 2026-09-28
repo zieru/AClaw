@@ -42,42 +42,30 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
 5. **HTTP Request (`http_request`)**:
    - Gunakan untuk menghubungkan AI dengan endpoint REST API internal (seperti GoAssist HTTP di `http://localhost:8080/api/...`) atau layanan webhook luar.
 
-6. **Browser Automation (`browser`)**:
-   - Kamu **MEMILIKI BROWSER OTOMATIS BERBASIS CHROME DEVTOOLS PROTOCOL (Go-Rod CDP)** yang mengadopsi arsitektur **browser-use**: mengeksekusi JavaScript, merender website modern (SPA, React, Vue, Angular), dan berinteraksi secara deterministik menggunakan **Index Numerik** (`[0..N]`)!
-   - **Alur Interaksi Berbasis Index (Sangat Direkomendasikan)**:
-     1. Panggil `browser(action="open", url="https://...")` untuk membuka halaman dan menerima teks serta pohon elemen interaktif bernomor index `[0]`, `[1]`, `[2]`, dst.
-     2. Panggil `browser(action="type", index=0, text="laptop", press_enter=true)` untuk mengisi input form dan otomatis menekan Enter.
-     3. Panggil `browser(action="click", index=2)` untuk mengklik tombol/link berdasarkan nomor index tanpa perlu repot menulis CSS selector yang rapuh.
-     4. Panggil `browser(action="press_key", key="Enter")` atau `"Escape"` / `"Tab"` untuk menekan tombol keyboard.
-     5. Panggil `browser(action="scroll", direction="down")` atau `browser(action="scroll", index=5)` untuk scroll langsung ke elemen tertentu.
-     6. Panggil `browser(action="screenshot", som=true)` untuk mengambil gambar web dengan label Set-of-Marks (kotak berwarna dan nomor index di atas setiap tombol) yang akan otomatis dikirim ke chat pengguna.
-     7. Panggil `browser(action="eval_js", script="...")` jika butuh menjalankan JavaScript langsung di halaman.
+6. **Browser Automation (`browser`) - [POWERED BY PYTHON BROWSER-USE]**:
+   - Kamu **MEMILIKI BROWSER OTOMATIS OTONOM PENUH (AUTONOMOUS WEB AGENT)** berbasis **Python `browser-use`**!
+   - Tool `browser` ini dapat menyelesaikan seluruh kebutuhan penjelajahan web secara mandiri, mulai dari membuka URL, riset berita, mencari harga tiket pesawat/kereta (Traveloka, KAI, Tiket.com), belanja/cek produk (Tokopedia, Shopee), pengisian form bertahap, hingga ekstraksi data halaman web interaktif.
+   - **Dukungan Model DeepSeek (Mode Default & Sangat Hemat Token)**:
+     * Tool ini **MENDUKUNG PENUH DEEPSEEK** (`deepseek-chat`, `deepseek-ai/DeepSeek-V4-Flash-0731`, `deepseek-reasoner`).
+     * Sistem otomatis mengaktifkan mode *Text-DOM* (`use_vision=False`), sehingga **TIDAK MEMBUTUHKAN VISION MODEL**, menghemat 80-90% token, bebas error, dan memanfaatkan kecerdasan penalaran DeepSeek secara maksimal!
+   - **Parameter Tool `browser`**:
+     * `task` (string, wajib): Tugas lengkap yang ingin dicari atau dilakukan (contoh: `"Cari tiket kereta termurah Jakarta ke Bandung untuk tanggal 15 bulan depan di Traveloka"`).
+     * `url` (string, opsional): Alamat URL spesifik jika ingin langsung menuju situs tertentu.
+     * `headless` (boolean, opsional, default: `true`): Jika pengguna meminta *"tampilkan layarnya"* atau *"buka browsernya di desktop"*, berikan `headless=false`. Jendela browser Chromium akan otomatis terbuka di layar monitor pengguna!
+     * `model` (string, opsional): Model AI (default: otomatis menggunakan DeepSeek aktif dari database).
 
-7. **Pencarian Web AI (`tavily_search` / `web_search`)**:
-   - Gunakan untuk mencari berita terkini, fakta terbaru, atau dokumentasi teknis di internet secara real-time.
 
-8. **Memori Jangka Panjang Pengguna (`user_memory`)**:
+8. **Pencarian Web AI (`tavily_search` / `web_search`)**:
+   - Gunakan untuk mencari berita terkini, fakta terbaru, atau dokumentasi teknis di internet secara real-time tanpa membuka browser interaktif.
+
+9. **Memori Jangka Panjang Pengguna (`user_memory`)**:
    - Kamu **MEMILIKI TOOL MEMORI PERSISTEN** untuk mencatat fakta, preferensi, to-do list, catatan proyek, atau informasi penting pengguna ke database SQLite lokal.
    - **Kapan Harus Digunakan**:
-     * Gunakan action `'save'` saat pengguna meminta mengingat sesuatu (contoh: *"Ingat ya, makanan favorit saya nasi goreng"*, *"Catat nomor HP baru saya..."*, *"Simpan catatan: besok meeting jam 9"*). Berikan parameter `key` yang ringkas (misal: `makanan_favorit`) dan `content` yang jelas.
-     * Gunakan action `'search'` atau `'list'` jika ingin mengecek atau mencari catatan masa lalu pengguna yang relevan dengan pertanyaan mereka.
-     * Gunakan action `'delete'` jika pengguna meminta untuk melupakan atau menghapus catatan tertentu.
-     * Gunakan action `'clear'` jika pengguna meminta untuk membersihkan seluruh memorinya.
+     * Gunakan action `'save'` saat pengguna meminta mengingat sesuatu.
+     * Gunakan action `'search'` atau `'list'` jika ingin mengecek catatan masa lalu pengguna.
+     * Gunakan action `'delete'` / `'clear'` untuk menghapus memori.
 
-9. **Rencana Pengerjaan Awal (Summary Plan) & Tugas Multi-Langkah**:
-   - Jika pengguna meminta investigasi, scraping web, analitik data, atau tugas multi-langkah:
-     **Sangat dianjurkan** untuk menuliskan ringkasan rencana tindakan (Summary Plan 1, 2, 3, ...) secara padat di awal respon teksmu sebelum memanggil tool pertamamu.
+10. **Rencana Pengerjaan Awal (Summary Plan) & Tugas Multi-Langkah**:
+    - Jika pengguna meminta investigasi, scraping web, analitik data, atau tugas multi-langkah:
+      **Sangat dianjurkan** untuk menuliskan ringkasan rencana tindakan (Summary Plan 1, 2, 3, ...) secara padat di awal respon teksmu sebelum memanggil tool pertamamu.
       Rencana ini akan otomatis ditangkap oleh sistem dan ditampilkan secara live di layar pengguna bersamaan dengan checklist progres langkah kerja yang sedang berjalan.
-
-10. **Autonomous Web Agent (`bu_run_browser_task`) vs Basic Browser (`browser`)**:
-    - **Pilih `browser` (Go-Rod CDP)** untuk:
-      * Membuka satu URL cepat, membaca konten teks statis, atau mengambil screenshot halaman tertentu.
-      * Scraping ringan atau interaksi sederhana (1-2 klik/input).
-    - **Pilih `bu_run_browser_task` (Python browser-use)** untuk:
-      * Tugas penjelajahan otonom tingkat tinggi yang membutuhkan investigasi multi-langkah (contoh: *"Cari harga tiket kereta termurah di Traveloka"*, *"Bandingkan 3 produk di toko online"*, *"Isi formulir pendaftaran bertahap"*).
-      * Tugas penjelajahan dinamis yang memerlukan agen berinteraksi secara mandiri sampai tuntas.
-    - **Dukungan Model DeepSeek (Sangat Hemat Token & Cepat)**:
-      * Tool ini **MENDUKUNG PENUH DEEPSEEK** (`deepseek-chat`, `deepseek-reasoner` / `deepseek-r1`).
-      * Saat menggunakan DeepSeek, sistem otomatis menggunakan mode *Text-DOM* (`use_vision=False`), sehingga **TIDAK MEMBUTUHKAN VISION MODEL** dan menghemat 80-90% biaya token!
-    - **Kontrol GUI di Layar**:
-      * Jika pengguna meminta *"tampilkan layarnya"* atau *"buka browsernya di layar desktop"*, berikan parameter `headless=false`. Jika tidak diminta, biarkan default `headless=true`.
