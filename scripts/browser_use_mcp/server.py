@@ -14,8 +14,7 @@ load_dotenv(os.path.join(project_root, ".env"))
 from mcp.server.fastmcp import FastMCP
 from browser_use.agent.service import Agent
 from browser_use.browser.profile import BrowserProfile
-from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
+from browser_use.llm import ChatOpenAI, ChatGoogle, ChatDeepSeek
 
 mcp = FastMCP("browser-use-server")
 
@@ -67,7 +66,7 @@ def resolve_llm_and_vision(model_name: str, requested_vision: Optional[bool] = N
         ), use_vision
 
     if "gemini" in model_lower and is_valid_key(gemini_key):
-        return ChatGoogleGenerativeAI(model=model_name, google_api_key=gemini_key), use_vision
+        return ChatGoogle(model=model_name, api_key=gemini_key), use_vision
 
     if is_valid_key(openai_key):
         kwargs = {"model": model_name, "api_key": openai_key}
@@ -156,6 +155,13 @@ async def browser(
             executable_path=executable_path,
         )
         
+        # Ensure provider attribute exists for Agent telemetry and logging
+        if not hasattr(llm, "provider") or not getattr(llm, "provider", None):
+            try:
+                setattr(llm, "provider", "openai")
+            except Exception:
+                pass
+
         agent = Agent(
             task=clean_task,
             llm=llm,
