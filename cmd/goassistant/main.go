@@ -22,6 +22,7 @@ import (
 	"goassistant/internal/goassisthttp"
 	"goassistant/internal/instance"
 	"goassistant/internal/memory"
+	"goassistant/internal/omniroute"
 	"goassistant/internal/provider"
 	"goassistant/internal/proxy"
 	"goassistant/internal/storage"
@@ -53,6 +54,23 @@ func main() {
 		log.Fatalf("❌ Gagal memuat konfigurasi: %v", err)
 	}
 	log.Printf("⚙️ Konfigurasi berhasil dimuat dari: %s", *configPath)
+
+	// Environment variable overrides for OmniRoute
+	if envPass := os.Getenv("OMNIROUTE_PASSWORD"); envPass != "" {
+		cfg.OmniRoute.Password = envPass
+	}
+	if envBase := os.Getenv("OMNIROUTE_BASE_URL"); envBase != "" {
+		cfg.OmniRoute.BaseURL = envBase
+	}
+	if envKey := os.Getenv("OMNIROUTE_API_KEY"); envKey != "" {
+		cfg.OmniRoute.APIKey = envKey
+	}
+
+	// Initialize OmniRoute Gateway Collaboration Client
+	if cfg.OmniRoute.Enabled {
+		omniClient := omniroute.InitClient(cfg.OmniRoute)
+		log.Printf("🚀 OmniRoute Gateway Collaboration aktif di: %s", omniClient.BaseURL())
+	}
 
 	// Single-Instance Takeover Lock (Hentikan instance lama jika ada)
 	releaseLock, err := instance.EnsureSingleInstance(cfg.Server.DataDir)

@@ -103,7 +103,19 @@ type AppConfig struct {
 		GroupName           string   `yaml:"group_name"`
 	} `yaml:"webshare"`
 
+	OmniRoute OmniRouteConfig `yaml:"omniroute"`
+
 	MCPServers []MCPServerConfig `yaml:"mcp_servers"`
+}
+
+// OmniRouteConfig defines configuration for co-located OmniRoute gateway collaboration
+type OmniRouteConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	BaseURL           string `yaml:"base_url"`
+	Password          string `yaml:"password"`
+	APIKey            string `yaml:"api_key"`
+	UseUpstreamSearch bool   `yaml:"use_upstream_search"`
+	UseUpstreamMemory bool   `yaml:"use_upstream_memory"`
 }
 
 // MCPServerConfig defines an external Model Context Protocol (MCP) server
@@ -183,7 +195,13 @@ func Load(configPath string) (*AppConfig, error) {
 		cfg.Webshare.GroupName = "webshare"
 		cfg.Webshare.SyncIntervalMinutes = 60
 		cfg.Webshare.AutoSync = false
-
+ 
+		cfg.OmniRoute.Enabled = true
+		cfg.OmniRoute.BaseURL = "http://localhost:20128"
+		cfg.OmniRoute.Password = ""
+		cfg.OmniRoute.UseUpstreamSearch = true
+		cfg.OmniRoute.UseUpstreamMemory = true
+ 
 		if configPath != "" {
 			if _, statErr := os.Stat(configPath); statErr != nil {
 				err = fmt.Errorf("file config %s tidak ditemukan: %w", configPath, statErr)

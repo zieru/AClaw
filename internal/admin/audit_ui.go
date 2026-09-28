@@ -2,12 +2,15 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/csv"
 	"fmt"
 	"html"
 	"strings"
 	"time"
 
+	"goassistant/internal/config"
+	"goassistant/internal/omniroute"
 	"goassistant/internal/storage"
 	tele "gopkg.in/telebot.v3"
 )
@@ -41,10 +44,26 @@ func (ui *AuditUI) RenderStatsSummary() string {
 	sb.WriteString(fmt.Sprintf("• Error: <code>%d</code>\n\n", todayStats.ErrorCount))
 
 	if allTimeStats != nil {
-		sb.WriteString("📈 <b>Statistik Sepanjang Waktu (All-Time):</b>\n")
+		sb.WriteString("📈 <b>Statistik Sepanjang Waktu (All-Time Lokal):</b>\n")
 		sb.WriteString(fmt.Sprintf("• Total Permintaan: <code>%d req</code>\n", allTimeStats.TotalRequests))
 		sb.WriteString(fmt.Sprintf("• Total Token: <code>%d tokens</code>\n", allTimeStats.TotalTokens))
 		sb.WriteString(fmt.Sprintf("• Total Estimasi Biaya: <code>$%.4f USD</code>\n\n", allTimeStats.TotalCost))
+	}
+
+	// OmniRoute Gateway Aggregated Analytics
+	if cfg := config.Get(); cfg != nil && cfg.OmniRoute.Enabled {
+		if omniClient := omniroute.GetClient(); omniClient != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			analytics, err := omniClient.GetAnalytics(ctx)
+			cancel()
+			if err == nil && analytics != nil {
+				sb.WriteString("🚀 <b>Statistik OmniRoute Gateway (Upstream):</b>\n")
+				sb.WriteString(fmt.Sprintf("• Total Permintaan: <code>%d req</code> (Sukses: <code>%.1f%%</code>)\n", analytics.Summary.TotalRequests, analytics.Summary.SuccessRatePct))
+				sb.WriteString(fmt.Sprintf("• Total Token: <code>%d tokens</code> (In: %d, Out: %d)\n", analytics.Summary.TotalTokens, analytics.Summary.PromptTokens, analytics.Summary.CompletionTokens))
+				sb.WriteString(fmt.Sprintf("• Rata-rata Latensi: <code>%d ms</code>\n", analytics.Summary.AvgLatencyMs))
+				sb.WriteString(fmt.Sprintf("• Total Biaya Gateway: <code>$%.4f USD</code>\n\n", analytics.Summary.TotalCost))
+			}
+		}
 	}
 
 	sb.WriteString("💡 <i>Pilih aksi di bawah untuk inspeksi log interaktif:</i>")
@@ -55,13 +74,55 @@ func (ui *AuditUI) RenderStatsSummary() string {
 func (ui *AuditUI) StatsKeyboard() *tele.ReplyMarkup {
 	menu := &tele.ReplyMarkup{}
 	btnLogs := menu.Data("📜 Buka Daftar Log Interaktif", "menu_logs")
+	btnOmniLogs := menu.Data("🌐 Log Upstream OmniRoute", "menu_omni_logs")
 	btnExport := menu.Data("📥 Export CSV", "btn_export_logs")
 	btnBack := menu.Data("⬅️ Kembali ke Menu Utama", "menu_main")
 	menu.Inline(
 		menu.Row(btnLogs),
+		menu.Row(btnOmniLogs),
 		menu.Row(btnExport, btnBack),
 	)
 	return menu
+}
+
+// HandleOmniRouteLogs displays recent upstream logs from OmniRoute
+func (ui *AuditUI) HandleOmniRouteLogs(c tele.Context) error {
+	omniClient := omniroute.GetClient()
+	if omniClient == nil {
+		return c.Reply("❌ OmniRoute client belum diinisialisasi.", tele.ModeHTML)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	logs, err := omniClient.GetRequestLogs(ctx)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal mengambil log OmniRoute: %v", html.EscapeString(err.Error())), tele.ModeHTML)
+	}
+
+	if len(logs) == 0 {
+		return c.Reply("ℹ️ Belum ada catatan log dari OmniRoute Gateway.", tele.ModeHTML)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🌐 <b>LOG UPSTREAM OMNIROUTE TERBARU</b>\n\n")
+
+	start := 0
+	if len(logs) > 8 {
+		start = len(logs) - 8
+	}
+	for i := len(logs) - 1; i >= start; i-- {
+		sb.WriteString(fmt.Sprintf("• <code>%s</code>\n\n", html.EscapeString(logs[i])))
+	}
+
+	menu := &tele.ReplyMarkup{}
+	btnBack := menu.Data("⬅️ Kembali ke Statistik", "menu_stats")
+	menu.Inline(menu.Row(btnBack))
+
+	if c.Callback() != nil {
+		return c.Edit(sb.String(), menu, tele.ModeHTML)
+	}
+	return c.Reply(sb.String(), menu, tele.ModeHTML)
 }
 
 // HandleLogs processes `/logs`

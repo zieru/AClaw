@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"fmt"
 	"html"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"goassistant/internal/omniroute"
 	"goassistant/internal/tokensaver"
 	"goassistant/internal/version"
 	tele "gopkg.in/telebot.v3"
@@ -103,7 +105,25 @@ func (a *AdminBot) RenderStatusSummary(c tele.Context) string {
 	sb.WriteString(fmt.Sprintf("• Model Combos: <code>%d fallback combo</code>\n", len(combos)))
 	sb.WriteString(fmt.Sprintf("• Timeouts: API Call: <code>%ds</code> | Handler: <code>%ds</code> | SubAgent: <code>%ds</code>\n\n", apiTimeout, handlerTimeout, a.cfg.SubAgent.TimeoutSeconds))
 
-	// 4. Proxy Pool (9Router Engine)
+	// 4. OmniRoute Gateway Collaboration (:20128)
+	if a.cfg.OmniRoute.Enabled {
+		omniStatus := "🔴 <b>OFFLINE</b>"
+		if omniClient := omniroute.GetClient(); omniClient != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			t0 := time.Now()
+			health, err := omniClient.GetHealth(ctx)
+			latency := time.Since(t0).Milliseconds()
+			cancel()
+			if err == nil && health != nil && health.Status == "ok" {
+				omniStatus = fmt.Sprintf("🟢 <b>ONLINE</b> (<code>%d ms</code>)", latency)
+			}
+		}
+		sb.WriteString("🚀 <b>OmniRoute Gateway (:20128):</b>\n")
+		sb.WriteString(fmt.Sprintf("• Status: %s | Host: <code>%s</code>\n", omniStatus, html.EscapeString(a.cfg.OmniRoute.BaseURL)))
+		sb.WriteString(fmt.Sprintf("• Kolaborasi: Search: <code>%t</code> | Shared Memory: <code>%t</code>\n\n", a.cfg.OmniRoute.UseUpstreamSearch, a.cfg.OmniRoute.UseUpstreamMemory))
+	}
+
+	// 5. Proxy Pool (9Router Engine)
 	proxyStatus := "🔴 <b>Nonaktif</b>"
 	if a.proxyPool != nil && a.proxyPool.IsEnabled() {
 		nodeCount := a.proxyPool.ActiveCount()

@@ -9,6 +9,9 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"goassistant/internal/config"
+	"goassistant/internal/omniroute"
 )
 
 type WebSearchTool struct{}
@@ -50,7 +53,29 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]interface{}
 		return "", fmt.Errorf("parameter 'query' wajib diisi")
 	}
 
-	// Try Tavily search first if configured
+	// 1. Try OmniRoute upstream search first if configured
+	if cfg := config.Get(); cfg != nil && cfg.OmniRoute.Enabled && cfg.OmniRoute.UseUpstreamSearch {
+		if omniClient := omniroute.GetClient(); omniClient != nil {
+			if searchRes, err := omniClient.Search(ctx, q); err == nil && len(searchRes.Results) > 0 {
+				var sb strings.Builder
+				sb.WriteString(fmt.Sprintf("Hasil Pencarian Web untuk: %s\n\n", q))
+				for i, res := range searchRes.Results {
+					if i >= 5 {
+						break
+					}
+					snippet := strings.TrimSpace(res.Snippet)
+					if snippet != "" {
+						sb.WriteString(fmt.Sprintf("%d. %s\n   URL: %s\n   Ringkasan: %s\n\n", i+1, res.Title, res.URL, snippet))
+					} else {
+						sb.WriteString(fmt.Sprintf("%d. %s\n   URL: %s\n\n", i+1, res.Title, res.URL))
+					}
+				}
+				return sb.String(), nil
+			}
+		}
+	}
+
+	// 2. Try Tavily search if configured
 	tavilyTool := &TavilySearchTool{}
 	if tavilyRes, err := tavilyTool.Execute(ctx, args); err == nil && tavilyRes != "" {
 		return tavilyRes, nil

@@ -92,3 +92,12 @@ mcp_servers:
     args: ["mcp"]
     prefix: "g3a"            # Prefix tool: g3a_query_analytics, g3a_run_sql, g3a_describe_dataset, dll.
 
+# OmniRoute Local Gateway Collaboration (:20128)
+omniroute:
+  enabled: true
+  base_url: "http://localhost:20128" # Localhost internal pada server yang sama
+  password: ""                      # Masukkan master password dashboard atau set via env OMNIROUTE_PASSWORD
+  api_key: ""                       # Optional: Bearer token jika menggunakan OmniRoute API Key (atau env OMNIROUTE_API_KEY)
+  use_upstream_search: true          # Gunakan POST /v1/search OmniRoute untuk tool web_search
+  use_upstream_memory: true          # Gunakan /api/memory OmniRoute untuk sinkronisasi memori bersama
+

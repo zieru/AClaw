@@ -1,9 +1,13 @@
 package memory
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
+	"goassistant/internal/config"
+	"goassistant/internal/omniroute"
 	"goassistant/internal/storage"
 )
 
@@ -19,12 +23,38 @@ func NewManager(db *storage.DB) *Manager {
 
 // SaveFact saves a learned fact or profile item
 func (m *Manager) SaveFact(scope, scopeID, key, content, category string) error {
-	return m.db.AddMemoryItem(scope, scopeID, key, content, category)
+	err := m.db.AddMemoryItem(scope, scopeID, key, content, category)
+	if err == nil {
+		m.syncUpstreamMemory(scope, scopeID, key, content, category)
+	}
+	return err
 }
 
 // UpsertFact saves or updates a learned fact or profile item (prevents duplicate keys)
 func (m *Manager) UpsertFact(scope, scopeID, key, content, category string) error {
-	return m.db.UpsertMemoryItem(scope, scopeID, key, content, category)
+	err := m.db.UpsertMemoryItem(scope, scopeID, key, content, category)
+	if err == nil {
+		m.syncUpstreamMemory(scope, scopeID, key, content, category)
+	}
+	return err
+}
+
+func (m *Manager) syncUpstreamMemory(scope, scopeID, key, content, category string) {
+	if cfg := config.Get(); cfg != nil && cfg.OmniRoute.Enabled && cfg.OmniRoute.UseUpstreamMemory {
+		if client := omniroute.GetClient(); client != nil {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				meta := map[string]interface{}{
+					"scope":    scope,
+					"scope_id": scopeID,
+					"category": category,
+					"source":   "goassistant",
+				}
+				_ = client.SaveMemory(ctx, key, content, "factual", meta)
+			}()
+		}
+	}
 }
 
 // ListMemories returns all memory items for a specific scope and scope ID
@@ -59,6 +89,21 @@ func (m *Manager) GetContextMemory(channelID, userID string) (string, error) {
 			sb.WriteString(fmt.Sprintf("- [%s] %s\n", item.KeyTag, item.Content))
 		}
 		sb.WriteString("\n")
+	}
+
+	// 1b. OmniRoute Centralized Shared Memory
+	if cfg := config.Get(); cfg != nil && cfg.OmniRoute.Enabled && cfg.OmniRoute.UseUpstreamMemory {
+		if client := omniroute.GetClient(); client != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if omniMems, err := client.ListMemories(ctx); err == nil && len(omniMems) > 0 {
+				sb.WriteString("### OmniRoute Shared Facts & Knowledge:\n")
+				for _, om := range omniMems {
+					sb.WriteString(fmt.Sprintf("- [%s] %s\n", om.Key, om.Content))
+				}
+				sb.WriteString("\n")
+			}
+			cancel()
+		}
 	}
 
 	// 2. Channel memories
