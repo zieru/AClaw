@@ -93,3 +93,33 @@ func TestMarkdownToTelegramHTML_LaTeX(t *testing.T) {
 		t.Errorf("Expected no remaining raw LaTeX notation, got:\n%s", result)
 	}
 }
+
+func TestExtractInteractiveOptions(t *testing.T) {
+	inputWithFooter := `Apakah Anda ingin tahu lebih detail tentang cara kerja gateway-nya, provider AI apa saja yang didukung, atau ada hal lain yang ingin ditanyakan?
+
+[OPSI: Cara kerja OmniRoute | Provider AI didukung | Lainnya]
+
+—
+⚡️ 29.4s • 🪙 8,870 (in: 8,596 / out: 274) • 🌿 hemat 46 • 🤖 omnirouter • deepseek-ai/DeepSeek-V4-Flash-0731`
+
+	cleanText, options := ExtractInteractiveOptions(inputWithFooter)
+
+	if strings.Contains(cleanText, "[OPSI:") {
+		t.Errorf("expected [OPSI:] tag to be removed from cleanText, got:\n%s", cleanText)
+	}
+
+	expectedOptions := []string{"Cara kerja OmniRoute", "Provider AI didukung", "Lainnya"}
+	if len(options) != len(expectedOptions) {
+		t.Fatalf("expected %d options, got %d: %v", len(expectedOptions), len(options), options)
+	}
+	for i, opt := range expectedOptions {
+		if options[i] != opt {
+			t.Errorf("option %d: expected %q, got %q", i, opt, options[i])
+		}
+	}
+
+	if !strings.Contains(cleanText, "⚡️ 29.4s") {
+		t.Errorf("expected footer to be retained in cleanText, got:\n%s", cleanText)
+	}
+}
+

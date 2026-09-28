@@ -203,4 +203,61 @@ func TestLiveA7G3Connection(t *testing.T) {
 	t.Logf("a7g3_export_chart_image live response:\n%s", imgRes)
 }
 
+func TestLiveBrowserUseMCPConnection(t *testing.T) {
+	scriptsDir, err := filepath.Abs("../../scripts/browser_use_mcp")
+	if err != nil {
+		t.Fatalf("failed to resolve scripts path: %v", err)
+	}
+	serverPy := filepath.Join(scriptsDir, "server.py")
+	if _, err := os.Stat(serverPy); err != nil {
+		t.Skipf("server.py not found at %s, skipping test", serverPy)
+	}
+
+	mgr := NewMCPManager([]config.MCPServerConfig{
+		{
+			Name:      "browser_use",
+			Enabled:   true,
+			Transport: "stdio",
+			Command:   "uv",
+			Args:      []string{"run", "--directory", scriptsDir, "python", "server.py"},
+			Prefix:    "bu",
+		},
+	})
+	defer mgr.Close()
+
+	reg := &Registry{
+		tools: make(map[string]Tool),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := mgr.StartAndRegister(ctx, reg); err != nil {
+		t.Fatalf("failed to start and register browser_use MCP: %v", err)
+	}
+
+	tool, ok := reg.Get("bu_run_browser_task")
+	if !ok {
+		t.Fatalf("expected tool 'bu_run_browser_task' to be registered in Registry")
+	}
+
+	if tool.Name() != "bu_run_browser_task" {
+		t.Errorf("expected tool name 'bu_run_browser_task', got %s", tool.Name())
+	}
+
+	params := tool.Parameters()
+	if _, hasTask := params.Properties["task"]; !hasTask {
+		t.Errorf("expected 'task' property in tool parameters, got: %+v", params.Properties)
+	}
+	if _, hasModel := params.Properties["model"]; !hasModel {
+		t.Errorf("expected 'model' property in tool parameters")
+	}
+	if _, hasHeadless := params.Properties["headless"]; !hasHeadless {
+		t.Errorf("expected 'headless' property in tool parameters")
+	}
+
+	t.Logf("✅ Successfully connected to browser-use MCP server! Tool '%s' registered with %d properties.",
+		tool.Name(), len(params.Properties))
+}
+
 

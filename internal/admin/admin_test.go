@@ -44,3 +44,27 @@ func TestAdminFriendlyErrorHTMLFormatting(t *testing.T) {
 		t.Errorf("expected <b>Waktu Tunggu Habis (Timeout)</b> in Telegram HTML, got: %s", friendlyHTML)
 	}
 }
+
+func TestAdminBot_InteractiveOptionsHandling(t *testing.T) {
+	a := &AdminBot{}
+	text := "Berikut adalah opsi lanjutan:\n[OPSI: Cara kerja OmniRoute | Provider AI didukung | Lainnya]\n\n—\n⚡ 29.4s"
+	cleanText, options := tgformat.ExtractInteractiveOptions(text)
+
+	if strings.Contains(cleanText, "[OPSI:") {
+		t.Errorf("expected [OPSI:] tag to be stripped, got: %s", cleanText)
+	}
+	if len(options) != 3 {
+		t.Fatalf("expected 3 options, got %d", len(options))
+	}
+	// Simulate storing options as sendOrEditSplitMessage does
+	for i, opt := range options {
+		optKey := "test_" + string(rune('0'+i))
+		a.pendingOptions.Store(optKey, opt)
+	}
+
+	val, ok := a.pendingOptions.Load("test_0")
+	if !ok || val.(string) != "Cara kerja OmniRoute" {
+		t.Errorf("expected option 'Cara kerja OmniRoute', got %v", val)
+	}
+}
+

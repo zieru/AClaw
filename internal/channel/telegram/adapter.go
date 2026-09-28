@@ -871,40 +871,8 @@ func (a *BotAdapter) handleTopicCallback(c tele.Context, data string) error {
 	return nil
 }
 
-var (
-	reOptionsTag   = regexp.MustCompile(`(?is)\[(?:OPSI|OPTIONS):\s*([^\]]+)\]`)
-	reOptNumbering = regexp.MustCompile(`^(?:\d+[\.\)]\s*|[•\-\*]\s*)`)
-)
-
 func extractInteractiveOptions(text string) (string, []string) {
-	match := reOptionsTag.FindStringSubmatch(text)
-	if len(match) < 2 {
-		return text, nil
-	}
-
-	rawOptions := match[1]
-	cleanText := strings.TrimSpace(reOptionsTag.ReplaceAllString(text, ""))
-
-	var parts []string
-	if strings.Contains(rawOptions, "|") {
-		parts = strings.Split(rawOptions, "|")
-	} else if strings.Contains(rawOptions, "\n") {
-		parts = strings.Split(rawOptions, "\n")
-	} else {
-		parts = []string{rawOptions}
-	}
-
-	var options []string
-	for _, p := range parts {
-		trimmed := strings.TrimSpace(p)
-		trimmed = reOptNumbering.ReplaceAllString(trimmed, "")
-		trimmed = strings.TrimSpace(trimmed)
-		if trimmed != "" {
-			options = append(options, trimmed)
-		}
-	}
-
-	return cleanText, options
+	return tgformat.ExtractInteractiveOptions(text)
 }
 
 func (a *BotAdapter) handleOptionCallback(c tele.Context, data string) error {

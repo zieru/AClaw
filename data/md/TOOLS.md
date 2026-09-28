@@ -68,3 +68,16 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
    - Jika pengguna meminta investigasi, scraping web, analitik data, atau tugas multi-langkah:
      **Sangat dianjurkan** untuk menuliskan ringkasan rencana tindakan (Summary Plan 1, 2, 3, ...) secara padat di awal respon teksmu sebelum memanggil tool pertamamu.
       Rencana ini akan otomatis ditangkap oleh sistem dan ditampilkan secara live di layar pengguna bersamaan dengan checklist progres langkah kerja yang sedang berjalan.
+
+10. **Autonomous Web Agent (`bu_run_browser_task`) vs Basic Browser (`browser`)**:
+    - **Pilih `browser` (Go-Rod CDP)** untuk:
+      * Membuka satu URL cepat, membaca konten teks statis, atau mengambil screenshot halaman tertentu.
+      * Scraping ringan atau interaksi sederhana (1-2 klik/input).
+    - **Pilih `bu_run_browser_task` (Python browser-use)** untuk:
+      * Tugas penjelajahan otonom tingkat tinggi yang membutuhkan investigasi multi-langkah (contoh: *"Cari harga tiket kereta termurah di Traveloka"*, *"Bandingkan 3 produk di toko online"*, *"Isi formulir pendaftaran bertahap"*).
+      * Tugas penjelajahan dinamis yang memerlukan agen berinteraksi secara mandiri sampai tuntas.
+    - **Dukungan Model DeepSeek (Sangat Hemat Token & Cepat)**:
+      * Tool ini **MENDUKUNG PENUH DEEPSEEK** (`deepseek-chat`, `deepseek-reasoner` / `deepseek-r1`).
+      * Saat menggunakan DeepSeek, sistem otomatis menggunakan mode *Text-DOM* (`use_vision=False`), sehingga **TIDAK MEMBUTUHKAN VISION MODEL** dan menghemat 80-90% biaya token!
+    - **Kontrol GUI di Layar**:
+      * Jika pengguna meminta *"tampilkan layarnya"* atau *"buka browsernya di layar desktop"*, berikan parameter `headless=false`. Jika tidak diminta, biarkan default `headless=true`.

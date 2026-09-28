@@ -295,3 +295,42 @@ func CleanThinkingForTelegram(think string) string {
 
 	return strings.TrimSpace(think)
 }
+
+var (
+	reOptionsTag       = regexp.MustCompile(`(?is)\[(?:OPSI|OPTIONS):\s*([^\]]+)\]`)
+	reOptNumbering     = regexp.MustCompile(`^(?:\d+[\.\)]\s*|[•\-\*]\s*)`)
+	reMultipleNewlines = regexp.MustCompile(`\n{3,}`)
+)
+
+// ExtractInteractiveOptions extracts options from [OPSI: ... ] or [OPTIONS: ... ] tags
+func ExtractInteractiveOptions(text string) (string, []string) {
+	match := reOptionsTag.FindStringSubmatch(text)
+	if len(match) < 2 {
+		return text, nil
+	}
+
+	rawOptions := match[1]
+	cleanText := strings.TrimSpace(reOptionsTag.ReplaceAllString(text, ""))
+	cleanText = reMultipleNewlines.ReplaceAllString(cleanText, "\n\n")
+
+	var parts []string
+	if strings.Contains(rawOptions, "|") {
+		parts = strings.Split(rawOptions, "|")
+	} else if strings.Contains(rawOptions, "\n") {
+		parts = strings.Split(rawOptions, "\n")
+	} else {
+		parts = []string{rawOptions}
+	}
+
+	var options []string
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		trimmed = reOptNumbering.ReplaceAllString(trimmed, "")
+		trimmed = strings.TrimSpace(trimmed)
+		if trimmed != "" {
+			options = append(options, trimmed)
+		}
+	}
+
+	return cleanText, options
+}

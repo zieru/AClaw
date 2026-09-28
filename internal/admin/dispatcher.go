@@ -116,6 +116,11 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		return a.handleDirectChat(c, lastPrompt)
 	}
 
+	// Interactive Option Callbacks
+	if strings.HasPrefix(data, "opt_") {
+		return a.handleOptionCallback(c, data)
+	}
+
 	// Model Switcher Callbacks
 	if data == "mod_main" || data == "mod_refresh" {
 		return c.EditOrSend(a.modelUI.RenderModelDashboard(c), a.modelUI.ModelMenuKeyboard(c.Sender().ID), tele.ModeHTML)

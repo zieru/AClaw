@@ -24,16 +24,31 @@ import (
 
 // handleDirectChat processes direct PM messages to the admin bot using the Agent Orchestrator
 func (a *AdminBot) handleDirectChat(c tele.Context, msg string) error {
-	return a.handleDirectChatWithMedia(c, msg, nil, 0)
+	return a.handleDirectChatWithMediaAndReply(c, nil, msg, nil, 0)
+}
+
+func (a *AdminBot) handleDirectChatWithReply(c tele.Context, replyTo *tele.Message, msg string) error {
+	return a.handleDirectChatWithMediaAndReply(c, replyTo, msg, nil, 0)
 }
 
 func (a *AdminBot) handleDirectChatWithMedia(c tele.Context, msg string, images []string, fileMB float64) error {
+	return a.handleDirectChatWithMediaAndReply(c, nil, msg, images, fileMB)
+}
+
+func (a *AdminBot) handleDirectChatWithMediaAndReply(c tele.Context, replyTo *tele.Message, msg string, images []string, fileMB float64) error {
 	_ = c.Notify(tele.Typing)
 	cancelMenu := &tele.ReplyMarkup{}
 	cancelBtn := cancelMenu.Data("🛑 Batalkan", "cancel_task")
 	cancelMenu.Inline(cancelMenu.Row(cancelBtn))
 
-	thinkingMsg, _ := a.bot.Reply(c.Message(), "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
+	var thinkingMsg *tele.Message
+	if replyTo != nil {
+		thinkingMsg, _ = a.bot.Reply(replyTo, "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
+	} else if c.Message() != nil {
+		thinkingMsg, _ = a.bot.Reply(c.Message(), "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
+	} else {
+		thinkingMsg, _ = a.bot.Send(c.Chat(), "🤔 <i>Sedang berpikir...</i>", tele.ModeHTML, cancelMenu)
+	}
 
 	policy := a.db.GetResolvedPolicy("admin", fmt.Sprintf("%d", c.Chat().ID))
 
@@ -121,7 +136,7 @@ func (a *AdminBot) handleDirectChatWithMedia(c tele.Context, msg string, images 
 		finalText = fmt.Sprintf("💭 <b>Proses Berpikir:</b>\n<blockquote expandable>%s</blockquote>\n\n%s", cleanThink, finalText)
 	}
 
-	return sendOrEditSplitMessage(c, thinkingMsg, finalText, resp.MediaFiles...)
+	return a.sendOrEditSplitMessage(c, thinkingMsg, finalText, resp.MediaFiles...)
 }
 
 func isTextDocument(filename string) bool {
@@ -244,41 +259,137 @@ func (a *AdminBot) handleDirectDocument(c tele.Context) error {
 	return a.handleDirectChatWithMedia(c, promptBuilder.String(), images, fileMB)
 }
 
-func sendSplitMessage(c tele.Context, text string) error {
-	return sendOrEditSplitMessage(c, nil, text)
+func (a *AdminBot) sendSplitMessage(c tele.Context, text string) error {
+	return a.sendOrEditSplitMessage(c, nil, text)
 }
 
-func sendOrEditSplitMessage(c tele.Context, thinkingMsg *tele.Message, text string, mediaFiles ...agent.MediaAttachment) error {
+func (a *AdminBot) handleOptionCallback(c tele.Context, data string) error {
+	optKey := strings.TrimPrefix(data, "opt_")
+	val, ok := a.pendingOptions.Load(optKey)
+	if !ok {
+		return c.Respond(&tele.CallbackResponse{Text: "⚠️ Pilihan sudah kadaluarsa atau tidak ditemukan."})
+	}
+	optPrompt, _ := val.(string)
+	_ = c.Respond(&tele.CallbackResponse{Text: "✅ Dipilih: " + optPrompt})
+
+	// Tampilkan pilihan pengguna di chat
+	chosenMsg, _ := a.bot.Send(c.Chat(), fmt.Sprintf("👉 <b>%s</b>", html.EscapeString(optPrompt)), tele.ModeHTML)
+
+	// Jalankan permintaan AI berdasarkan opsi yang dipilih
+	return a.handleDirectChatWithReply(c, chosenMsg, optPrompt)
+}
+
+func (a *AdminBot) sendOrEditSplitMessage(c tele.Context, thinkingMsg *tele.Message, text string, mediaFiles ...agent.MediaAttachment) error {
 	if strings.TrimSpace(text) == "" {
 		text = "(Tidak ada respon dari model)"
 	}
 
+	var menu *tele.ReplyMarkup
+	cleanText, options := tgformat.ExtractInteractiveOptions(text)
+	if len(options) > 0 {
+		text = cleanText
+		menu = &tele.ReplyMarkup{}
+		var rows []tele.Row
+		var currentRow []tele.Btn
+
+		count := 0
+		a.pendingOptions.Range(func(k, v interface{}) bool {
+			count++
+			return true
+		})
+		if count > 500 {
+			a.pendingOptions = sync.Map{}
+		}
+
+		for i, opt := range options {
+			optKey := fmt.Sprintf("%d_%d", time.Now().UnixNano()%10000000, i)
+			a.pendingOptions.Store(optKey, opt)
+
+			btnLabel := opt
+			if len(btnLabel) > 35 {
+				btnLabel = btnLabel[:32] + "..."
+			}
+			btn := menu.Data(btnLabel, "opt_"+optKey)
+
+			if len(btnLabel) > 18 || len(currentRow) == 2 {
+				if len(currentRow) > 0 {
+					rows = append(rows, menu.Row(currentRow...))
+					currentRow = nil
+				}
+			}
+			if len(btnLabel) > 18 {
+				rows = append(rows, menu.Row(btn))
+			} else {
+				currentRow = append(currentRow, btn)
+			}
+		}
+		if len(currentRow) > 0 {
+			rows = append(rows, menu.Row(currentRow...))
+		}
+		if len(rows) > 0 {
+			menu.Inline(rows...)
+		} else {
+			menu = nil
+		}
+	}
+
 	chunks := splitText(text, 4000)
 	if len(chunks) > 0 {
-		formattedFirst := tgformat.MarkdownToTelegramHTML(chunks[0])
 		if thinkingMsg != nil {
-			_, err := c.Bot().Edit(thinkingMsg, formattedFirst, tele.ModeHTML)
+			isLast := len(chunks) == 1
+			var firstOpts []interface{}
+			firstOpts = append(firstOpts, tele.ModeHTML)
+			if isLast && menu != nil {
+				firstOpts = append(firstOpts, menu)
+			}
+
+			formattedFirst := tgformat.MarkdownToTelegramHTML(chunks[0])
+			_, err := c.Bot().Edit(thinkingMsg, formattedFirst, firstOpts...)
 			if err != nil {
 				// Fallback to plain text edit if HTML fails
-				_, err = c.Bot().Edit(thinkingMsg, chunks[0])
+				var plainOpts []interface{}
+				if isLast && menu != nil {
+					plainOpts = append(plainOpts, menu)
+				}
+				_, err = c.Bot().Edit(thinkingMsg, chunks[0], plainOpts...)
 				if err != nil {
 					// Fallback to reply HTML, then plain text
-					if err := c.Reply(formattedFirst, tele.ModeHTML); err != nil {
-						_ = c.Reply(chunks[0])
+					if err := c.Reply(formattedFirst, firstOpts...); err != nil {
+						_ = c.Reply(chunks[0], plainOpts...)
 					}
 				}
 			}
-			for _, chunk := range chunks[1:] {
+			for i, chunk := range chunks[1:] {
+				isChunkLast := (i + 1) == len(chunks)-1
+				var chunkOpts []interface{}
+				chunkOpts = append(chunkOpts, tele.ModeHTML)
+				if isChunkLast && menu != nil {
+					chunkOpts = append(chunkOpts, menu)
+				}
 				formattedChunk := tgformat.MarkdownToTelegramHTML(chunk)
-				if err := c.Reply(formattedChunk, tele.ModeHTML); err != nil {
-					_ = c.Reply(chunk)
+				if err := c.Reply(formattedChunk, chunkOpts...); err != nil {
+					var plainChunkOpts []interface{}
+					if isChunkLast && menu != nil {
+						plainChunkOpts = append(plainChunkOpts, menu)
+					}
+					_ = c.Reply(chunk, plainChunkOpts...)
 				}
 			}
 		} else {
-			for _, chunk := range chunks {
+			for i, chunk := range chunks {
+				isChunkLast := i == len(chunks)-1
+				var chunkOpts []interface{}
+				chunkOpts = append(chunkOpts, tele.ModeHTML)
+				if isChunkLast && menu != nil {
+					chunkOpts = append(chunkOpts, menu)
+				}
 				formattedChunk := tgformat.MarkdownToTelegramHTML(chunk)
-				if err := c.Reply(formattedChunk, tele.ModeHTML); err != nil {
-					_ = c.Reply(chunk)
+				if err := c.Reply(formattedChunk, chunkOpts...); err != nil {
+					var plainChunkOpts []interface{}
+					if isChunkLast && menu != nil {
+						plainChunkOpts = append(plainChunkOpts, menu)
+					}
+					_ = c.Reply(chunk, plainChunkOpts...)
 				}
 			}
 		}

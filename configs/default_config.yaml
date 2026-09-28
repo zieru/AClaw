@@ -86,11 +86,24 @@ webshare:
 # MCP (Model Context Protocol) External Tools Configuration
 mcp_servers:
   - name: "g3a"
-    enabled: true
+    enabled: false
     transport: "stdio"        # "stdio" (subprocess otomatis) atau "sse" (HTTP)
     command: "/root/bin/g3a"  # Path executable g3a (misal: /root/bin/g3a atau /home/<user>/bin/g3a)
     args: ["mcp"]
     prefix: "g3a"            # Prefix tool: g3a_query_analytics, g3a_run_sql, g3a_describe_dataset, dll.
+
+  - name: "browser_use"
+    enabled: true
+    transport: "stdio"
+    command: "uv"
+    args: ["run", "--directory", "scripts/browser_use_mcp", "python", "server.py"]
+    prefix: "bu"
+    env:
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      OMNIROUTE_BASE_URL: "http://localhost:20128/v1"
+
 
 # OmniRoute Local Gateway Collaboration (:20128)
 omniroute:

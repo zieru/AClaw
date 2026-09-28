@@ -34,7 +34,8 @@ type AdminBot struct {
 	sessManager  *memory.SessionManager
 	proxyPool    *proxy.Pool
 	checkinSvc   *checkin.Service
-	activeTasks  sync.Map
+	activeTasks    sync.Map
+	pendingOptions sync.Map
 
 	modelUI      *ModelUI
 	limitsUI     *LimitsUI
