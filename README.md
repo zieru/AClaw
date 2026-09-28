@@ -65,10 +65,13 @@ Sistem ini menjamin **100% kompatibilitas dengan GLIBC versi lama** (`pypa/manyl
         --name goassistant-chrome \
         -p 127.0.0.1:9222:9222 \
         --restart=unless-stopped \
-        --shm-size=256m \
-        --memory=512m \
+        --shm-size=512m \
+        --memory=1g \
         zenika/alpine-chrome \
         --no-sandbox \
+        --disable-blink-features=AutomationControlled \
+        --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36" \
+        --window-size=1920,1080 \
         --remote-debugging-address=0.0.0.0 \
         --remote-debugging-port=9222
       ```
@@ -156,10 +159,13 @@ docker run -d \
   --name goassistant-chrome \
   -p 127.0.0.1:9222:9222 \
   --restart=unless-stopped \
-  --shm-size=256m \
-  --memory=512m \
+  --shm-size=512m \
+  --memory=1g \
   zenika/alpine-chrome \
   --no-sandbox \
+  --disable-blink-features=AutomationControlled \
+  --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36" \
+  --window-size=1920,1080 \
   --remote-debugging-address=0.0.0.0 \
   --remote-debugging-port=9222
 ```

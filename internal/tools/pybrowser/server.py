@@ -203,9 +203,17 @@ async def browser(
                         executable_path = p
                         break
 
+        default_ua = os.getenv(
+            "BROWSER_USER_AGENT",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+        )
         profile = BrowserProfile(
             headless=headless,
             disable_security=True,
+            user_agent=default_ua,
+            headers={
+                "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+            },
             cdp_url=cdp_endpoint,
             executable_path=executable_path if not cdp_endpoint else None,
         )
