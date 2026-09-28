@@ -21,57 +21,46 @@ fi
 uv sync
 
 echo "========================================================"
-echo " Checking Browser Engine / Chromium...                  "
+echo " Installing Playwright Chromium browser & dependencies... "
 echo "========================================================"
+# Try Playwright bundled chromium first
+INSTALL_OK=0
+if uv run playwright install --with-deps chromium 2>/dev/null; then
+    INSTALL_OK=1
+elif uv run playwright install chromium 2>/dev/null; then
+    INSTALL_OK=1
+fi
 
-# 1. Check if Docker CDP port 9222 is already running
-if nc -z 127.0.0.1 9222 2>/dev/null || curl -s http://127.0.0.1:9222/json/version &>/dev/null; then
-    echo "✅ Docker Chromium (CDP port 9222) is ACTIVE and READY!"
-    echo "   browser-use will automatically connect via cdp_url='http://127.0.0.1:9222'"
+if [ "$INSTALL_OK" -eq 1 ]; then
+    echo "✅ Playwright bundled Chromium installed successfully!"
 else
-    # 2. Try Playwright bundled chromium
-    INSTALL_OK=0
-    if uv run playwright install --with-deps chromium 2>/dev/null; then
-        INSTALL_OK=1
-    elif uv run playwright install chromium 2>/dev/null; then
-        INSTALL_OK=1
-    fi
+    echo "⚠️  Playwright bundled Chromium not supported on this OS (e.g. Debian 11 / older glibc)."
+    echo "🔍 Checking for system chromium..."
+    SYS_BROWSER=""
+    for b in "/usr/bin/chromium" "/usr/bin/chromium-browser" "/usr/bin/google-chrome" "/usr/bin/google-chrome-stable"; do
+        if [ -f "$b" ]; then
+            SYS_BROWSER="$b"
+            break
+        fi
+    done
 
-    if [ "$INSTALL_OK" -eq 1 ]; then
-        echo "✅ Playwright bundled Chromium installed successfully!"
+    if [ -n "$SYS_BROWSER" ]; then
+        echo "✅ System browser detected: $SYS_BROWSER"
+        echo "   browser-use will automatically use this system browser!"
     else
-        echo "⚠️  Playwright bundled Chromium not supported on this OS (e.g. Debian 11 / older glibc)."
-        echo "🔍 Checking for system chromium..."
-        SYS_BROWSER=""
-        for b in "/usr/bin/chromium" "/usr/bin/chromium-browser" "/usr/bin/google-chrome" "/usr/bin/google-chrome-stable"; do
-            if [ -f "$b" ]; then
-                SYS_BROWSER="$b"
-                break
+        echo "💡 To run browser-use on Debian 11 / older distros, install system chromium:"
+        echo "   sudo apt-get update && sudo apt-get install -y chromium"
+        if command -v apt-get &>/dev/null; then
+            if [ "$EUID" -eq 0 ]; then
+                echo "📥 Auto-installing system chromium via apt-get..."
+                apt-get update && apt-get install -y chromium || true
+            else
+                echo "👉 Please run with sudo: sudo apt-get update && sudo apt-get install -y chromium"
             fi
-        done
-
-        if [ -n "$SYS_BROWSER" ]; then
-            echo "✅ System browser detected: $SYS_BROWSER"
-            echo "   browser-use will automatically use this system browser!"
-        else
-            echo "💡 Pilihan 1: Pasang Chromium Native di Debian 11:"
-            echo "   sudo apt-get update && sudo apt-get install -y chromium"
-            echo ""
-            echo "💡 Pilihan 2: Jalankan Docker Chromium (zenika/alpine-chrome, ~180MB):"
-            echo "   docker run -d --name goassistant-chrome -p 127.0.0.1:9222:9222 --restart=unless-stopped --shm-size=256m --memory=512m zenika/alpine-chrome --no-sandbox --remote-debugging-address=0.0.0.0 --remote-debugging-port=9222"
         fi
     fi
 fi
-echo "========================================================"
-echo " Checking Camoufox Stealth Engine (Firefox Anti-Detect).."
-echo "========================================================"
-if uv run python -c "from camoufox.pkgman import installed_verstr; installed_verstr()" 2>/dev/null; then
-    echo "✅ Camoufox browser binary is installed and ready!"
-else
-    echo "📥 Fetching Camoufox browser binary for Cloudflare/WAF bypass..."
-    uv run python -m camoufox fetch || echo "⚠️ Camoufox fetch skipped or failed. Run 'uv run python -m camoufox fetch' manually."
-fi
 
 echo "========================================================"
-echo " Setup complete! Ready for Dual-Engine Browser on Linux. "
+echo " Setup complete! Ready for Browser-Use on Linux.        "
 echo "========================================================"

@@ -223,6 +223,108 @@ async def run_camoufox_task(
                 await asyncio.sleep(5)
                 title = await page.title()
 
+            # -----------------------------------------------------------------
+            # INTERACTIVE ACTION EXECUTOR (Form Filling, Typing, Clicking)
+            # -----------------------------------------------------------------
+            interactive_keywords = ["login", "masuk", "isi", "ketik", "klik", "submit", "daftar", "pesan", "booking", "cari", "username", "password", "email"]
+            wants_interaction = any(kw in clean_task.lower() for kw in interactive_keywords)
+
+            action_log = []
+            if wants_interaction:
+                import json
+                # Kumpulkan elemen form & interaktif yang terlihat di halaman
+                elements = await page.evaluate("""
+                    () => {
+                        const items = [];
+                        document.querySelectorAll('input:not([type="hidden"]), select, textarea, button, input[type="submit"]').forEach((el) => {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0) {
+                                items.push({
+                                    tag: el.tagName.toLowerCase(),
+                                    type: el.type || '',
+                                    id: el.id || '',
+                                    name: el.name || '',
+                                    placeholder: el.placeholder || '',
+                                    text: el.innerText ? el.innerText.trim().slice(0, 50) : (el.value || ''),
+                                });
+                            }
+                        });
+                        return items;
+                    }
+                """)
+
+                # Cek jika ada gambar captcha di halaman
+                captcha_detected = False
+                captcha_val = ""
+                try:
+                    captcha_elem = await page.query_selector('img[src*="captcha"], #captchaImg, img[alt*="captcha"]')
+                    if captcha_elem:
+                        captcha_detected = True
+                        captcha_bytes = await captcha_elem.screenshot()
+                        import base64
+                        b64_captcha = base64.b64encode(captcha_bytes).decode('utf-8')
+                        from langchain_core.messages import HumanMessage
+                        ocr_prompt = [
+                            HumanMessage(content=[
+                                {"type": "text", "text": "Baca teks/angka yang tertulis di gambar captcha ini dengan persis. Hanya jawab dengan teks/angka captchanya saja tanpa kata pengantar:"},
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_captcha}"}}
+                            ])
+                        ]
+                        ocr_resp = await llm.ainvoke(ocr_prompt)
+                        raw_c = ocr_resp.content if hasattr(ocr_resp, "content") else str(ocr_resp)
+                        captcha_val = re.sub(r'[^a-zA-Z0-9]', '', raw_c.strip())
+                except Exception:
+                    pass
+
+                captcha_info = f"Teks Captcha yang berhasil di-OCR: '{captcha_val}'" if captcha_val else "Tidak ada atau gagal membaca captcha"
+                planner_prompt = f"""Kamu adalah browser automation controller.
+Tugas Pengguna: {clean_task}
+Halaman Saat Ini: {title} ({url_to_open})
+Elemen Interaktif di Halaman:
+{json.dumps(elements, indent=2, ensure_ascii=False)}
+Status Captcha: {captcha_info}
+
+Berdasarkan tugas pengguna, tentukan urutan aksi interaksi form (fill, type, click).
+Balas HANYA dengan valid JSON array berisi daftar aksi, contoh:
+[
+  {{"action": "fill", "selector": "#username", "value": "user@example.com"}},
+  {{"action": "fill", "selector": "#password", "value": "rahasia123"}},
+  {{"action": "fill", "selector": "#captcha", "value": "{captcha_val}"}},
+  {{"action": "click", "selector": "#btnLogin"}}
+]
+PENTING:
+- Gunakan selector CSS spesifik (utamakan '#id' atau '[name=...]').
+- Jika tugas adalah login dan ada captcha, pastikan masukkan nilai captcha ke field captcha.
+- Jika tidak ada aksi yang diperlukan, balas dengan `[]`.
+"""
+                try:
+                    from langchain_core.messages import HumanMessage
+                    plan_resp = await llm.ainvoke([HumanMessage(content=planner_prompt)])
+                    raw_plan = plan_resp.content if hasattr(plan_resp, "content") else str(plan_resp)
+                    m = re.search(r'\[\s*\{.*\}\s*\]', raw_plan, re.DOTALL)
+                    if m:
+                        actions = json.loads(m.group(0))
+                        for act in actions:
+                            action_type = act.get("action", "").lower()
+                            sel = act.get("selector", "")
+                            val = act.get("value", "")
+                            if action_type in ["fill", "type"] and sel:
+                                await page.fill(sel, str(val))
+                                is_pwd = "pass" in sel.lower() or "pwd" in sel.lower()
+                                action_log.append(f"• Mengisi {sel}: {'••••••••' if is_pwd else val}")
+                            elif action_type == "click" and sel:
+                                await page.click(sel)
+                                action_log.append(f"• Mengklik {sel}")
+                                await asyncio.sleep(4)
+                            elif action_type == "press" and val:
+                                await page.keyboard.press(str(val))
+                                action_log.append(f"• Menekan tombol keyboard {val}")
+                        # Tunggu jeda setelah eksekusi seluruh aksi agar halaman baru termuat
+                        await asyncio.sleep(4)
+                        title = await page.title()
+                except Exception as plan_err:
+                    action_log.append(f"• Gagal mengeksekusi rencana aksi: {plan_err}")
+
             attachment_tag = ""
             if attach_screenshot:
                 try:
@@ -235,21 +337,24 @@ async def run_camoufox_task(
             page_text = await page.inner_text("body")
             truncated_text = page_text[:8000] if page_text else ""
 
+            action_log_str = "\n".join(action_log) if action_log else ""
             analysis_prompt = (
                 f"Kamu telah berhasil membuka situs {url_to_open} menggunakan Camoufox Stealth Engine (Firefox anti-detect).\n"
-                f"Judul Halaman: {title}\n"
+                f"Judul Halaman Sekarang: {title}\n"
                 f"Tugas Pengguna: {clean_task}\n\n"
-                f"Isi Konten Halaman yang Berhasil Dimuat:\n{truncated_text}\n\n"
-                f"Berikan jawaban dan laporan informatif yang lengkap, akurat, dan rapi sesuai instruksi pengguna."
+                f"Aksi yang Baru Saja Dijalankan:\n{action_log_str if action_log_str else 'Hanya membaca halaman'}\n\n"
+                f"Isi Konten Halaman Saat Ini (Setelah Aksi):\n{truncated_text}\n\n"
+                f"Jelaskan apakah login atau aksi tersebut berhasil/gagal berdasarkan isi halaman yang termuat, dan berikan laporan informatif yang rapi."
             )
             try:
                 from langchain_core.messages import HumanMessage
                 response = await llm.ainvoke([HumanMessage(content=analysis_prompt)])
                 summary = response.content if hasattr(response, "content") else str(response)
             except Exception:
-                summary = f"Berhasil membuka {url_to_open} (Judul: {title}).\nRingkasan isi halaman:\n{truncated_text[:800]}"
+                summary = f"Berhasil memproses {url_to_open} (Judul: {title}).\nRingkasan isi halaman:\n{truncated_text[:800]}"
 
-            return f"🦊 <b>[Camoufox Stealth Engine - {model_name}]</b>\n\n{summary}{attachment_tag}"
+            actions_header = f"📋 <b>Aksi yang Dijalankan:</b>\n{action_log_str}\n\n" if action_log_str else ""
+            return f"🦊 <b>[Camoufox Stealth Engine - {model_name}]</b>\n\n{actions_header}{summary}{attachment_tag}"
     except Exception as err:
         return f"❌ Gagal menjalankan Camoufox Stealth Engine: {err}"
 
