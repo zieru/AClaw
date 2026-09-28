@@ -123,11 +123,10 @@ func (s *browserSession) GetPage(ctx context.Context, targetURL string, waitSeco
 		}
 
 		if s.browser == nil {
-			isWindows := runtime.GOOS == "windows"
 			l := launcher.New().
 				Headless(true).
 				NoSandbox(true).
-				Leakless(!isWindows).
+				Leakless(false).
 				Set("disable-gpu").
 				Set("disable-dev-shm-usage").
 				Set("disable-software-rasterizer").

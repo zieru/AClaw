@@ -142,9 +142,18 @@ async def browser(
 
         llm, vision_enabled = resolve_llm_and_vision(model, use_vision)
         
+        # Auto-detect system Chromium/Chrome (especially useful on Debian 11 / older distros)
+        executable_path = os.getenv("CHROME_PATH")
+        if not executable_path:
+            for p in ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/snap/bin/chromium"]:
+                if os.path.exists(p):
+                    executable_path = p
+                    break
+
         profile = BrowserProfile(
             headless=headless,
             disable_security=True,
+            executable_path=executable_path,
         )
         
         agent = Agent(
