@@ -55,20 +55,34 @@ Sistem ini menjamin **100% kompatibilitas dengan GLIBC versi lama** (`pypa/manyl
     - **Otomatis Di-inject ke System Prompt**: Setiap pesan baru otomatis memuat preferensi dan profil pengguna tanpa konsumsi token berlebih.
     - **AI Function Calling (`user_memory`)**: AI dapat secara mandiri menyimpan catatan (`save`), mencari fakta (`search`), melihat daftar memori (`list`), menghapus (`delete`), dan membersihkan (`clear`) catatan pengguna saat diminta dalam percakapan.
 
-11. **🌐 Native Browser Automation (Go-Rod & CDP Stealth Engine)**
-    - Otomasi browser modern berbasis **Chrome DevTools Protocol (CDP)** menggunakan `go-rod` (100% Pure Go tanpa ketergantungan Node.js / Puppeteer / Playwright).
-    - Mendukung rendering JavaScript dinamis (React, Vue, SPA), klik tombol (`click`), pengisian form input keyboard native (`type`), eksekusi JavaScript (`eval_js`), scroll halaman (`scroll`), dan tangkapan layar web presisi tinggi (`screenshot`).
-    - **Memory & Zombie Guard**: Dilengkapi *leakless supervisor* untuk mencegah proses zombie, pembersihan otomatis direktori temporary profile/cache browser, pembatasan RAM heap V8 (max 256MB), serta auto-purge file screenshot lama (> 24 jam).
+11. **🌐 Native Browser Automation & Autonomous Web Agent (`browser-use` + CDP)**
+    - **Go-Rod & CDP Stealth Engine**: Otomasi browser modern berbasis **Chrome DevTools Protocol (CDP)** menggunakan `go-rod` (100% Pure Go tanpa ketergantungan Node.js / Puppeteer). Mendukung rendering JavaScript dinamis (React, Vue, SPA), klik tombol, form typing, evaluasi JS, scroll, dan screenshot.
+    - **Autonomous Web Agent (`browser-use`)**: Agen penjelajah web otonom cerdas berbasis Python `browser-use`. Secara mandiri mampu bernavigasi multi-halaman, mengekstrak data tiket/belanja/berita, mengisi form, dan mewarisi model AI aktif orchestrator secara dinamis.
+    - **Docker Alpine Chrome Container (~180MB)**:
+      Untuk deployment di server VPS Linux (Debian 10/11, Ubuntu, dsb.), jalankan Chromium ultra-ringan berbasis Alpine Linux yang mengekspos CDP di port 9222:
+      ```bash
+      docker run -d \
+        --name goassistant-chrome \
+        -p 127.0.0.1:9222:9222 \
+        --restart=unless-stopped \
+        --shm-size=256m \
+        --memory=512m \
+        zenika/alpine-chrome \
+        --no-sandbox \
+        --remote-debugging-address=0.0.0.0 \
+        --remote-debugging-port=9222
+      ```
+      *`browser-use` akan mendeteksi port `9222` secara otomatis tanpa perlu mendownload Chromium besar di OS host!*
 
 12. **📊 Audit Log & Token Tracker**
     - Pencatatan seluruh request/response, token in/out, latency, status, tools yang dipanggil, dan estimasi biaya.
     - Laporan ringkas `/stats`, `/logs`, dan fitur ekspor CSV langsung ke chat Telegram.
 
-12. **🚀 System Auto-Updater & One-Click Backup**
+13. **🚀 System Auto-Updater & One-Click Backup**
     - Perintah `/update` untuk cek dan update binary langsung dari GitHub Releases.
     - Perintah `/backup` langsung mengirimkan file archive `.zip` berisi database SQLite dan seluruh file `.md` ke Telegram Admin.
 
-13. **🔌 GoAssist HTTP API Server (Dynamic CLI Gateway)**
+14. **🔌 GoAssist HTTP API Server (Dynamic CLI Gateway)**
     - Server HTTP REST API internal (`configs/endpoints.yaml`) untuk meneruskan request ke binary CLI lokal dengan pagination otomatis.
 
 ---
@@ -134,6 +148,21 @@ go run ./cmd/goassistant -config configs/default_config.yaml
 make build-linux-static
 ```
 Binary statis akan dibuat di `dist/goassistant-linux-amd64` dan dapat langsung dijalankan di semua distribusi Linux (RHEL 8, CentOS 8, Ubuntu, Debian, Alpine) tanpa error glibc!
+
+### 3. Menjalankan Docker Alpine Chrome (Opsional / Direkomendasikan untuk VPS)
+Untuk mengaktifkan fitur Autonomous Web Agent (`browser-use`) di server VPS tanpa perlu instalasi browser berat di OS host:
+```bash
+docker run -d \
+  --name goassistant-chrome \
+  -p 127.0.0.1:9222:9222 \
+  --restart=unless-stopped \
+  --shm-size=256m \
+  --memory=512m \
+  zenika/alpine-chrome \
+  --no-sandbox \
+  --remote-debugging-address=0.0.0.0 \
+  --remote-debugging-port=9222
+```
 
 ---
 
