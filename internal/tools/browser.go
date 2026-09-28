@@ -37,6 +37,10 @@ func (b *BrowserAutomationTool) Parameters() ParametersSchema {
 	return ParametersSchema{
 		Type: "object",
 		Properties: map[string]ParameterProperty{
+			"task": {
+				Type:        "string",
+				Description: "Tugas penjelajahan web otonom yang ingin dilakukan (contoh: 'Cari tiket kereta di Traveloka').",
+			},
 			"action": {
 				Type:        "string",
 				Description: "Aksi browser yang ingin dilakukan: 'open' (buka URL dan bangun pohon DOM interaktif berindeks [0..N]), 'click' (klik elemen berdasarkan nomor index atau selector), 'type' (isi teks ke form input berdasarkan nomor index atau selector), 'press_key' (tekan tombol keyboard seperti Enter/Escape/Tab), 'scroll' (scroll halaman ke bawah/atas atau ke elemen index tertentu), 'screenshot' (ambil tangkapan layar .png dengan opsi Set-of-Marks berlabel angka), 'eval_js' (eksekusi JavaScript di halaman). Default: open.",
@@ -88,7 +92,7 @@ func (b *BrowserAutomationTool) Parameters() ParametersSchema {
 				Description: "Durasi tunggu render JavaScript dalam detik (1 - 10 detik). Default: 3.",
 			},
 		},
-		Required: []string{"action"},
+		Required: []string{},
 	}
 }
 
@@ -221,8 +225,28 @@ func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]int
 		}
 	}()
 
+	rawTask, _ := args["task"].(string)
+	task := strings.TrimSpace(rawTask)
+
 	rawURL, _ := args["url"].(string)
 	targetURL := strings.TrimSpace(rawURL)
+	if targetURL == "" && task != "" {
+		taskLower := strings.ToLower(task)
+		if strings.Contains(taskLower, "traveloka") {
+			targetURL = "https://www.traveloka.com"
+		} else if strings.Contains(taskLower, "tokopedia") {
+			targetURL = "https://www.tokopedia.com"
+		} else if strings.Contains(taskLower, "shopee") {
+			targetURL = "https://www.shopee.co.id"
+		} else if strings.Contains(taskLower, "kai") || strings.Contains(taskLower, "kereta") {
+			targetURL = "https://booking.kai.id"
+		} else if strings.Contains(taskLower, "wikipedia") {
+			targetURL = "https://id.wikipedia.org"
+		} else {
+			targetURL = "https://www.google.com"
+		}
+	}
+
 	if targetURL != "" && !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
 		targetURL = "https://" + targetURL
 	}

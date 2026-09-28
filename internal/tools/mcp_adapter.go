@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"goassistant/internal/config"
+	"goassistant/internal/tools/pybrowser"
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
@@ -28,7 +30,51 @@ func expandCommandPath(p string) string {
 			p = home
 		}
 	}
-	return os.ExpandEnv(p)
+	p = os.ExpandEnv(p)
+
+	// If command is uv, check common locations if not in current PATH
+	if p == "uv" || p == "uv.exe" {
+		if full, err := exec.LookPath(p); err == nil {
+			return full
+		}
+		home, _ := os.UserHomeDir()
+		candidates := []string{
+			filepath.Join(home, ".local", "bin", "uv"),
+			filepath.Join(home, ".local", "bin", "uv.exe"),
+			filepath.Join(home, ".cargo", "bin", "uv"),
+			filepath.Join(home, ".cargo", "bin", "uv.exe"),
+			"/usr/local/bin/uv",
+			"/usr/bin/uv",
+			"/bin/uv",
+			`C:\Program Files\uv\uv.exe`,
+		}
+		for _, c := range candidates {
+			if _, err := os.Stat(c); err == nil {
+				return c
+			}
+		}
+	}
+	return p
+}
+
+func resolveArgPath(arg string) string {
+	arg = expandCommandPath(arg)
+	if _, err := os.Stat(arg); err == nil {
+		return arg
+	}
+	// Try resolving relative to executable location
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		c1 := filepath.Join(exeDir, arg)
+		if _, err := os.Stat(c1); err == nil {
+			return c1
+		}
+		c2 := filepath.Join(filepath.Dir(exeDir), arg)
+		if _, err := os.Stat(c2); err == nil {
+			return c2
+		}
+	}
+	return arg
 }
 
 // MCPToolWrapper wraps an MCP server tool to satisfy the goassistant tools.Tool interface
@@ -221,7 +267,29 @@ func (m *MCPManager) StartAndRegister(ctx context.Context, reg *Registry) error 
 				envList = append(envList, fmt.Sprintf("%s=%s", k, v))
 			}
 			resolvedCmd := expandCommandPath(srvCfg.Command)
-			stdioTrans := transport.NewStdio(resolvedCmd, envList, srvCfg.Args...)
+			resolvedArgs := make([]string, len(srvCfg.Args))
+			for i, arg := range srvCfg.Args {
+				resolvedArgs[i] = resolveArgPath(arg)
+			}
+
+			// Auto-extract embedded python scripts if browser_use target directory or files are missing
+			if srvCfg.Name == "browser_use" {
+				targetDir := "scripts/browser_use_mcp"
+				for _, a := range resolvedArgs {
+					if strings.Contains(a, "browser_use_mcp") {
+						if fi, err := os.Stat(a); err == nil && fi.IsDir() {
+							targetDir = a
+							break
+						} else if filepath.Ext(a) == "" {
+							targetDir = a
+							break
+						}
+					}
+				}
+				_ = pybrowser.EnsureScriptsExtracted(targetDir)
+			}
+
+			stdioTrans := transport.NewStdio(resolvedCmd, envList, resolvedArgs...)
 			client = mcpclient.NewClient(stdioTrans)
 		default:
 			log.Printf("⚠️ [MCP] Transport tidak didukung '%s' untuk server '%s'", srvCfg.Transport, srvCfg.Name)
