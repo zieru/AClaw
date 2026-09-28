@@ -722,6 +722,17 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				}
 			})
 			toolCtx = WithActiveModelInfo(toolCtx, provToCall, modelToUse)
+			if tc.Name == "browser" {
+				if tc.Arguments == nil {
+					tc.Arguments = make(map[string]interface{})
+				}
+				if m, ok := tc.Arguments["model"].(string); !ok || m == "" || m == "auto" {
+					tc.Arguments["model"] = modelToUse
+				}
+				if p, ok := tc.Arguments["provider"].(string); !ok || p == "" {
+					tc.Arguments["provider"] = provToCall
+				}
+			}
 			toolOut, toolErr := o.toolRegistry.Execute(toolCtx, tc.Name, tc.Arguments)
 			if toolErr != nil {
 				toolOut = fmt.Sprintf("Error eksekusi tool %s: %v", tc.Name, toolErr)

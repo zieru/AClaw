@@ -393,6 +393,17 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 				subToolDesc := DescribeToolCall(tc.Name, tc.Arguments)
 				progress(fmt.Sprintf("Sub-agen @%s 🔍 %s", role, subToolDesc))
 			}
+			if tc.Name == "browser" {
+				if tc.Arguments == nil {
+					tc.Arguments = make(map[string]interface{})
+				}
+				if m, ok := tc.Arguments["model"].(string); !ok || m == "" || m == "auto" {
+					tc.Arguments["model"] = modelOverride
+				}
+				if p, ok := tc.Arguments["provider"].(string); !ok || p == "" {
+					tc.Arguments["provider"] = preferredProv
+				}
+			}
 			toolOut, toolErr := s.toolRegistry.Execute(subCtx, tc.Name, tc.Arguments)
 			if toolErr != nil {
 				toolOut = fmt.Sprintf("Error tool %s: %v", tc.Name, toolErr)

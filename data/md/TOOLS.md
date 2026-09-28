@@ -52,7 +52,7 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
      * `task` (string, wajib): Tugas lengkap yang ingin dicari atau dilakukan (contoh: `"Cari tiket kereta termurah Jakarta ke Bandung untuk tanggal 15 bulan depan di Traveloka"`).
      * `url` (string, opsional): Alamat URL spesifik jika ingin langsung menuju situs tertentu.
      * `headless` (boolean, opsional, default: `true`): Jika pengguna meminta *"tampilkan layarnya"* atau *"buka browsernya di desktop"*, berikan `headless=false`. Jendela browser Chromium akan otomatis terbuka di layar monitor pengguna!
-     * `model` (string, opsional): Model AI (default: otomatis menggunakan DeepSeek aktif dari database).
+     * `model` (string, opsional): Model AI (default: otomatis mewarisi model aktif orchestrator).
 
 
 8. **Pencarian Web AI (`tavily_search` / `web_search`)**:

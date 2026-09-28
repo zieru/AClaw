@@ -1,6 +1,7 @@
 import asyncio
 import os
 import shutil
+import socket
 import sys
 from datetime import datetime
 from typing import Optional
@@ -10,6 +11,14 @@ from dotenv import load_dotenv
 load_dotenv()
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 load_dotenv(os.path.join(project_root, ".env"))
+
+def is_cdp_available(host: str = "127.0.0.1", port: int = 9222, timeout: float = 0.5) -> bool:
+    """Cek apakah headless Chromium di Docker/CDP aktif dan siap menerima koneksi"""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 from mcp.server.fastmcp import FastMCP
 from browser_use.agent.service import Agent
@@ -37,74 +46,109 @@ def get_db_providers():
 def is_valid_key(val: Optional[str]) -> bool:
     return bool(val and not val.startswith("${") and val.strip() != "")
 
-def resolve_llm_and_vision(model_name: str, requested_vision: Optional[bool] = None):
+def resolve_llm_and_vision(
+    model_name: Optional[str] = None,
+    provider_name: Optional[str] = None,
+    requested_vision: Optional[bool] = None,
+    api_base: Optional[str] = None,
+    api_key: Optional[str] = None
+):
     """
-    Menyelesaikan LLM dan mode vision.
-    Untuk DeepSeek / model text-only, use_vision otomatis diatur ke False (hemat token, cepat, anti-error).
-    Mendukung auto-fallback ke database GoAssistant (dahl, HCNSEC, dll).
+    Menyelesaikan LLM dan mode vision secara dinamis sesuai orchestrator GoAssistant.
+    Jika model_name kosong atau 'auto', otomatis mewarisi model default provider aktif.
     """
-    model_lower = model_name.lower().strip()
-    
-    # 1. Tentukan apakah vision aktif
-    if requested_vision is not None:
-        use_vision = requested_vision
-    elif any(k in model_lower for k in ["deepseek", "qwen", "llama", "mistral", "gemma"]):
-        use_vision = False
-    else:
-        use_vision = True
+    db_provs = get_db_providers()
 
-    # 2. Cek API Key dari Environment Variable
+    # 1. Resolusi nama model
+    chosen_model = (model_name or "").strip()
+    if not chosen_model or chosen_model.lower() == "auto":
+        if db_provs:
+            chosen_model = db_provs[0][3] or "deepseek-chat"
+        else:
+            chosen_model = "deepseek-chat"
+
+    model_lower = chosen_model.lower()
+
+    # 2. Tentukan apakah vision aktif secara dinamis
+    if requested_vision is not None:
+        vision_enabled = requested_vision
+    elif any(k in model_lower for k in ["gemini", "gpt-4o", "gpt-5", "claude", "vl", "vision", "omni"]):
+        vision_enabled = True
+    else:
+        # DeepSeek, GLM, Qwen text, Llama, Mistral, dll (Text-DOM mode hemat token)
+        vision_enabled = False
+
+    # 3. Jika pemanggil menyertakan api_base dan api_key langsung
+    if is_valid_key(api_key) and api_base:
+        return ChatOpenAI(
+            model=chosen_model,
+            base_url=api_base,
+            api_key=api_key
+        ), vision_enabled
+
+    # 4. Cek kredensial dari Database SQLite GoAssistant (berdasarkan provider_name atau model)
+    if db_provs:
+        # Prioritaskan provider yang sesuai dengan provider_name
+        if provider_name:
+            p_low = provider_name.lower().strip()
+            for p in db_provs:
+                p_name, p_base, p_key, p_model = p
+                if p_low in p_name.lower() or p_name.lower() in p_low:
+                    if is_valid_key(p_key) and p_base:
+                        return ChatOpenAI(
+                            model=chosen_model,
+                            base_url=p_base,
+                            api_key=p_key
+                        ), vision_enabled
+
+        # Cari yang sesuai dengan model_name
+        for p in db_provs:
+            p_name, p_base, p_key, p_model = p
+            if any(k in model_lower for k in [p_name.lower(), (p_model or "").lower()]):
+                if is_valid_key(p_key) and p_base:
+                    return ChatOpenAI(
+                        model=chosen_model,
+                        base_url=p_base,
+                        api_key=p_key
+                    ), vision_enabled
+
+        # Fallback ke provider aktif pertama jika ada base & key
+        first_name, first_base, first_key, first_model = db_provs[0]
+        if is_valid_key(first_key) and first_base:
+            return ChatOpenAI(
+                model=chosen_model,
+                base_url=first_base,
+                api_key=first_key
+            ), vision_enabled
+
+    # 5. Cek API Key dari Environment Variable
     deepseek_key = os.getenv("DEEPSEEK_API_KEY")
     gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
 
+    if "gemini" in model_lower and is_valid_key(gemini_key):
+        return ChatGoogle(model=chosen_model, api_key=gemini_key), vision_enabled
+
     if "deepseek" in model_lower and is_valid_key(deepseek_key):
         return ChatOpenAI(
-            model=model_name,
+            model=chosen_model,
             base_url="https://api.deepseek.com",
             api_key=deepseek_key
-        ), use_vision
-
-    if "gemini" in model_lower and is_valid_key(gemini_key):
-        return ChatGoogle(model=model_name, api_key=gemini_key), use_vision
+        ), vision_enabled
 
     if is_valid_key(openai_key):
-        kwargs = {"model": model_name, "api_key": openai_key}
+        kwargs = {"model": chosen_model, "api_key": openai_key}
         if os.getenv("OPENAI_BASE_URL"):
             kwargs["base_url"] = os.getenv("OPENAI_BASE_URL")
-        return ChatOpenAI(**kwargs), use_vision
+        return ChatOpenAI(**kwargs), vision_enabled
 
-    # 3. Cari dari Database SQLite GoAssistant (misal: dahl, HCNSEC)
-    db_provs = get_db_providers()
-    if db_provs:
-        # Prioritaskan provider yang sesuai dengan model atau provider pertama
-        target_prov = db_provs[0]
-        for p in db_provs:
-            p_name, p_base, p_key, p_model = p
-            if "deepseek" in model_lower and ("dahl" in p_name.lower() or "deepseek" in p_name.lower() or "hcnsec" in p_name.lower()):
-                target_prov = p
-                break
-
-        p_name, p_base, p_key, p_model = target_prov
-        actual_model = model_name
-        # Jika model_name adalah generic "deepseek-chat" tapi DB memiliki model spesifik
-        if model_name in ["deepseek-chat", "default", ""] and p_model and p_model != "auto":
-            actual_model = p_model
-
-        if is_valid_key(p_key) and p_base:
-            return ChatOpenAI(
-                model=actual_model,
-                base_url=p_base,
-                api_key=p_key
-            ), use_vision
-
-    # 4. Fallback ke OmniRoute lokal (:20128)
+    # 6. Fallback ke OmniRoute lokal (:20128)
     omni_base = os.getenv("OMNIROUTE_BASE_URL", "http://localhost:20128/v1")
     return ChatOpenAI(
-        model=model_name,
+        model=chosen_model,
         base_url=omni_base,
         api_key=os.getenv("OMNIROUTE_API_KEY", "sk-omniroute")
-    ), use_vision
+    ), vision_enabled
 
 
 @mcp.tool(
@@ -113,21 +157,24 @@ def resolve_llm_and_vision(model_name: str, requested_vision: Optional[bool] = N
         "Browser otonom (autonomous web agent) berbasis Python browser-use. "
         "AI dapat menjelajahi web secara mandiri untuk mencari informasi, membandingkan harga/tiket (Traveloka, Tokopedia, dll), "
         "membuka URL, mengisi form formulir, mengekstrak data dari berbagai halaman web, dan menavigasi situs interaktif. "
-        "Mendukung model DeepSeek (Text-DOM mode hemat token), Gemini, dan OpenAI."
+        "Mendukung model apa pun (DeepSeek, GLM, Gemini, GPT-4o, Claude) dan otomatis mewarisi model aktif orchestrator."
     )
 )
 async def browser(
     task: str = "",
     url: Optional[str] = None,
     action: Optional[str] = None,
-    model: str = "deepseek-chat",
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    api_base: Optional[str] = None,
+    api_key: Optional[str] = None,
     headless: bool = True,
     max_steps: int = 15,
     use_vision: Optional[bool] = None,
     attach_screenshot: bool = True
 ) -> str:
     """
-    Eksekusi tugas browser otonom dengan kontrol dinamis dan dukungan DeepSeek.
+    Eksekusi tugas browser otonom dengan kontrol dinamis dan dukungan model multi-provider.
     """
     try:
         clean_task = (task or "").strip()
@@ -139,20 +186,28 @@ async def browser(
         elif url and url not in clean_task:
             clean_task = f"Buka {url} dan selesaikan tugas berikut: {clean_task}"
 
-        llm, vision_enabled = resolve_llm_and_vision(model, use_vision)
+        llm, vision_enabled = resolve_llm_and_vision(model, provider, use_vision, api_base, api_key)
         
-        # Auto-detect system Chromium/Chrome (especially useful on Debian 11 / older distros)
-        executable_path = os.getenv("CHROME_PATH")
-        if not executable_path:
-            for p in ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/snap/bin/chromium"]:
-                if os.path.exists(p):
-                    executable_path = p
-                    break
+        # 1. Cek apakah ada Docker Chromium CDP aktif di 127.0.0.1:9222 atau env CDP_URL
+        cdp_endpoint = os.getenv("CDP_URL")
+        if not cdp_endpoint and is_cdp_available("127.0.0.1", 9222):
+            cdp_endpoint = "http://127.0.0.1:9222"
+
+        # 2. Jika tidak ada CDP Docker, baru fallback ke binary browser lokal
+        executable_path = None
+        if not cdp_endpoint:
+            executable_path = os.getenv("CHROME_PATH")
+            if not executable_path:
+                for p in ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/snap/bin/chromium"]:
+                    if os.path.exists(p):
+                        executable_path = p
+                        break
 
         profile = BrowserProfile(
             headless=headless,
             disable_security=True,
-            executable_path=executable_path,
+            cdp_url=cdp_endpoint,
+            executable_path=executable_path if not cdp_endpoint else None,
         )
         
         # Ensure provider attribute exists for Agent telemetry and logging
