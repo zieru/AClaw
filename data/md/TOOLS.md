@@ -48,6 +48,9 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
    - **Dukungan Model DeepSeek (Mode Default & Sangat Hemat Token)**:
      * Tool ini **MENDUKUNG PENUH DEEPSEEK** (`deepseek-chat`, `deepseek-ai/DeepSeek-V4-Flash-0731`, `deepseek-reasoner`).
      * Sistem otomatis mengaktifkan mode *Text-DOM* (`use_vision=False`), sehingga **TIDAK MEMBUTUHKAN VISION MODEL**, menghemat 80-90% token, bebas error, dan memanfaatkan kecerdasan penalaran DeepSeek secara maksimal!
+   - **Dual-Engine Otomatis (Chromium CDP + Camoufox Stealth Anti-Bot)**:
+     * **Engine 1 (Chromium CDP Default)**: Cepat, efisien, dan cocok untuk 95% situs web (Traveloka, Tiket.com, berita, belanja).
+     * **Engine 2 (Camoufox Stealth Engine)**: Otomatis aktif saat membuka situs berproteksi Cloudflare Bot Management / Turnstile ketat (seperti `booking.kai.id`) untuk menembus blokir secara engine-level.
    - **ATURAN WAJIB KLARIFIKASI TARGET**: Jika kata kunci pencarian atau target URL ambigu atau diduga typo (contoh: "KAAKSES" yang diduga "KAI Access"), DILARANG langsung membuka browser. Tanyakan konfirmasi terlebih dahulu kepada pengguna dengan opsi interaktif [OPSI: ...].
    - **Parameter Tool `browser`**:
      * `task` (string, wajib): Tugas lengkap yang ingin dicari atau dilakukan (contoh: `"Cari tiket kereta termurah Jakarta ke Bandung untuk tanggal 15 bulan depan di Traveloka"`).

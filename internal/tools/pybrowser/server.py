@@ -157,12 +157,109 @@ def resolve_llm_and_vision(
     ), vision_enabled
 
 
+def is_camoufox_ready() -> bool:
+    """Cek apakah binary browser Camoufox sudah terpasang dan siap digunakan"""
+    try:
+        from camoufox.pkgman import installed_verstr
+        return installed_verstr() is not None
+    except Exception:
+        return False
+
+async def run_camoufox_task(
+    clean_task: str,
+    target_url: Optional[str],
+    llm,
+    model_name: Optional[str] = "Auto",
+    headless: bool = True,
+    attach_screenshot: bool = True,
+) -> str:
+    """
+    Eksekusi penjelajahan web stealth tingkat tinggi menggunakan Camoufox (Firefox C++ engine-level spoofing)
+    untuk membobol Cloudflare Turnstile, WAF, dan anti-bot pada situs seperti booking.kai.id.
+    """
+    import re
+    from camoufox.async_api import AsyncCamoufox
+
+    # Resolusi URL awal dari task jika url tidak diberikan langsung
+    url_to_open = target_url
+    if not url_to_open:
+        urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', clean_task)
+        if urls:
+            url_to_open = urls[0]
+            if not url_to_open.startswith("http"):
+                url_to_open = f"https://{url_to_open}"
+        elif "kai" in clean_task.lower():
+            url_to_open = "https://booking.kai.id/"
+        else:
+            clean_q = clean_task.replace("cari", "").replace("buka", "").strip()
+            url_to_open = f"https://duckduckgo.com/?q={clean_q}"
+
+    screenshot_dir = os.path.abspath(os.path.join(project_root, "data", "browser", "screenshots"))
+    os.makedirs(screenshot_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    screenshot_path = os.path.join(screenshot_dir, f"camoufox_{timestamp}.png")
+
+    try:
+        async with AsyncCamoufox(
+            headless=headless,
+            humanize=True,
+            geoip=True,
+        ) as browser:
+            page = await browser.new_page()
+            await page.set_viewport_size({"width": 1920, "height": 1080})
+
+            try:
+                await page.goto(url_to_open, wait_until="domcontentloaded", timeout=45000)
+            except Exception:
+                pass
+
+            # Berikan waktu jeda agar Cloudflare Turnstile menyelesaikan verifikasi otomatis
+            await asyncio.sleep(4)
+
+            # Cek jika masih di halaman challenge Turnstile, tunggu tambahan beberapa detik
+            title = await page.title()
+            content = await page.content()
+            if "Just a moment" in title or "Checking your browser" in content or "Attention Required" in title:
+                await asyncio.sleep(5)
+                title = await page.title()
+
+            attachment_tag = ""
+            if attach_screenshot:
+                try:
+                    await page.screenshot(path=screenshot_path, full_page=False)
+                    if os.path.exists(screenshot_path):
+                        attachment_tag = f"\n\n[ATTACH_FILE:{screenshot_path}|CAPTION:Tangkapan Layar Camoufox Stealth ({url_to_open})]"
+                except Exception:
+                    pass
+
+            page_text = await page.inner_text("body")
+            truncated_text = page_text[:8000] if page_text else ""
+
+            analysis_prompt = (
+                f"Kamu telah berhasil membuka situs {url_to_open} menggunakan Camoufox Stealth Engine (Firefox anti-detect).\n"
+                f"Judul Halaman: {title}\n"
+                f"Tugas Pengguna: {clean_task}\n\n"
+                f"Isi Konten Halaman yang Berhasil Dimuat:\n{truncated_text}\n\n"
+                f"Berikan jawaban dan laporan informatif yang lengkap, akurat, dan rapi sesuai instruksi pengguna."
+            )
+            try:
+                from langchain_core.messages import HumanMessage
+                response = await llm.ainvoke([HumanMessage(content=analysis_prompt)])
+                summary = response.content if hasattr(response, "content") else str(response)
+            except Exception:
+                summary = f"Berhasil membuka {url_to_open} (Judul: {title}).\nRingkasan isi halaman:\n{truncated_text[:800]}"
+
+            return f"🦊 <b>[Camoufox Stealth Engine - {model_name}]</b>\n\n{summary}{attachment_tag}"
+    except Exception as err:
+        return f"❌ Gagal menjalankan Camoufox Stealth Engine: {err}"
+
+
 @mcp.tool(
     name="browser",
     description=(
-        "Browser otonom (autonomous web agent) berbasis Python browser-use. "
-        "AI dapat menjelajahi web secara mandiri untuk mencari informasi, membandingkan harga/tiket (Traveloka, Tokopedia, dll), "
-        "membuka URL, mengisi form formulir, mengekstrak data dari berbagai halaman web, dan menavigasi situs interaktif. "
+        "Browser otonom (autonomous web agent) berbasis Python dengan Dual-Engine (Chromium + Camoufox Stealth). "
+        "AI dapat menjelajahi web secara mandiri untuk mencari informasi, membandingkan harga/tiket (Traveloka, KAI, Tokopedia, dll), "
+        "membuka URL, mengisi form formulir, mengekstrak data dari berbagai halaman web, dan menembus proteksi Cloudflare/WAF. "
         "Mendukung model apa pun (DeepSeek, GLM, Gemini, GPT-4o, Claude) dan otomatis mewarisi model aktif orchestrator."
     )
 )
@@ -177,10 +274,12 @@ async def browser(
     headless: bool = True,
     max_steps: int = 15,
     use_vision: Optional[bool] = None,
-    attach_screenshot: bool = True
+    attach_screenshot: bool = True,
+    engine: str = "auto"
 ) -> str:
     """
     Eksekusi tugas browser otonom dengan kontrol dinamis dan dukungan model multi-provider.
+    Mendukung Dual-Engine: Engine 1 (Chromium CDP default) & Engine 2 (Camoufox Stealth).
     """
     try:
         clean_task = (task or "").strip()
@@ -193,7 +292,26 @@ async def browser(
             clean_task = f"Buka {url} dan selesaikan tugas berikut: {clean_task}"
 
         llm, vision_enabled = resolve_llm_and_vision(model, provider, use_vision, api_base, api_key)
-        
+
+        # -------------------------------------------------------------
+        # DUAL-ENGINE ROUTING
+        # -------------------------------------------------------------
+        # Deteksi awal: Jika target adalah domain Cloudflare ketat (seperti KAI / Turnstile)
+        is_kai_or_cloudflare = bool(
+            (url and ("kai.id" in url.lower() or "cloudflare" in url.lower()))
+            or ("kai.id" in clean_task.lower() or "kai access" in clean_task.lower())
+        )
+        should_use_camoufox = (engine.lower() == "camoufox") or (engine.lower() == "auto" and is_kai_or_cloudflare and is_camoufox_ready())
+
+        if should_use_camoufox:
+            if is_camoufox_ready():
+                return await run_camoufox_task(clean_task, url, llm, model_name=model, headless=headless, attach_screenshot=attach_screenshot)
+            elif engine.lower() == "camoufox":
+                return "⚠️ Engine Camoufox belum terpasang binary-nya di VPS. Silakan jalankan 'uv run python -m camoufox fetch' di server."
+
+        # -------------------------------------------------------------
+        # ENGINE 1: Standard Chromium / Playwright / Docker CDP
+        # -------------------------------------------------------------
         # 1. Cek apakah ada Docker Chromium CDP aktif di 127.0.0.1:9222 atau env CDP_URL
         cdp_endpoint = os.getenv("CDP_URL")
         if not cdp_endpoint and is_cdp_available("127.0.0.1", 9222):
@@ -259,6 +377,16 @@ async def browser(
         history = await agent.run(max_steps=max_steps)
         final_result = history.final_result() or "Tugas penjelajahan web selesai tanpa kesimpulan teks khusus."
         
+        # Auto-fallback: Jika Engine 1 terblokir Cloudflare WAF, otomatis oper ke Engine 2 (Camoufox)!
+        is_blocked = (
+            "you have been blocked" in final_result.lower()
+            or "unable to access kai.id" in final_result.lower()
+            or "attention required! | cloudflare" in final_result.lower()
+            or "just a moment..." in final_result.lower()
+        )
+        if is_blocked and is_camoufox_ready() and engine.lower() != "chromium":
+            return await run_camoufox_task(clean_task, url, llm, model_name=model, headless=headless, attach_screenshot=attach_screenshot)
+
         # Ambil screenshot halaman terakhir jika diminta dan tersedia
         attachment_tag = ""
         if attach_screenshot:
@@ -277,6 +405,9 @@ async def browser(
                         attachment_tag = f"\n\n[ATTACH_FILE:{last_shot}|CAPTION:Tangkapan Layar Hasil Browser-Use ({model})]"
                 
         mode_str = "Vision" if vision_enabled else "Text-DOM (DeepSeek Mode)"
+        if is_blocked and not is_camoufox_ready():
+            final_result += "\n\n💡 <i>Tips: Halaman ini terproteksi Cloudflare Bot Management. Anda dapat mengaktifkan Engine Camoufox di VPS dengan menjalankan: <code>uv run python -m camoufox fetch</code></i>"
+
         return f"🌐 <b>[Browser-Use Autonomous Agent - {model} ({mode_str})]</b>\n\n{final_result}{attachment_tag}"
         
     except Exception as err:

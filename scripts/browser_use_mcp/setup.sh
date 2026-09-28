@@ -62,7 +62,16 @@ else
         fi
     fi
 fi
+echo "========================================================"
+echo " Checking Camoufox Stealth Engine (Firefox Anti-Detect).."
+echo "========================================================"
+if uv run python -c "from camoufox.pkgman import installed_verstr; installed_verstr()" 2>/dev/null; then
+    echo "✅ Camoufox browser binary is installed and ready!"
+else
+    echo "📥 Fetching Camoufox browser binary for Cloudflare/WAF bypass..."
+    uv run python -m camoufox fetch || echo "⚠️ Camoufox fetch skipped or failed. Run 'uv run python -m camoufox fetch' manually."
+fi
 
 echo "========================================================"
-echo " Setup complete! Ready for Browser-Use on Linux.        "
+echo " Setup complete! Ready for Dual-Engine Browser on Linux. "
 echo "========================================================"
