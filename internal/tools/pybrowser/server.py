@@ -23,7 +23,13 @@ def is_cdp_available(host: str = "127.0.0.1", port: int = 9222, timeout: float =
 from mcp.server.fastmcp import FastMCP
 from browser_use.agent.service import Agent
 from browser_use.browser.profile import BrowserProfile
+from browser_use.browser.session import BrowserSession
 from browser_use.llm import ChatOpenAI, ChatGoogle, ChatDeepSeek
+try:
+    from playwright_stealth import Stealth
+    _STEALTH_AVAILABLE = True
+except ImportError:
+    _STEALTH_AVAILABLE = False
 
 mcp = FastMCP("browser-use-server")
 
@@ -225,10 +231,27 @@ async def browser(
             except Exception:
                 pass
 
+        # Terapkan playwright-stealth pada BrowserContext jika tersedia
+        # Stealth patches: navigator.webdriver, chrome runtime, plugins, dll agar tidak terdeteksi Cloudflare/WAF
+        browser_session = BrowserSession(browser_profile=profile)
+        if _STEALTH_AVAILABLE:
+            try:
+                await browser_session.start()
+                ctx = getattr(browser_session, "context", None)
+                if ctx is not None:
+                    stealth = Stealth(
+                        navigator_languages_override=("id-ID", "id"),
+                        navigator_platform_override="Win32",
+                        navigator_user_agent_override=default_ua,
+                    )
+                    await stealth.apply_stealth_async(ctx)
+            except Exception:
+                pass
+
         agent = Agent(
             task=clean_task,
             llm=llm,
-            browser_profile=profile,
+            browser_session=browser_session,
             max_actions_per_step=3,
             use_vision=vision_enabled
         )
