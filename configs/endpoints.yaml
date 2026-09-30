@@ -431,9 +431,38 @@ endpoints:
     timeout_seconds: 30
     defaults:
       output: "json"
-      select: '"BISMOD" as bismod, coalesce("Mitra", ''Lainnya'') as nama_mitra, regional, sum(total) as total, round(avg(epoch(average_waiting)) / 60.0, 2) as avg_waiting_minutes, round(avg(epoch(average_serving)) / 60.0, 2) as avg_serving_minutes'
-      group-by: '"BISMOD", coalesce("Mitra", ''Lainnya''), regional'
-      order-by: 'total desc'
+      select: '"BISMOD" as bismod, case when upper("Mitra") like ''%INFOMEDIA%'' then ''PT. Infomedia Nusantara'' when upper("Mitra") like ''%KINARYA%'' then ''PT. Kinarya Selaras Solusi'' else coalesce("Mitra", ''Lainnya'') end as nama_mitra, regional, sum(total) as total, round(avg(epoch(average_waiting)) / 60.0, 2) as avg_waiting_minutes, round(avg(epoch(average_serving)) / 60.0, 2) as avg_serving_minutes'
+      group-by: '"BISMOD", (case when upper("Mitra") like ''%INFOMEDIA%'' then ''PT. Infomedia Nusantara'' when upper("Mitra") like ''%KINARYA%'' then ''PT. Kinarya Selaras Solusi'' else coalesce("Mitra", ''Lainnya'') end), regional'
+  # ----------------------------------------------------------------------------
+  # 14b. Duration Performance Summary (Waiting & Serving Profiling by Regional)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/performance-duration-summary"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: 'regional, sum(total) as total_visit, round(avg(epoch(average_waiting)) / 60.0, 2) as avg_waiting_minutes, round(avg(epoch(average_serving)) / 60.0, 2) as avg_serving_minutes, sum(case when epoch(average_waiting) <= 900 then total else 0 end) as wait_under_15m, sum(case when epoch(average_waiting) > 900 then total else 0 end) as wait_over_15m, sum(case when epoch(average_waiting) > 3600 then total else 0 end) as wait_over_1h, sum(case when epoch(average_waiting) > 7200 then total else 0 end) as wait_over_2h, sum(case when epoch(average_waiting) > 900 and epoch(average_waiting) <= 3600 then total else 0 end) as wait_15m_to_1h, sum(case when epoch(average_waiting) > 3600 and epoch(average_waiting) <= 7200 then total else 0 end) as wait_1h_to_2h, sum(case when epoch(average_serving) <= 30 then total else 0 end) as serve_under_30s, sum(case when epoch(average_serving) <= 60 then total else 0 end) as serve_under_60s, sum(case when epoch(average_serving) <= 300 then total else 0 end) as serve_under_5m, sum(case when epoch(average_serving) > 300 then total else 0 end) as serve_over_5m, sum(case when epoch(average_serving) > 900 then total else 0 end) as serve_over_15m, sum(case when epoch(average_serving) > 3600 then total else 0 end) as serve_over_1h, sum(case when epoch(average_serving) > 30 and epoch(average_serving) <= 60 then total else 0 end) as serve_30s_to_60s, sum(case when epoch(average_serving) > 60 and epoch(average_serving) <= 300 then total else 0 end) as serve_1m_to_5m, sum(case when epoch(average_serving) > 300 and epoch(average_serving) <= 900 then total else 0 end) as serve_5m_to_15m, sum(case when epoch(average_serving) > 900 and epoch(average_serving) <= 3600 then total else 0 end) as serve_15m_to_1h'
+      group-by: 'regional'
+      order-by: 'regional asc'
+
+  # ----------------------------------------------------------------------------
+  # 14c. Duration Performance Detail (Waiting & Serving Profiling by Territory & GraPARI)
+  # ----------------------------------------------------------------------------
+  - path: "/api/visit/performance-duration-detail"
+    method: "GET"
+    binary: "g3a"
+    command: "/home/zieru/Onedrive/antreaja/visit_parquet"
+    type: "regular"
+    timeout_seconds: 30
+    defaults:
+      output: "json"
+      select: 'territory, "Nama Grapari" as grapari, regional, sum(total) as total_visit, round(avg(epoch(average_waiting)) / 60.0, 2) as avg_waiting_minutes, round(avg(epoch(average_serving)) / 60.0, 2) as avg_serving_minutes, sum(case when epoch(average_waiting) <= 900 then total else 0 end) as wait_under_15m, sum(case when epoch(average_waiting) > 900 then total else 0 end) as wait_over_15m, sum(case when epoch(average_waiting) > 3600 then total else 0 end) as wait_over_1h, sum(case when epoch(average_waiting) > 7200 then total else 0 end) as wait_over_2h, sum(case when epoch(average_waiting) > 900 and epoch(average_waiting) <= 3600 then total else 0 end) as wait_15m_to_1h, sum(case when epoch(average_waiting) > 3600 and epoch(average_waiting) <= 7200 then total else 0 end) as wait_1h_to_2h, sum(case when epoch(average_serving) <= 30 then total else 0 end) as serve_under_30s, sum(case when epoch(average_serving) <= 60 then total else 0 end) as serve_under_60s, sum(case when epoch(average_serving) <= 300 then total else 0 end) as serve_under_5m, sum(case when epoch(average_serving) > 300 then total else 0 end) as serve_over_5m, sum(case when epoch(average_serving) > 900 then total else 0 end) as serve_over_15m, sum(case when epoch(average_serving) > 3600 then total else 0 end) as serve_over_1h, sum(case when epoch(average_serving) > 30 and epoch(average_serving) <= 60 then total else 0 end) as serve_30s_to_60s, sum(case when epoch(average_serving) > 60 and epoch(average_serving) <= 300 then total else 0 end) as serve_1m_to_5m, sum(case when epoch(average_serving) > 300 and epoch(average_serving) <= 900 then total else 0 end) as serve_5m_to_15m, sum(case when epoch(average_serving) > 900 and epoch(average_serving) <= 3600 then total else 0 end) as serve_15m_to_1h'
+      group-by: 'territory, "Nama Grapari", regional'
+      order-by: 'total_visit desc'
+
 
   # ============================================================================
   # ============================================================================
@@ -563,8 +592,8 @@ endpoints:
     defaults:
       output: "json"
       where: "upper(region) like 'SUMBA%'"
-      select: '"BISMOD" as bismod, coalesce("Mitra Pengelola", ''Lainnya'') as nama_mitra, region as regional, sum(total_msisdn) as total, sum(total_msisdn_unik) as total_unik'
-      group-by: '"BISMOD", coalesce("Mitra Pengelola", ''Lainnya''), region'
+      select: '"BISMOD" as bismod, case when upper("Mitra Pengelola") like ''%INFOMEDIA%'' then ''PT. Infomedia Nusantara'' when upper("Mitra Pengelola") like ''%KINARYA%'' then ''PT. Kinarya Selaras Solusi'' else coalesce("Mitra Pengelola", ''Lainnya'') end as nama_mitra, region as regional, sum(total_msisdn) as total, sum(total_msisdn_unik) as total_unik'
+      group-by: '"BISMOD", (case when upper("Mitra Pengelola") like ''%INFOMEDIA%'' then ''PT. Infomedia Nusantara'' when upper("Mitra Pengelola") like ''%KINARYA%'' then ''PT. Kinarya Selaras Solusi'' else coalesce("Mitra Pengelola", ''Lainnya'') end), region'
       order-by: 'total desc'
 
   # ----------------------------------------------------------------------------
