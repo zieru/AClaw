@@ -15,6 +15,7 @@ import (
 	"goassistant/internal/provider"
 	"goassistant/internal/proxy"
 	"goassistant/internal/storage"
+	"goassistant/internal/tgprompt"
 	"goassistant/internal/tools"
 	"goassistant/internal/webadmin"
 
@@ -51,10 +52,10 @@ type AdminBot struct {
 	memoryUI     *MemoryUI
 	auditUI      *AuditUI
 	updateUI     *UpdateUI
-	tavilyUI     *TavilyUI
 	checkinUI    *CheckinUI
 	topicUI      *TopicUI
 	webAdminUI   *WebAdminUI
+	promptManager *tgprompt.PromptManager
 }
 
 func NewAdminBot(
@@ -119,9 +120,9 @@ func NewAdminBot(
 		memoryUI:     NewMemoryUI(db, mm, sm),
 		auditUI:      NewAuditUI(db),
 		updateUI:     NewUpdateUI(cfg, bot),
-		tavilyUI:     NewTavilyUI(db, cfg),
 		checkinUI:    NewCheckinUI(db, checkinSvc),
 		topicUI:      NewTopicUI(db, sm, bot),
+		promptManager: tgprompt.NewPromptManager(bot),
 	}
 
 	a.registerRoutes()
@@ -140,6 +141,11 @@ func (a *AdminBot) Stop() {
 // Bot returns the telebot instance
 func (a *AdminBot) Bot() *tele.Bot {
 	return a.bot
+}
+
+// PromptManager returns the underlying tgprompt.PromptManager instance
+func (a *AdminBot) PromptManager() *tgprompt.PromptManager {
+	return a.promptManager
 }
 
 // SetWebAdminServer connects the WebAdminServer instance for dynamic control

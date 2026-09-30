@@ -3,7 +3,10 @@ package admin
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
+	"goassistant/internal/tools"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -33,13 +36,17 @@ func (a *AdminBot) handleNew(c tele.Context) error {
 	a.channelUI.CancelWizard(userID)
 	a.cronUI.CancelWizard(userID)
 	a.mdUI.CancelWizard(userID)
-	a.tavilyUI.CancelSession(userID)
 	a.modelUI.CancelSession(userID)
 	a.checkinUI.CancelSession(userID)
 	a.topicUI.CancelSession(userID)
 	if a.webAdminUI != nil {
 		a.webAdminUI.CancelSession(userID)
 	}
+	if a.promptManager != nil {
+		a.promptManager.Cancel(c.Chat().ID, c.Sender().ID)
+	}
+	tools.ClearSudoSession(fmt.Sprintf("%d", c.Chat().ID))
+	tools.ClearSudoSession(fmt.Sprintf("%d", c.Sender().ID))
 
 	// 3. Reset database session history for active topic in this chat
 	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
@@ -69,11 +76,13 @@ func (a *AdminBot) handleStop(c tele.Context) error {
 	a.channelUI.CancelWizard(userID)
 	a.cronUI.CancelWizard(userID)
 	a.mdUI.CancelWizard(userID)
-	a.tavilyUI.CancelSession(userID)
 	a.modelUI.CancelSession(userID)
 	a.checkinUI.CancelSession(userID)
 	if a.webAdminUI != nil {
 		a.webAdminUI.CancelSession(userID)
+	}
+	if a.promptManager != nil {
+		a.promptManager.Cancel(c.Chat().ID, userID)
 	}
 
 	var text string
@@ -86,6 +95,54 @@ func (a *AdminBot) handleStop(c tele.Context) error {
 	}
 
 	return c.Send(text, tele.ModeHTML)
+}
+
+func (a *AdminBot) handleSetSudo(c tele.Context) error {
+	msg := c.Message()
+	payload := ""
+	if msg != nil {
+		payload = strings.TrimSpace(msg.Payload)
+	}
+	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
+	userIDStr := fmt.Sprintf("%d", c.Sender().ID)
+
+	// If password provided directly via command payload: e.g. /setsudo <password>
+	if payload != "" {
+		_ = a.bot.Delete(msg) // Delete user message immediately for security
+		tools.SetSudoSession(chatIDStr, payload)
+		tools.SetSudoSession(userIDStr, payload)
+		return c.Send("✅ <b>Password Sudo Disimpan</b>\n\nPassword sudo berhasil disimpan di memori aman (aktif selama 5 menit). Pesan Anda telah dihapus demi keamanan.", tele.ModeHTML)
+	}
+
+	if a.promptManager == nil {
+		return c.Send("⚠️ Dialog password belum aktif.", tele.ModeHTML)
+	}
+
+	// Interactive password prompt
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+
+		pass, finish, err := a.promptManager.PromptPassword(ctx, c.Chat().ID, c.Sender().ID, "Atur Password Sudo Server", "Password akan disimpan di memori aman selama 5 menit untuk eksekusi perintah administratif.")
+		if err != nil {
+			return
+		}
+		if finish != nil {
+			defer finish()
+		}
+		if pass != "" {
+			tools.SetSudoSession(chatIDStr, pass)
+			tools.SetSudoSession(userIDStr, pass)
+			_, _ = a.bot.Send(c.Chat(), "✅ <b>Password Sudo Disimpan</b>\n\nPassword sudo berhasil disimpan di memori aman (aktif selama 5 menit). Anda kini dapat meminta AI menjalankan perintah administratif tanpa perlu memasukkan password lagi.", tele.ModeHTML)
+		}
+	}()
+	return nil
+}
+
+func (a *AdminBot) handleClearSudo(c tele.Context) error {
+	tools.ClearSudoSession(fmt.Sprintf("%d", c.Chat().ID))
+	tools.ClearSudoSession(fmt.Sprintf("%d", c.Sender().ID))
+	return c.Send("🔒 <b>Sesi Sudo Dibersihkan</b>\n\nPassword sudo yang tersimpan di memori telah dihapus.", tele.ModeHTML)
 }
 
 func (a *AdminBot) handleHelp(c tele.Context) error {

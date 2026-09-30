@@ -36,7 +36,7 @@ func (m *UserMemoryTool) Name() string {
 }
 
 func (m *UserMemoryTool) Description() string {
-	return "Tool untuk menyimpan, mencari, melihat, dan menghapus catatan jangka panjang tentang preferensi pengguna, fakta profil, to-do list, catatan proyek, atau informasi penting lainnya ke database lokal goassistant."
+	return "Tool untuk menyimpan, mencari, melihat, dan menghapus catatan jangka panjang tentang preferensi pengguna, fakta profil, to-do list, catatan proyek, atau informasi penting lainnya ke OmniRoute Memory."
 }
 
 func (m *UserMemoryTool) Parameters() ParametersSchema {

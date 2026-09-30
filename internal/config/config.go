@@ -87,12 +87,6 @@ type AppConfig struct {
 		GitHubRepo string `yaml:"github_repo"`
 	} `yaml:"updater"`
 
-	Tavily struct {
-		APIKey      string `yaml:"api_key"`
-		SearchDepth string `yaml:"search_depth"`
-		MaxResults  int    `yaml:"max_results"`
-	} `yaml:"tavily"`
-
 	Webshare struct {
 		APIKey              string   `yaml:"api_key"`
 		Mode                string   `yaml:"mode"` // direct or backbone
@@ -187,9 +181,6 @@ func Load(configPath string) (*AppConfig, error) {
 
 		cfg.Updater.GitHubRepo = "zieru/AClaw"
 
-		cfg.Tavily.SearchDepth = "basic"
-		cfg.Tavily.MaxResults = 5
-
 		cfg.Webshare.Mode = "direct"
 		cfg.Webshare.Protocol = "http"
 		cfg.Webshare.GroupName = "webshare"
@@ -218,9 +209,6 @@ func Load(configPath string) (*AppConfig, error) {
 			}
 		}
 
-		if envTavily := os.Getenv("TAVILY_API_KEY"); envTavily != "" {
-			cfg.Tavily.APIKey = envTavily
-		}
 		if envWebshare := os.Getenv("WEBSHARE_API_KEY"); envWebshare != "" {
 			cfg.Webshare.APIKey = envWebshare
 		}

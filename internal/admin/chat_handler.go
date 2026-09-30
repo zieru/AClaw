@@ -19,6 +19,7 @@ import (
 	"goassistant/internal/config"
 	"goassistant/internal/provider"
 	"goassistant/internal/tgformat"
+	"goassistant/internal/tools"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -75,6 +76,11 @@ func (a *AdminBot) handleDirectChatWithMediaAndReply(c tele.Context, replyTo *te
 		a.activeTasks.Delete(c.Chat().ID)
 		cancel()
 	}()
+
+	if a.promptManager != nil {
+		prompter := a.promptManager.ForUser(c.Chat().ID, c.Sender().ID)
+		ctx = tools.WithPasswordPrompter(ctx, prompter)
+	}
 
 	resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{
 		ChannelType:    "telegram_admin",

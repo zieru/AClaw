@@ -9,7 +9,7 @@ func TestToolResultCache(t *testing.T) {
 	cache := GetGlobalToolCache()
 	cache.Flush()
 
-	toolName := "tavily_search"
+	toolName := "web_search"
 	args := map[string]interface{}{
 		"query": "berita golang terbaru",
 	}

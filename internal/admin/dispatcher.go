@@ -24,6 +24,13 @@ func (a *AdminBot) registerDispatcher() {
 }
 
 func (a *AdminBot) handleTextMessage(c tele.Context) error {
+	// 0. Intercept secure password prompt input before anything else (zero-leakage to AI)
+	if a.promptManager != nil {
+		if handled, err := a.promptManager.HandleTextMessage(c); handled {
+			return err
+		}
+	}
+
 	// 1. Check Provider Wizard dialog
 	if handled, err := a.wizard.HandleTextMessage(c); handled {
 		return err
@@ -54,12 +61,7 @@ func (a *AdminBot) handleTextMessage(c tele.Context) error {
 		return err
 	}
 
-	// 7. Check Tavily Config dialog
-	if handled, err := a.tavilyUI.HandleTextMessage(c); handled {
-		return err
-	}
-
-	// 8. Check Model Selection dialog (Combos, Providers, Models)
+	// 7. Check Model Selection dialog (Combos, Providers, Models)
 	if handled, err := a.modelUI.HandleTextMessage(c); handled {
 		return err
 	}

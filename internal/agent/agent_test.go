@@ -270,7 +270,7 @@ func TestProcessMessage_TimeoutAuditLog(t *testing.T) {
 	defer db.Close()
 
 	sm := memory.NewSessionManager(db)
-	mm := memory.NewManager(db)
+	mm := memory.NewManager(nil)
 	loader := NewMDLoader(tempDir)
 	pb := NewPromptBuilder(loader)
 	tr := tools.GetRegistry()
@@ -359,7 +359,7 @@ func TestProcessMessage_CanceledImmediateExit(t *testing.T) {
 	defer db.Close()
 
 	sm := memory.NewSessionManager(db)
-	mm := memory.NewManager(db)
+	mm := memory.NewManager(nil)
 	loader := NewMDLoader(tempDir)
 	pb := NewPromptBuilder(loader)
 	tr := tools.GetRegistry()

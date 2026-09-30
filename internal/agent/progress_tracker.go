@@ -115,7 +115,7 @@ func DescribeToolCall(name string, args map[string]interface{}) string {
 	case "get_current_time":
 		return "Mengecek waktu & tanggal sistem"
 
-	case "tavily_search", "web_search":
+	case "web_search":
 		q := getString("query")
 		if q != "" {
 			return fmt.Sprintf("Mencari info web: %s", truncate(q, 30))

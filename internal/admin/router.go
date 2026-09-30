@@ -36,6 +36,9 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle("/clear", a.handleNew)
 	a.bot.Handle("/stop", a.handleStop)
 	a.bot.Handle("/cancel", a.handleStop)
+	a.bot.Handle("/setsudo", a.handleSetSudo)
+	a.bot.Handle("/password", a.handleSetSudo)
+	a.bot.Handle("/clearsudo", a.handleClearSudo)
 
 	// Web Admin Commands
 	a.bot.Handle("/webadmin", func(c tele.Context) error {
@@ -157,17 +160,6 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle(&tele.Btn{Unique: "menu_tools"}, func(c tele.Context) error {
 		return c.EditOrSend(a.channelUI.RenderToolsList(), a.channelUI.ChannelsKeyboard(), tele.ModeHTML)
 	})
-	a.bot.Handle(&tele.Btn{Unique: "menu_tavily"}, a.tavilyUI.HandleMenu)
-	a.bot.Handle(&tele.Btn{Unique: "tav_toggle_depth"}, a.tavilyUI.HandleToggleDepth)
-	a.bot.Handle(&tele.Btn{Unique: "tav_cycle_max"}, a.tavilyUI.HandleCycleMaxResults)
-	a.bot.Handle(&tele.Btn{Unique: "tav_set_key"}, a.tavilyUI.PromptSetKey)
-	a.bot.Handle(&tele.Btn{Unique: "tav_test_query"}, a.tavilyUI.PromptTestQuery)
-	a.bot.Handle(&tele.Btn{Unique: "tav_cancel"}, func(c tele.Context) error {
-		a.tavilyUI.CancelSession(c.Sender().ID)
-		txt, kb := a.tavilyUI.RenderTavilyDashboard()
-		return c.EditOrSend(txt, kb, tele.ModeHTML)
-	})
-	a.bot.Handle("/tavily", a.tavilyUI.HandleMenu)
 
 	// Checkin Callbacks & Commands
 	a.bot.Handle(&tele.Btn{Unique: "menu_checkin"}, a.checkinUI.HandleMenu)
@@ -849,6 +841,7 @@ func (a *AdminBot) registerRoutes() {
 		return c.Reply(a.memoryUI.RenderMemorySummary(), tele.ModeHTML)
 	})
 	a.bot.Handle("/savefact", a.memoryUI.HandleSaveFact)
+	a.bot.Handle("/clearmemory", a.memoryUI.HandleClearMemory)
 	a.bot.Handle("/resetsession", a.memoryUI.HandleResetSession)
 
 	// Stats & Audit Commands
@@ -882,10 +875,10 @@ func (a *AdminBot) registerCommands() {
 		{Text: "tokensaver", Description: "Konfigurasi token saver & compression"},
 		{Text: "limits", Description: "Kelola batas token, upload & footer"},
 		{Text: "channels", Description: "Kelola bot Telegram & WhatsApp"},
-		{Text: "tavily", Description: "Konfigurasi Tavily AI search & testing"},
 		{Text: "checkin", Description: "Auto check-in harian & saldo kuota HCNSEC"},
 		{Text: "cron", Description: "Jadwal otomatisasi & trigger cron"},
 		{Text: "memory", Description: "Lihat memori profil & SOP bot"},
+		{Text: "clearmemory", Description: "Hapus memori user di OmniRoute"},
 		{Text: "stats", Description: "Statistik token & estimasi biaya"},
 		{Text: "logs", Description: "Lihat log aktivitas request & payload"},
 		{Text: "backup", Description: "Unduh file backup SQLite & Markdown"},

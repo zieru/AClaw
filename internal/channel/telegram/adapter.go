@@ -21,6 +21,7 @@ import (
 	"goassistant/internal/provider"
 	"goassistant/internal/storage"
 	"goassistant/internal/tgformat"
+	"goassistant/internal/tgprompt"
 	"goassistant/internal/tools"
 	"goassistant/internal/util"
 	tele "gopkg.in/telebot.v3"
@@ -33,6 +34,7 @@ type BotAdapter struct {
 	bot            *tele.Bot
 	orchestrator   *agent.Orchestrator
 	db             *storage.DB
+	promptManager  *tgprompt.PromptManager
 	activeTasks    sync.Map
 	pendingOptions sync.Map
 	stopChan       chan struct{}
@@ -50,13 +52,14 @@ func NewBotAdapter(channelID, name, token string, orch *agent.Orchestrator, db *
 	}
 
 	return &BotAdapter{
-		channelID:    channelID,
-		name:         name,
-		token:        token,
-		bot:          bot,
-		orchestrator: orch,
-		db:           db,
-		stopChan:     make(chan struct{}),
+		channelID:     channelID,
+		name:          name,
+		token:         token,
+		bot:           bot,
+		orchestrator:  orch,
+		db:            db,
+		promptManager: tgprompt.NewPromptManager(bot),
+		stopChan:      make(chan struct{}),
 	}, nil
 }
 
@@ -74,6 +77,7 @@ func (a *BotAdapter) Start(ctx context.Context) error {
 		{Text: "new", Description: "Mulai sesi percakapan baru (reset konteks)"},
 		{Text: "reset", Description: "Reset riwayat percakapan"},
 		{Text: "stop", Description: "Hentikan respon AI yang sedang diproses"},
+		{Text: "setsudo", Description: "Atur password sudo di memori aman (5 menit)"},
 		{Text: "clearsudo", Description: "Hapus sesi password sudo dari memori"},
 		{Text: "status", Description: "Cek status bot & sesi percakapan"},
 		{Text: "help", Description: "Bantuan & panduan penggunaan bot"},
@@ -107,6 +111,8 @@ func (a *BotAdapter) registerHandlers() {
 	a.bot.Handle("/new", a.handleNew)
 	a.bot.Handle("/reset", a.handleNew)
 	a.bot.Handle("/clear", a.handleNew)
+	a.bot.Handle("/setsudo", a.handleSetSudo)
+	a.bot.Handle("/password", a.handleSetSudo)
 	a.bot.Handle("/clearsudo", a.handleClearSudo)
 	a.bot.Handle("/retry", a.handleRetry)
 	a.bot.Handle("/stop", a.handleStop)
@@ -153,6 +159,11 @@ func (a *BotAdapter) registerHandlers() {
 		msg := c.Message()
 		if msg == nil {
 			return nil
+		}
+
+		// Intercept secure password prompt input before anything else (zero-leakage to AI)
+		if handled, err := a.promptManager.HandleTextMessage(c); handled {
+			return err
 		}
 
 		// If in group, check if bot is mentioned or if direct
@@ -280,6 +291,9 @@ func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPr
 		a.activeTasks.Delete(c.Chat().ID)
 		cancel()
 	}()
+
+	prompter := a.promptManager.ForUser(c.Chat().ID, c.Sender().ID)
+	ctx = tools.WithPasswordPrompter(ctx, prompter)
 
 	resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{
 		ChannelType:    "telegram",
@@ -540,6 +554,44 @@ func (a *BotAdapter) handleClearSudo(c tele.Context) error {
 	tools.ClearSudoSession(strconv.FormatInt(c.Chat().ID, 10))
 	tools.ClearSudoSession(strconv.FormatInt(c.Sender().ID, 10))
 	return c.Send("🔒 <b>Sesi Sudo Dibersihkan</b>\n\nPassword sudo yang tersimpan di memori telah dihapus.", tele.ModeHTML)
+}
+
+func (a *BotAdapter) handleSetSudo(c tele.Context) error {
+	msg := c.Message()
+	payload := ""
+	if msg != nil {
+		payload = strings.TrimSpace(msg.Payload)
+	}
+	chatIDStr := strconv.FormatInt(c.Chat().ID, 10)
+	userIDStr := strconv.FormatInt(c.Sender().ID, 10)
+
+	// If password is provided directly via command payload: e.g. /setsudo <password>
+	if payload != "" {
+		_ = a.bot.Delete(msg) // Delete user message immediately for security
+		tools.SetSudoSession(chatIDStr, payload)
+		tools.SetSudoSession(userIDStr, payload)
+		return c.Send("✅ <b>Password Sudo Disimpan</b>\n\nPassword sudo berhasil disimpan di memori aman (aktif selama 5 menit). Pesan Anda telah dihapus demi keamanan.", tele.ModeHTML)
+	}
+
+	// Interactive password prompt
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+
+		pass, finish, err := a.promptManager.PromptPassword(ctx, c.Chat().ID, c.Sender().ID, "Atur Password Sudo Server", "Password akan disimpan di memori aman selama 5 menit untuk eksekusi perintah administratif.")
+		if err != nil {
+			return
+		}
+		if finish != nil {
+			defer finish()
+		}
+		if pass != "" {
+			tools.SetSudoSession(chatIDStr, pass)
+			tools.SetSudoSession(userIDStr, pass)
+			_, _ = a.bot.Send(c.Chat(), "✅ <b>Password Sudo Disimpan</b>\n\nPassword sudo berhasil disimpan di memori aman (aktif selama 5 menit). Anda kini dapat meminta AI menjalankan perintah administratif tanpa perlu memasukkan password lagi.", tele.ModeHTML)
+		}
+	}()
+	return nil
 }
 
 func (a *BotAdapter) handleStop(c tele.Context) error {

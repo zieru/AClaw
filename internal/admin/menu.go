@@ -18,11 +18,10 @@ func MainMenuKeyboard() *tele.ReplyMarkup {
 	btnLimits := menu.Data("🛡️ Limits & Footer", "menu_limits")
 	btnMDFiles := menu.Data("📝 Manage .MD Bot", "menu_md")
 	btnCron := menu.Data("⏰ Cron Scheduler", "menu_cron")
-	btnMemory := menu.Data("🧠 Memory & Session", "menu_memory")
+	btnMemory := menu.Data("🧠 Memory (OmniRoute)", "menu_memory")
 	btnTopic := menu.Data("🧵 Kelola Topik Chat", "menu_topic")
 	btnStats := menu.Data("📊 Audit Log & Stats", "menu_stats")
 	btnTools := menu.Data("🧰 Tool Permissions", "menu_tools")
-	btnTavily := menu.Data("🌐 Tavily AI Search", "menu_tavily")
 	btnCheckin := menu.Data("🎁 Auto Check-in", "menu_checkin")
 	btnBackup := menu.Data("💾 Backup / Export", "menu_backup")
 	btnUpdate := menu.Data("🚀 System Update", "menu_update")
@@ -34,12 +33,12 @@ func MainMenuKeyboard() *tele.ReplyMarkup {
 		menu.Row(btnProviders, btnCombos),
 		menu.Row(btnChannels, btnTokenSaver),
 		menu.Row(btnProxy, btnLimits),
-		menu.Row(btnTavily, btnTools),
-		menu.Row(btnMDFiles, btnCron),
-		menu.Row(btnMemory, btnTopic),
-		menu.Row(btnCheckin, btnStats),
-		menu.Row(btnBackup, btnUpdate),
-		menu.Row(btnWebAdmin, btnHelp),
+		menu.Row(btnTools, btnMDFiles),
+		menu.Row(btnCron, btnTopic),
+		menu.Row(btnMemory, btnStats),
+		menu.Row(btnCheckin, btnBackup),
+		menu.Row(btnUpdate, btnWebAdmin),
+		menu.Row(btnHelp),
 	)
 
 	return menu

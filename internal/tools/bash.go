@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"html"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -117,6 +118,24 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]interface{}) (st
 
 	isSudo := runtime.GOOS != "windows" && containsSudo(cmdStr)
 
+	// If command requires sudo and no password is in active session, prompt interactively via Telegram prompter
+	var finishPrompt func()
+	if isSudo && sudoPass == "" {
+		if prompter := GetPasswordPrompter(ctx); prompter != nil {
+			pass, finish, err := prompter.PromptPassword(ctx, "Konfirmasi Password Administrator (Sudo)", fmt.Sprintf("Perintah yang akan dieksekusi:\n<code>%s</code>", html.EscapeString(cmdStr)))
+			if err == nil && pass != "" {
+				sudoPass = pass
+				finishPrompt = finish
+				if sessionKey != "" {
+					SetSudoSession(sessionKey, sudoPass)
+				}
+			}
+		}
+	}
+	if finishPrompt != nil {
+		defer finishPrompt()
+	}
+
 	// Prepare actual command string and stdin
 	finalCmdStr := cmdStr
 	var stdinInput string
@@ -163,7 +182,7 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]interface{}) (st
 
 	// Check if sudo failed because password was missing/required
 	if isSudo && (strings.Contains(errStr, "a password is required") || strings.Contains(outStr, "a password is required") || strings.Contains(errStr, "password is required")) {
-		return fmt.Sprintf("[SUDO_PASSWORD_REQUIRED]\nPerintah '%s' membutuhkan hak akses administrator (sudo) dan memerlukan password server.\n\nINSTRUKSI WAJIB UNTUK AI ASSISTANT:\n1. JANGAN mencoba mengeksekusi perintah ini lagi sekarang.\n2. Beritahukan dan jelaskan kepada pengguna secara rinci apa tindakan yang akan Anda lakukan beserta tujuannya.\n3. Tampilkan perintah lengkap dalam tag <code>%s</code>.\n4. Mintalah konfirmasi pengguna dengan meminta mereka memasukkan password sudo mereka.", cmdStr, cmdStr), nil
+		return fmt.Sprintf("[SUDO_PASSWORD_REQUIRED]\nPerintah '%s' membutuhkan hak akses administrator (sudo) dan memerlukan password server.\n\nINSTRUKSI WAJIB UNTUK AI ASSISTANT:\n1. JANGAN mencoba mengeksekusi perintah ini lagi sekarang.\n2. DILARANG meminta pengguna mengetikkan password di chat percakapan biasa.\n3. Jelaskan kepada pengguna bahwa perintah <code>%s</code> membutuhkan hak akses root/sudo.\n4. Beritahukan pengguna untuk mengatur password sudo via perintah /setsudo di Telegram atau ulangi perintah agar sistem memicu dialog aman Telegram.", cmdStr, cmdStr), nil
 	}
 
 	// Check if sudo failed because password was incorrect

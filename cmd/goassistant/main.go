@@ -67,8 +67,9 @@ func main() {
 	}
 
 	// Initialize OmniRoute Gateway Collaboration Client
+	var omniClient *omniroute.Client
 	if cfg.OmniRoute.Enabled {
-		omniClient := omniroute.InitClient(cfg.OmniRoute)
+		omniClient = omniroute.InitClient(cfg.OmniRoute)
 		log.Printf("🚀 OmniRoute Gateway Collaboration aktif di: %s", omniClient.BaseURL())
 	}
 
@@ -96,7 +97,7 @@ func main() {
 	// 3. Initialize Core Managers
 	toolReg := tools.GetRegistry()
 	provMgr := provider.GetManager()
-	memMgr := memory.NewManager(db)
+	memMgr := memory.NewManager(omniClient)
 	toolReg.Register(tools.NewUserMemoryTool(memMgr))
 	sessMgr := memory.NewSessionManager(db)
 	mdLoader := agent.NewMDLoader(cfg.Server.MDDir)

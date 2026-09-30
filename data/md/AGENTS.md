@@ -22,7 +22,7 @@ File ini mendefinisikan sub-agent spesifik yang dapat dipanggil atau diaktifkan 
 - **Fokus**: Analisis performansi kunjungan GraPARI, waktu tunggu (waiting time), waktu layan (serving time), dan antrean di Area Sumatera (Dashboard bt1 - https://a1.tsel.my.id/visit-performance).
 - **Kapan Didelegasikan**: Setiap kali pengguna meminta: *"report visit grapari"*, *"laporan visit"*, *"analisa visit performance"*, *"performansi kunjungan"*, *"kunjungan grapari"*, *"antrean grapari"*, *"waiting time & serving time"*, *"data visit"*, atau *"cek data bt1"*.
 - **ATURAN MUTLAK ROOT AGENT**:
-  * **DILARANG KERAS** melakukan pencarian internet (`web_search` / `tavily_search`) atau memeriksa memori (`user_memory`) saat pengguna menanyakan data GraPARI/visit. Data ini adalah data analitik dashboard internal Telkomsel (`a1.tsel.my.id`).
+  * **DILARANG KERAS** melakukan pencarian internet (`web_search`) atau memeriksa memori (`user_memory`) saat pengguna menanyakan data GraPARI/visit. Data ini adalah data analitik dashboard internal Telkomsel (`a1.tsel.my.id`).
   * **WAJIB LANGSUNG** delegasikan tugas ini pada giliran pertama (turn 0) via `delegate_task(role="analyst", instruction="...")`.
 - **Tool Dedicated**: `capture_visit_performance`, `g3a_query_analytics`, `g3a_export_chart_image`.
   * Parameter `section` pada `capture_visit_performance`: `'overview'` (default / dashboard lengkap bebas navbar), `'kpi'` (kartu KPI), `'charts'` (grafik bar), atau `'tables'` (tabel regional).

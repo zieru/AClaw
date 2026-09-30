@@ -13,9 +13,9 @@ Sistem ini menjamin **100% kompatibilitas dengan GLIBC versi lama** (`pypa/manyl
    - Manajemen API Key (Single & Multi-key load balancing / failover), default model, parameter, dan sistem *auto-fallback* jika salah satu provider error/rate-limited.
    - Dukungan **Model Combos**: Alur pipeline fallback multi-model (misal: Coba Claude 3.5 Sonnet -> Fallback ke Gemini 2.0 Flash -> Fallback ke DeepSeek V3).
 
-2. **🌐 Tavily AI Real-Time Web Search**
-   - Pencarian internet terstruktur berbasis AI khusus untuk LLM Agent.
-   - Konfigurasi parameter `search_depth` (*basic* / *advanced*) dan `max_results` langsung dari bot Telegram (`/tavily`).
+2. **🌐 OmniRoute AI Real-Time Web Search**
+   - Pencarian internet terstruktur berbasis AI langsung ditangani via OmniRoute upstream search (`/v1/search`) dengan fallback DuckDuckGo.
+   - Terintegrasi otomatis pada tool `web_search` tanpa ketergantungan konfigurasi terpisah.
 
 3. **🎁 Auto Check-In HCNSEC (New API Quota Claim)**
    - Fitur absensi otomatis harian ke `https://api.hcnsec.cn/api/user/checkin` untuk klaim bonus kuota saldo gratis.
@@ -50,10 +50,11 @@ Sistem ini menjamin **100% kompatibilitas dengan GLIBC versi lama** (`pypa/manyl
 9. **⏰ Cron Task Scheduler**
    - Jalankan tugas AI otomatis dan kirimkan pesan proaktif ke grup atau user tertentu berdasarkan jadwal cron (`robfig/cron/v3`).
 
-10. **🧠 Long-Term Memory & User Memory Tool (`user_memory`)**
-    - Sistem memori profil dan catatan jangka panjang berbasis SQLite pada lingkup `user`, `channel`, dan `global`.
-    - **Otomatis Di-inject ke System Prompt**: Setiap pesan baru otomatis memuat preferensi dan profil pengguna tanpa konsumsi token berlebih.
-    - **AI Function Calling (`user_memory`)**: AI dapat secara mandiri menyimpan catatan (`save`), mencari fakta (`search`), melihat daftar memori (`list`), menghapus (`delete`), dan membersihkan (`clear`) catatan pengguna saat diminta dalam percakapan.
+10. **🧠 OmniRoute Unified Long-Term Memory (`user_memory`)**
+    - Sistem memori jangka panjang terpusat yang diintegrasikan penuh ke OmniRoute API (`/api/memory`), mengeliminasi dual memory lokal.
+    - Mendukung isolasi lingkup `user`, `channel`, dan `global` dengan pencarian semantik dan metadata.
+    - **Otomatis Di-inject ke System Prompt**: Setiap pesan baru otomatis memuat konteks dan preferensi pengguna dari OmniRoute Memory.
+    - **AI Function Calling (`user_memory`)**: AI dapat secara mandiri menyimpan catatan (`save`), mencari fakta (`search`), melihat daftar memori (`list`), menghapus (`delete`), dan membersihkan (`clear`) catatan pengguna langsung ke OmniRoute.
 
 11. **🌐 Native Browser Automation & Autonomous Web Agent (`browser-use` + CDP)**
     - **Go-Rod & CDP Stealth Engine**: Otomasi browser modern berbasis **Chrome DevTools Protocol (CDP)** menggunakan `go-rod` (100% Pure Go tanpa ketergantungan Node.js / Puppeteer). Mendukung rendering JavaScript dinamis (React, Vue, SPA), klik tombol, form typing, evaluasi JS, scroll, dan screenshot.
@@ -189,8 +190,11 @@ Ketik `/menu` di chat bot Telegram Admin untuk membuka dashboard tombol interakt
 | | `/editprovider` | Mengubah setting / API key / model provider |
 | | `/gemini_login` | Login sesi Google Web Scrape via cookie |
 | | `/combos` | Menampilkan & mengelola Model Fallback Combos |
-| **Web Search & Check-in** | `/tavily` | Konfigurasi Tavily AI Real-Time Web Search |
-| | `/checkin` | Dashboard Auto Check-in HCNSEC (New API) |
+| **Memori & Profil** | `/memory` | Menampilkan memori profil & SOP bot |
+| | `/savefact` | Menyimpan fakta permanen ke memori OmniRoute |
+| | `/clearmemory` | Membersihkan memori user/channel tertentu |
+| | `/resetsession` | Membersihkan riwayat percakapan sesi |
+| **Check-in & Hadiah** | `/checkin` | Dashboard Auto Check-in HCNSEC (New API) |
 | | `/checkin_run` | Menjalankan eksekusi check-in & cek saldo sekarang |
 | | `/checkin_add` | Mendaftarkan akun check-in (`/checkin_add user:pass`) |
 | | `/checkin_del` | Menghapus akun check-in (`/checkin_del username`) |
@@ -208,9 +212,6 @@ Ketik `/menu` di chat bot Telegram Admin untuk membuka dashboard tombol interakt
 | | `/addcron` | Mendaftarkan cron job baru |
 | | `/runcron` | Menjalankan cron job detik ini juga |
 | | `/delcron` | Menghapus jadwal cron job |
-| **Memori & Profil** | `/memory` | Menampilkan memori profil & SOP bot |
-| | `/savefact` | Menyimpan fakta permanen ke memori sistem |
-| | `/resetsession` | Membersihkan riwayat percakapan sesi |
 | **Audit & Sistem** | `/stats` | Laporan token, request, biaya hari ini |
 | | `/logs` | Menampilkan riwayat request terakhir |
 | | `/exportlogs` | Mengunduh riwayat audit dalam format `.csv` |

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,10 +127,45 @@ func TestOmniRouteClient(t *testing.T) {
 		if r.Method == http.MethodPost {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]bool{"success": true})
+			json.NewEncoder(w).Encode(MemoryItem{
+				ID:      "mem-new",
+				Type:    "factual",
+				Key:     "created_key",
+				Content: "created content",
+			})
 			return
 		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	})
+
+	mux.HandleFunc("/api/memory/", func(w http.ResponseWriter, r *http.Request) {
+		if !checkAuth(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/memory/")
+		if id == "" {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(MemoryItem{
+				ID:      id,
+				Type:    "factual",
+				Key:     "test_key",
+				Content: "test content",
+			})
+		case http.MethodPut:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]bool{"success": true})
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
 	})
 
 	server := httptest.NewServer(mux)
@@ -178,6 +214,36 @@ func TestOmniRouteClient(t *testing.T) {
 	}
 	if mems[0].Key != "test_key" {
 		t.Errorf("Expected key 'test_key', got '%s'", mems[0].Key)
+	}
+
+	// Test GetMemory
+	item, err := client.GetMemory(ctx, "mem-1")
+	if err != nil || item.ID != "mem-1" {
+		t.Fatalf("GetMemory failed: %v", err)
+	}
+
+	// Test UpdateMemory
+	err = client.UpdateMemory(ctx, "mem-1", "test_key", "updated content", "factual", nil)
+	if err != nil {
+		t.Fatalf("UpdateMemory failed: %v", err)
+	}
+
+	// Test DeleteMemory
+	err = client.DeleteMemory(ctx, "mem-1")
+	if err != nil {
+		t.Fatalf("DeleteMemory failed: %v", err)
+	}
+
+	// Test SearchMemories
+	searchMems, err := client.SearchMemories(ctx, "test", "")
+	if err != nil || len(searchMems) == 0 {
+		t.Fatalf("SearchMemories failed: %v", err)
+	}
+
+	// Test UpsertMemory
+	err = client.UpsertMemory(ctx, "test_key", "upserted content", "factual", "", nil)
+	if err != nil {
+		t.Fatalf("UpsertMemory failed: %v", err)
 	}
 
 	// Test SaveMemory
