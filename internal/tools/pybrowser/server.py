@@ -214,7 +214,7 @@ async def run_camoufox_task(
     Eksekusi penjelajahan web stealth tingkat tinggi menggunakan Camoufox (Firefox C++ engine-level spoofing)
     untuk membobol Cloudflare Turnstile, WAF, bot detection, dan proteksi fingerprinting (Pixelscan, KAI, dll).
 
-    ignore_ssl (bool): Jika True, abaikan error sertifikat SSL (ignore_http_errors) pada context session ini saja.
+    ignore_ssl (bool): Jika True, abaikan error sertifikat SSL (ignore_https_errors) pada context session ini saja.
     Hanya untuk akses read-only, bukan transaksi/pembayaran. Per-sesi, tidak global.
     """
     import re
@@ -250,11 +250,11 @@ async def run_camoufox_task(
             humanize=True,
             geoip=True,
         ) as browser:
-            # Bypass SSL hanya per-sesi saat diminta (ignore_http_errors context option).
+            # Bypass SSL hanya per-sesi saat diminta (ignore_https_errors context option).
             # Camoufox menerapkan fingerprint di level launch (env CAMOU_CONFIG_* + profile),
             # jadi context baru tetap ter-fingerprint dan tidak merusak anti-detect.
             if ignore_ssl:
-                context = await browser.new_context(ignore_http_errors=True)
+                context = await browser.new_context(ignore_https_errors=True)
                 page = await context.new_page()
             else:
                 page = await browser.new_page()
@@ -612,7 +612,7 @@ async def browser(
     Chromium CDP tersedia sebagai opsi sekunder jika engine='chromium'.
 
     ignore_ssl (bool): Jika True, abaikan error sertifikat SSL pada sesi Camoufox ini saja
-    (ignore_http_errors). Tanpa Chromium — tetap Camoufox. Untuk akses read-only, bukan transaksi.
+    (ignore_https_errors). Tanpa Chromium — tetap Camoufox. Untuk akses read-only, bukan transaksi.
     Per-sesi, tidak global. Saat False dan halaman menampilkan peringatan sertifikat, otomatis
     di-retry sekali dengan bypass SSL.
     """
