@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"goassistant/internal/config"
 	"goassistant/internal/memory"
 	"goassistant/internal/provider"
 	"goassistant/internal/storage"
@@ -270,7 +271,7 @@ func TestProcessMessage_TimeoutAuditLog(t *testing.T) {
 	defer db.Close()
 
 	sm := memory.NewSessionManager(db)
-	mm := memory.NewManager(nil)
+	mm := memory.NewManager(db, config.MemoryConfig{}, nil, nil)
 	loader := NewMDLoader(tempDir)
 	pb := NewPromptBuilder(loader)
 	tr := tools.GetRegistry()
@@ -359,7 +360,7 @@ func TestProcessMessage_CanceledImmediateExit(t *testing.T) {
 	defer db.Close()
 
 	sm := memory.NewSessionManager(db)
-	mm := memory.NewManager(nil)
+	mm := memory.NewManager(db, config.MemoryConfig{}, nil, nil)
 	loader := NewMDLoader(tempDir)
 	pb := NewPromptBuilder(loader)
 	tr := tools.GetRegistry()

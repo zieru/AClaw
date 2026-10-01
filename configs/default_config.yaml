@@ -106,5 +106,22 @@ omniroute:
   password: ""                      # Masukkan master password dashboard atau set via env OMNIROUTE_PASSWORD
   api_key: ""                       # Optional: Bearer token jika menggunakan OmniRoute API Key (atau env OMNIROUTE_API_KEY)
   use_upstream_search: true          # Gunakan POST /v1/search OmniRoute untuk tool web_search
-  use_upstream_memory: true          # Gunakan /api/memory OmniRoute untuk sinkronisasi memori bersama
+  use_upstream_memory: false         # Diputus: Sistem memory sekarang 100% mandiri di dalam GoAssistant
+
+# GoAssistant Standalone Memory Engine (SQLite + FTS5 + Hybrid/Vector)
+memory:
+  enabled: true
+  auto_extract: true                 # Ekstraksi otomatis fakta & memori dari dialog
+  retrieval_strategy: "hybrid"       # hybrid (FTS5 BM25 + Vektor), semantic, exact
+  max_context_items: 10              # Maksimal memori relevan yang diinjeksikan ke system prompt
+  similarity_threshold: 0.60         # Minimum cosine similarity score untuk semantic search
+  seed_csv_path: "D:/Users/Grapari_Infomedia/Downloads/AyuGram Desktop/memories_export.csv"
+  embedding:
+    enabled: false                   # Aktifkan true jika ingin menggunakan semantic vector embedding
+    provider: "openai"               # openai, gemini, custom, ollama
+    model: "text-embedding-3-small"  # Model embedding (misal: text-embedding-3-small, text-embedding-004)
+    base_url: ""                     # Base URL custom jika menggunakan endpoint pihak ketiga / lokal
+    api_key: ""                      # API Key opsional (jika kosong, menggunakan API Key provider default)
+    dimensions: 1536                 # Dimensi vektor embedding
+
 

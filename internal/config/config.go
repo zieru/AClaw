@@ -99,7 +99,30 @@ type AppConfig struct {
 
 	OmniRoute OmniRouteConfig `yaml:"omniroute"`
 
+	Memory MemoryConfig `yaml:"memory"`
+
 	MCPServers []MCPServerConfig `yaml:"mcp_servers"`
+}
+
+// MemoryConfig defines configuration for GoAssistant's standalone memory engine
+type MemoryConfig struct {
+	Enabled             bool            `yaml:"enabled"`
+	AutoExtract         bool            `yaml:"auto_extract"`
+	RetrievalStrategy   string          `yaml:"retrieval_strategy"` // "hybrid", "semantic", "exact"
+	MaxContextItems     int             `yaml:"max_context_items"`
+	SimilarityThreshold float64         `yaml:"similarity_threshold"`
+	SeedCSVPath         string          `yaml:"seed_csv_path"`
+	Embedding           EmbeddingConfig `yaml:"embedding"`
+}
+
+// EmbeddingConfig defines configuration for generating vector embeddings
+type EmbeddingConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	Provider   string `yaml:"provider"` // "openai", "gemini", "custom", "ollama", "omniroute"
+	Model      string `yaml:"model"`
+	BaseURL    string `yaml:"base_url"`
+	APIKey     string `yaml:"api_key"`
+	Dimensions int    `yaml:"dimensions"`
 }
 
 // OmniRouteConfig defines configuration for co-located OmniRoute gateway collaboration
@@ -191,7 +214,18 @@ func Load(configPath string) (*AppConfig, error) {
 		cfg.OmniRoute.BaseURL = "http://localhost:20128"
 		cfg.OmniRoute.Password = ""
 		cfg.OmniRoute.UseUpstreamSearch = true
-		cfg.OmniRoute.UseUpstreamMemory = true
+		cfg.OmniRoute.UseUpstreamMemory = false // Severed: Standalone memory in GoAssistant
+
+		cfg.Memory.Enabled = true
+		cfg.Memory.AutoExtract = true
+		cfg.Memory.RetrievalStrategy = "hybrid"
+		cfg.Memory.MaxContextItems = 10
+		cfg.Memory.SimilarityThreshold = 0.60
+		cfg.Memory.SeedCSVPath = "D:/Users/Grapari_Infomedia/Downloads/AyuGram Desktop/memories_export.csv"
+		cfg.Memory.Embedding.Enabled = false
+		cfg.Memory.Embedding.Provider = "openai"
+		cfg.Memory.Embedding.Model = "text-embedding-3-small"
+		cfg.Memory.Embedding.Dimensions = 1536
  
 		if configPath != "" {
 			if _, statErr := os.Stat(configPath); statErr != nil {

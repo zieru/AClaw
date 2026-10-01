@@ -445,5 +445,87 @@ func TestOpenActualDataDBIfExists(t *testing.T) {
 	_ = sessions
 }
 
+func TestMemoriesFTS5AndVector(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_mem.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	// 1. Test Upsert Memory
+	vec := []float32{0.12, -0.34, 0.56, 0.78}
+	item := &MemoryItemRecord{
+		Type:      "factual",
+		Scope:     "user",
+		ScopeID:   "399999658",
+		Key:       "kai_bypass_ssl",
+		Content:   "Akses railink.co.id WAJIB bypass peringatan SSL karena sertifikat bermasalah.",
+		Category:  "fact",
+		Embedding: vec,
+		Metadata:  map[string]interface{}{"source": "unit_test"},
+	}
+
+	err = db.UpsertMemory(item)
+	if err != nil {
+		t.Fatalf("UpsertMemory failed: %v", err)
+	}
+
+	// 2. Test GetMemoryByKey
+	fetched, err := db.GetMemoryByKey("user", "399999658", "kai_bypass_ssl")
+	if err != nil {
+		t.Fatalf("GetMemoryByKey failed: %v", err)
+	}
+	if fetched.Content != item.Content {
+		t.Fatalf("expected content %q, got %q", item.Content, fetched.Content)
+	}
+	if len(fetched.Embedding) != len(vec) || fetched.Embedding[0] != vec[0] {
+		t.Fatalf("embedding vector mismatch: %+v vs %+v", fetched.Embedding, vec)
+	}
+
+	// 3. Test FTS5 Search
+	results, err := db.SearchMemoriesFTS5("user", "399999658", "bypass peringatan SSL", 10)
+	if err != nil {
+		t.Fatalf("SearchMemoriesFTS5 failed: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatalf("expected at least 1 FTS5 result, got 0")
+	}
+	if results[0].Key != "kai_bypass_ssl" {
+		t.Fatalf("expected top result key kai_bypass_ssl, got: %s", results[0].Key)
+	}
+	if results[0].Score <= 0 {
+		t.Fatalf("expected positive score, got: %f", results[0].Score)
+	}
+
+	// 4. Test Update triggers update in FTS5
+	item.Content = "Update: Akses booking.kai.id sudah lancar dan tidak terblokir lagi."
+	err = db.UpsertMemory(item)
+	if err != nil {
+		t.Fatalf("UpsertMemory update failed: %v", err)
+	}
+
+	updatedResults, err := db.SearchMemoriesFTS5("user", "399999658", "booking kai lancar", 10)
+	if err != nil {
+		t.Fatalf("SearchMemoriesFTS5 updated failed: %v", err)
+	}
+	if len(updatedResults) == 0 || updatedResults[0].Key != "kai_bypass_ssl" {
+		t.Fatalf("FTS5 trigger did not sync update properly")
+	}
+
+	// 5. Test Delete
+	err = db.DeleteMemoryByKey("user", "399999658", "kai_bypass_ssl")
+	if err != nil {
+		t.Fatalf("DeleteMemoryByKey failed: %v", err)
+	}
+
+	afterDelete, _ := db.GetMemoryByKey("user", "399999658", "kai_bypass_ssl")
+	if afterDelete != nil {
+		t.Fatalf("expected nil after delete, got: %+v", afterDelete)
+	}
+}
+
 
 

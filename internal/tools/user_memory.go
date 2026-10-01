@@ -11,8 +11,10 @@ import (
 // MemoryManager defines the interface for interacting with persistent facts and memories
 type MemoryManager interface {
 	UpsertFact(scope, scopeID, key, content, category string) error
+	UpsertMemoryRecord(rec *storage.MemoryItemRecord) error
 	ListMemories(scope, scopeID string) ([]storage.MemoryRecord, error)
 	SearchMemories(scope, scopeID, query string) ([]storage.MemoryRecord, error)
+	SearchMemoriesAdvanced(scope, scopeID, query string, strategy string, limit int) ([]storage.MemoryItemRecord, error)
 	DeleteMemoryItem(id string) error
 	DeleteMemoryByKey(scope, scopeID, key string) error
 	ClearUserMemory(userID string) error
@@ -36,7 +38,7 @@ func (m *UserMemoryTool) Name() string {
 }
 
 func (m *UserMemoryTool) Description() string {
-	return "Tool untuk menyimpan, mencari, melihat, dan menghapus catatan jangka panjang tentang preferensi pengguna, fakta profil, to-do list, catatan proyek, atau informasi penting lainnya ke OmniRoute Memory."
+	return "Tool mandiri untuk menyimpan, mencari, melihat, dan menghapus catatan jangka panjang (faktual, prosedural, episodik, semantik) tentang preferensi pengguna, fakta profil, to-do list, catatan proyek, atau SOP teknis ke SQLite FTS5 Memory."
 }
 
 func (m *UserMemoryTool) Parameters() ParametersSchema {
@@ -45,24 +47,34 @@ func (m *UserMemoryTool) Parameters() ParametersSchema {
 		Properties: map[string]ParameterProperty{
 			"action": {
 				Type:        "string",
-				Description: "Aksi memori: 'save' (simpan fakta/catatan baru atau update), 'list' (tampilkan seluruh catatan), 'search' (cari catatan dengan kata kunci), 'delete' (hapus catatan berdasarkan key atau id), 'clear' (hapus semua catatan). Default: list.",
+				Description: "Aksi memori: 'save' (simpan fakta/catatan baru atau update), 'list' (tampilkan seluruh catatan), 'search' (cari catatan dengan kata kunci/makna), 'delete' (hapus catatan berdasarkan key atau id), 'clear' (hapus semua catatan). Default: list.",
 				Enum:        []string{"save", "list", "search", "delete", "clear"},
 			},
 			"key": {
 				Type:        "string",
-				Description: "Kunci/tag ringkas catatan (contoh: 'nama_panggilan', 'makanan_favorit', 'rekening_bca', 'bahasa_coding', 'proyek_website'). Wajib untuk aksi 'save' dan 'delete' jika ID tidak diberikan.",
+				Description: "Kunci/tag ringkas catatan (contoh: 'nama_panggilan', 'kai_bypass_ssl', 'rekening_bca', 'bahasa_coding'). Wajib untuk aksi 'save' dan 'delete' jika ID tidak diberikan.",
 			},
 			"content": {
 				Type:        "string",
 				Description: "Isi fakta atau detail informasi yang ingin disimpan. Wajib untuk aksi 'save'.",
 			},
+			"type": {
+				Type:        "string",
+				Description: "Tipe memori: 'factual' (profil/fakta/preferensi), 'episodic' (riwayat/progres tugas/keputusan), 'procedural' (SOP/langkah teknis), 'semantic' (konsep/struktur). Default: 'factual'.",
+				Enum:        []string{"factual", "episodic", "procedural", "semantic"},
+			},
 			"category": {
 				Type:        "string",
-				Description: "Kategori catatan: 'preference', 'profile', 'fact', 'todo', 'work', 'note'. Default: 'fact'.",
+				Description: "Kategori catatan: 'preference', 'profile', 'fact', 'todo', 'work', 'decision', 'sop'. Default: 'fact'.",
 			},
 			"query": {
 				Type:        "string",
-				Description: "Kata kunci pencarian untuk aksi 'search'.",
+				Description: "Kata kunci atau pertanyaan pencarian untuk aksi 'search'.",
+			},
+			"strategy": {
+				Type:        "string",
+				Description: "Strategi pencarian: 'hybrid' (gabungan FTS5 BM25 + Vektor), 'semantic' (vektor kemiripan makna), atau 'exact' (pencocokan teks). Default: 'hybrid'.",
+				Enum:        []string{"hybrid", "semantic", "exact"},
 			},
 			"id": {
 				Type:        "string",
@@ -93,20 +105,30 @@ func (m *UserMemoryTool) Execute(ctx context.Context, args map[string]interface{
 		scope = strings.ToLower(strings.TrimSpace(sc))
 	}
 
-	// Resolve scopeID from context
+	callerUserID, _ := ctx.Value("user_id").(string)
+	callerChannelID, _ := ctx.Value("channel_id").(string)
+
+	// Resolve scopeID from context with strict isolation boundaries
 	var scopeID string
 	switch scope {
 	case "global":
+		// Hanya admin yang boleh menyimpan atau menghapus memori global
+		if action == "save" || action == "delete" || action == "clear" {
+			if callerUserID != "" && callerUserID != "399999658" {
+				return "", fmt.Errorf("akses ditolak: hanya administrator yang diizinkan mengubah memori lingkup 'global'")
+			}
+		}
 		scopeID = "system"
 	case "channel":
-		if chID, ok := ctx.Value("channel_id").(string); ok && chID != "" {
-			scopeID = chID
+		if callerChannelID != "" {
+			scopeID = callerChannelID
 		} else if chID, ok := args["channel_id"].(string); ok && chID != "" {
 			scopeID = chID
 		}
 	default: // "user"
-		if uID, ok := ctx.Value("user_id").(string); ok && uID != "" {
-			scopeID = uID
+		// Wajib terikat ke user yang sedang aktif di context (mencegah spoofing ID user lain)
+		if callerUserID != "" {
+			scopeID = callerUserID
 		} else if uID, ok := args["user_id"].(string); ok && uID != "" {
 			scopeID = uID
 		}
@@ -133,6 +155,16 @@ func (m *UserMemoryTool) Execute(ctx context.Context, args map[string]interface{
 	id, _ := args["id"].(string)
 	id = strings.TrimSpace(id)
 
+	memType := "factual"
+	if mt, ok := args["type"].(string); ok && strings.TrimSpace(mt) != "" {
+		memType = strings.ToLower(strings.TrimSpace(mt))
+	}
+
+	strategy := "hybrid"
+	if st, ok := args["strategy"].(string); ok && strings.TrimSpace(st) != "" {
+		strategy = strings.ToLower(strings.TrimSpace(st))
+	}
+
 	switch action {
 	case "save":
 		if key == "" {
@@ -142,28 +174,39 @@ func (m *UserMemoryTool) Execute(ctx context.Context, args map[string]interface{
 			return "", fmt.Errorf("parameter 'content' wajib diisi untuk menyimpan memori")
 		}
 
-		err := m.manager.UpsertFact(scope, scopeID, key, content, category)
+		err := m.manager.UpsertMemoryRecord(&storage.MemoryItemRecord{
+			Type:     memType,
+			Scope:    scope,
+			ScopeID:  scopeID,
+			Key:      key,
+			Content:  content,
+			Category: category,
+		})
 		if err != nil {
 			return "", fmt.Errorf("gagal menyimpan memori: %w", err)
 		}
-		return fmt.Sprintf("✅ <b>Memori Berhasil Disimpan!</b>\n• Kunci: <code>%s</code>\n• Kategori: <code>%s</code>\n• Lingkup: <code>%s</code>\n• Isi: <i>%s</i>", key, category, scope, content), nil
+		return fmt.Sprintf("✅ <b>Memori Berhasil Disimpan!</b>\n• Kunci: <code>%s</code>\n• Tipe: <code>%s</code>\n• Kategori: <code>%s</code>\n• Lingkup: <code>%s</code>\n• Isi: <i>%s</i>", key, memType, category, scope, content), nil
 
 	case "search":
 		if query == "" {
 			return "", fmt.Errorf("parameter 'query' wajib diisi untuk mencari memori")
 		}
-		items, err := m.manager.SearchMemories(scope, scopeID, query)
+		items, err := m.manager.SearchMemoriesAdvanced(scope, scopeID, query, strategy, 10)
 		if err != nil {
 			return "", fmt.Errorf("gagal mencari memori: %w", err)
 		}
 		if len(items) == 0 {
-			return fmt.Sprintf("🔍 Tidak ditemukan catatan dengan kata kunci: <i>\"%s\"</i> (lingkup: %s).", query, scope), nil
+			return fmt.Sprintf("🔍 Tidak ditemukan catatan dengan kata kunci: <i>\"%s\"</i> (lingkup: %s, strategi: %s).", query, scope, strategy), nil
 		}
 
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("🔍 <b>Hasil Pencarian Memori (\"%s\" - %s):</b>\n\n", query, scope))
+		sb.WriteString(fmt.Sprintf("🔍 <b>Hasil Pencarian Memori (%s - %s - %s):</b>\n\n", query, scope, strategy))
 		for _, it := range items {
-			sb.WriteString(fmt.Sprintf("• <b>[%s]</b> <code>%s</code> (ID: <code>%s</code>)\n  <i>%s</i>\n", it.Category, it.KeyTag, it.ID, it.Content))
+			scoreInfo := ""
+			if it.Score > 0 {
+				scoreInfo = fmt.Sprintf(" (skor: %.2f)", it.Score)
+			}
+			sb.WriteString(fmt.Sprintf("• <b>[%s|%s]</b> <code>%s</code>%s\n  <i>%s</i>\n", it.Type, it.Category, it.Key, scoreInfo, it.Content))
 		}
 		return sb.String(), nil
 

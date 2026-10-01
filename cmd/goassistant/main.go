@@ -97,11 +97,21 @@ func main() {
 	// 3. Initialize Core Managers
 	toolReg := tools.GetRegistry()
 	provMgr := provider.GetManager()
-	memMgr := memory.NewManager(omniClient)
+	embedder := memory.NewEmbedder(cfg.Memory.Embedding)
+	memMgr := memory.NewManager(db, cfg.Memory, embedder, provMgr)
 	toolReg.Register(tools.NewUserMemoryTool(memMgr))
 	sessMgr := memory.NewSessionManager(db)
 	mdLoader := agent.NewMDLoader(cfg.Server.MDDir)
 	promptBld := agent.NewPromptBuilder(mdLoader)
+
+	// Seed initial memories from CSV if available (idempotent INSERT OR IGNORE)
+	if cfg.Memory.SeedCSVPath != "" {
+		if _, statErr := os.Stat(cfg.Memory.SeedCSVPath); statErr == nil {
+			seedCtx, seedCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, _ = memory.SeedFromCSV(seedCtx, db, cfg.Memory.SeedCSVPath, "399999658", embedder)
+			seedCancel()
+		}
+	}
 
 	// Initialize External MCP Servers (e.g. a7g3 DuckDB analytics engine)
 	mcpManager := tools.NewMCPManager(cfg.MCPServers)

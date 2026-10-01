@@ -149,7 +149,11 @@ func (a *AdminBot) registerRoutes() {
 		return c.EditOrSend(a.cronUI.RenderCronList(), a.cronUI.CronKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_memory"}, func(c tele.Context) error {
-		return c.EditOrSend(a.memoryUI.RenderMemorySummary(), BackToMenuKeyboard(), tele.ModeHTML)
+		var senderID int64
+		if c.Sender() != nil {
+			senderID = c.Sender().ID
+		}
+		return c.EditOrSend(a.memoryUI.RenderMemorySummary(senderID), BackToMenuKeyboard(), tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_stats"}, func(c tele.Context) error {
 		return c.EditOrSend(a.auditUI.RenderStatsSummary(), a.auditUI.StatsKeyboard(), tele.ModeHTML)
@@ -838,8 +842,13 @@ func (a *AdminBot) registerRoutes() {
 
 	// Memory Commands
 	a.bot.Handle("/memory", func(c tele.Context) error {
-		return c.Reply(a.memoryUI.RenderMemorySummary(), tele.ModeHTML)
+		var senderID int64
+		if c.Sender() != nil {
+			senderID = c.Sender().ID
+		}
+		return c.Reply(a.memoryUI.RenderMemorySummary(senderID), tele.ModeHTML)
 	})
+	a.bot.Handle("/searchmemory", a.memoryUI.HandleSearchMemory)
 	a.bot.Handle("/savefact", a.memoryUI.HandleSaveFact)
 	a.bot.Handle("/clearmemory", a.memoryUI.HandleClearMemory)
 	a.bot.Handle("/resetsession", a.memoryUI.HandleResetSession)

@@ -17,12 +17,20 @@ func (m *testMemoryManager) UpsertFact(scope, scopeID, key, content, category st
 	return m.db.UpsertMemoryItem(scope, scopeID, key, content, category)
 }
 
+func (m *testMemoryManager) UpsertMemoryRecord(rec *storage.MemoryItemRecord) error {
+	return m.db.UpsertMemory(rec)
+}
+
 func (m *testMemoryManager) ListMemories(scope, scopeID string) ([]storage.MemoryRecord, error) {
 	return m.db.ListMemoryItems(scope, scopeID)
 }
 
 func (m *testMemoryManager) SearchMemories(scope, scopeID, query string) ([]storage.MemoryRecord, error) {
 	return m.db.SearchMemoryItems(scope, scopeID, query)
+}
+
+func (m *testMemoryManager) SearchMemoriesAdvanced(scope, scopeID, query string, strategy string, limit int) ([]storage.MemoryItemRecord, error) {
+	return m.db.SearchMemoriesFTS5(scope, scopeID, query, limit)
 }
 
 func (m *testMemoryManager) DeleteMemoryItem(id string) error {

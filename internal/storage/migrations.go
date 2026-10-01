@@ -148,6 +148,54 @@ CREATE TABLE IF NOT EXISTS memory_items (
 
 CREATE INDEX IF NOT EXISTS idx_memory_items_scope ON memory_items(scope, scope_id);
 
+CREATE TABLE IF NOT EXISTS memories (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL DEFAULT 'factual',      -- factual, episodic, procedural, semantic
+    scope TEXT NOT NULL DEFAULT 'user',        -- global, channel, user
+    scope_id TEXT NOT NULL DEFAULT '',         -- '399999658', channel ID, system
+    session_id TEXT NOT NULL DEFAULT '',       -- optional topic ID
+    key TEXT NOT NULL,
+    content TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'fact',     -- preference, profile, fact, work, decision, sop
+    embedding BLOB,                            -- IEEE 754 float32 byte array
+    metadata TEXT NOT NULL DEFAULT '{}',       -- JSON string
+    access_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_scope_key ON memories(scope, scope_id, key);
+CREATE INDEX IF NOT EXISTS idx_memories_scope_type ON memories(scope, scope_id, type);
+CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);
+CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    id UNINDEXED,
+    key,
+    content,
+    category,
+    content=memories,
+    content_rowid=rowid
+);
+
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, id, key, content, category)
+    VALUES (new.rowid, new.id, new.key, new.content, new.category);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, id, key, content, category)
+    VALUES('delete', old.rowid, old.id, old.key, old.content, old.category);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, id, key, content, category)
+    VALUES('delete', old.rowid, old.id, old.key, old.content, old.category);
+    INSERT INTO memories_fts(rowid, id, key, content, category)
+    VALUES (new.rowid, new.id, new.key, new.content, new.category);
+END;
+
 CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,

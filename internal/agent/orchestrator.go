@@ -446,7 +446,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 	allowedTools := o.toolRegistry.ListAllowed(effectivePerms)
 
 	// 7. Build Memory & System Prompt
-	memContext, _ := o.memoryManager.GetContextMemory(req.ChannelID, req.UserID)
+	memContext, _ := o.memoryManager.GetContextMemory(req.ChannelID, req.UserID, req.UserPrompt)
 
 	sysPrompt, err = o.promptBuilder.BuildSystemPrompt(PromptContext{
 		ChannelID:       req.ChannelID,
@@ -858,6 +858,11 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 	// 10. Persist User & Assistant Messages (clean content without metadata footer)
 	_ = o.sessionManager.AddMessage(session.ID, "user", req.UserPrompt, len(req.UserPrompt)/4)
 	_ = o.sessionManager.AddMessage(session.ID, "assistant", finalCleanContent, len(finalCleanContent)/4)
+
+	// 10b. Asynchronous Memory Auto-Extraction
+	if o.memoryManager != nil && o.memoryManager.IsAutoExtractEnabled() {
+		o.memoryManager.AutoExtractAsync(req.ChannelID, req.UserID, req.UserPrompt, finalCleanContent, activeModelName, activeProvName)
+	}
 
 	// 11. Audit Logging
 	fullPayloadJSON, _ := json.Marshal(messages)

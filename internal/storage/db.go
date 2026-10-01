@@ -2,8 +2,10 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -346,6 +348,25 @@ type MemoryRecord struct {
 	Category  string    `json:"category"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// MemoryItemRecord represents an OmniRoute-compatible full memory entry
+type MemoryItemRecord struct {
+	ID             string                 `json:"id"`
+	Type           string                 `json:"type"` // factual, episodic, procedural, semantic
+	Scope          string                 `json:"scope"` // global, channel, user
+	ScopeID        string                 `json:"scope_id"`
+	SessionID      string                 `json:"session_id,omitempty"`
+	Key            string                 `json:"key"`
+	Content        string                 `json:"content"`
+	Category       string                 `json:"category"`
+	Embedding      []float32              `json:"-"`
+	Metadata       map[string]interface{} `json:"metadata"`
+	AccessCount    int                    `json:"access_count"`
+	LastAccessedAt *time.Time             `json:"last_accessed_at,omitempty"`
+	CreatedAt      time.Time              `json:"created_at"`
+	UpdatedAt      time.Time              `json:"updated_at"`
+	Score          float32                `json:"score,omitempty"` // retrieval relevance score
 }
 
 type AuditLogRecord struct {
@@ -1531,90 +1552,436 @@ func (d *DB) UpdateSessionSummary(sessionID, summary string) error {
 	return err
 }
 
-// --- Memory Items ---
+// --- Vector Embedding Helpers ---
 
-func (d *DB) AddMemoryItem(scope, scopeID, keyTag, content, category string) error {
+func Float32SliceToBytes(vec []float32) []byte {
+	if len(vec) == 0 {
+		return nil
+	}
+	buf := make([]byte, len(vec)*4)
+	for i, f := range vec {
+		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(f))
+	}
+	return buf
+}
+
+func BytesToFloat32Slice(buf []byte) []float32 {
+	if len(buf) < 4 {
+		return nil
+	}
+	n := len(buf) / 4
+	vec := make([]float32, n)
+	for i := 0; i < n; i++ {
+		bits := binary.LittleEndian.Uint32(buf[i*4:])
+		vec[i] = math.Float32frombits(bits)
+	}
+	return vec
+}
+
+// --- OmniRoute-Grade Memory System (SQLite + FTS5 + Vector) ---
+
+// UpsertMemory saves or updates a memory item into the 'memories' table and keeps FTS5 index in sync
+func (d *DB) UpsertMemory(item *MemoryItemRecord) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	id := uuid.New().String()
-	_, err := d.db.Exec("INSERT INTO memory_items (id, scope, scope_id, key_tag, content, category) VALUES (?, ?, ?, ?, ?, ?)",
-		id, scope, scopeID, keyTag, content, category)
+	if item.ID == "" {
+		item.ID = uuid.New().String()
+	}
+	if item.Type == "" {
+		item.Type = "factual"
+	}
+	if item.Scope == "" {
+		item.Scope = "user"
+	}
+	if item.Category == "" {
+		item.Category = "fact"
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now()
+	}
+	item.UpdatedAt = time.Now()
+
+	var metaJSON []byte
+	if item.Metadata != nil {
+		metaJSON, _ = json.Marshal(item.Metadata)
+	}
+	if len(metaJSON) == 0 {
+		metaJSON = []byte("{}")
+	}
+
+	embBytes := Float32SliceToBytes(item.Embedding)
+
+	query := `
+		INSERT INTO memories (id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(scope, scope_id, key) DO UPDATE SET
+			type = excluded.type,
+			content = excluded.content,
+			category = excluded.category,
+			session_id = CASE WHEN excluded.session_id != '' THEN excluded.session_id ELSE memories.session_id END,
+			embedding = CASE WHEN excluded.embedding IS NOT NULL THEN excluded.embedding ELSE memories.embedding END,
+			metadata = excluded.metadata,
+			updated_at = CURRENT_TIMESTAMP
+	`
+	_, err := d.db.Exec(query,
+		item.ID, item.Type, item.Scope, item.ScopeID, item.SessionID,
+		item.Key, item.Content, item.Category, embBytes, string(metaJSON),
+		item.AccessCount, item.CreatedAt, item.UpdatedAt)
+
 	return err
+}
+
+// GetMemory retrieves a single memory by its ID
+func (d *DB) GetMemory(id string) (*MemoryItemRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, last_accessed_at, created_at, updated_at FROM memories WHERE id = ?`
+	row := d.db.QueryRow(query, id)
+
+	var m MemoryItemRecord
+	var embBytes []byte
+	var metaStr string
+	var lastAcc sql.NullTime
+
+	if err := row.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		return nil, err
+	}
+	m.Embedding = BytesToFloat32Slice(embBytes)
+	if metaStr != "" {
+		_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
+	}
+	if lastAcc.Valid {
+		m.LastAccessedAt = &lastAcc.Time
+	}
+	return &m, nil
+}
+
+// GetMemoryByKey retrieves a single memory by (scope, scope_id, key)
+func (d *DB) GetMemoryByKey(scope, scopeID, key string) (*MemoryItemRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, last_accessed_at, created_at, updated_at FROM memories WHERE scope = ? AND scope_id = ? AND key = ?`
+	row := d.db.QueryRow(query, scope, scopeID, key)
+
+	var m MemoryItemRecord
+	var embBytes []byte
+	var metaStr string
+	var lastAcc sql.NullTime
+
+	if err := row.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		return nil, err
+	}
+	m.Embedding = BytesToFloat32Slice(embBytes)
+	if metaStr != "" {
+		_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
+	}
+	if lastAcc.Valid {
+		m.LastAccessedAt = &lastAcc.Time
+	}
+	return &m, nil
+}
+
+// ListMemoriesByScope lists memories filtered by scope, scope_id, and optional memType
+func (d *DB) ListMemoriesByScope(scope, scopeID string, memType string, limit int) ([]MemoryItemRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 100
+	}
+
+	var rows *sql.Rows
+	var err error
+
+	if memType != "" && strings.ToLower(memType) != "all" {
+		query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, last_accessed_at, created_at, updated_at 
+		          FROM memories WHERE scope = ? AND scope_id = ? AND type = ? ORDER BY updated_at DESC LIMIT ?`
+		rows, err = d.db.Query(query, scope, scopeID, memType, limit)
+	} else {
+		query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, last_accessed_at, created_at, updated_at 
+		          FROM memories WHERE scope = ? AND scope_id = ? ORDER BY updated_at DESC LIMIT ?`
+		rows, err = d.db.Query(query, scope, scopeID, limit)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []MemoryItemRecord
+	for rows.Next() {
+		var m MemoryItemRecord
+		var embBytes []byte
+		var metaStr string
+		var lastAcc sql.NullTime
+
+		if err := rows.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		m.Embedding = BytesToFloat32Slice(embBytes)
+		if metaStr != "" {
+			_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
+		}
+		if lastAcc.Valid {
+			m.LastAccessedAt = &lastAcc.Time
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
+// CleanFTSQuery cleans user query string for safe FTS5 MATCH syntax
+func CleanFTSQuery(query string) string {
+	clean := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == ' ' {
+			return r
+		}
+		return ' '
+	}, query)
+	words := strings.Fields(clean)
+	if len(words) == 0 {
+		return ""
+	}
+	// Build prefix matching query for FTS5: word1* OR word2* ...
+	var terms []string
+	for _, w := range words {
+		if len(w) > 1 {
+			terms = append(terms, w+"*")
+		}
+	}
+	if len(terms) == 0 {
+		terms = words
+	}
+	return strings.Join(terms, " OR ")
+}
+
+// SearchMemoriesFTS5 searches memories using SQLite FTS5 BM25 full-text ranking
+func (d *DB) SearchMemoriesFTS5(scope, scopeID, query string, limit int) ([]MemoryItemRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 50
+	}
+
+	ftsQuery := CleanFTSQuery(query)
+	if ftsQuery == "" {
+		return d.ListMemoriesByScope(scope, scopeID, "", limit)
+	}
+
+	sqlQuery := `
+		SELECT m.id, m.type, m.scope, m.scope_id, m.session_id, m.key, m.content, m.category,
+		       m.embedding, m.metadata, m.access_count, m.last_accessed_at, m.created_at, m.updated_at,
+		       fts.rank
+		FROM memories_fts fts
+		JOIN memories m ON m.rowid = fts.rowid
+		WHERE memories_fts MATCH ?
+		  AND (m.scope = ? AND m.scope_id = ?)
+		ORDER BY fts.rank ASC
+		LIMIT ?
+	`
+	rows, err := d.db.Query(sqlQuery, ftsQuery, scope, scopeID, limit)
+	if err != nil {
+		// Fallback to LIKE if FTS expression has syntax error
+		pattern := "%" + strings.TrimSpace(query) + "%"
+		fallbackQuery := `
+			SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, last_accessed_at, created_at, updated_at, 0.0 as rank
+			FROM memories
+			WHERE scope = ? AND scope_id = ? AND (key LIKE ? OR content LIKE ? OR category LIKE ?)
+			ORDER BY updated_at DESC LIMIT ?
+		`
+		var fallbackErr error
+		rows, fallbackErr = d.db.Query(fallbackQuery, scope, scopeID, pattern, pattern, pattern, limit)
+		if fallbackErr != nil {
+			return nil, err
+		}
+	}
+	defer rows.Close()
+
+	var list []MemoryItemRecord
+	for rows.Next() {
+		var m MemoryItemRecord
+		var embBytes []byte
+		var metaStr string
+		var lastAcc sql.NullTime
+		var rank float64
+
+		if err := rows.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt, &rank); err != nil {
+			return nil, err
+		}
+		m.Embedding = BytesToFloat32Slice(embBytes)
+		if metaStr != "" {
+			_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
+		}
+		if lastAcc.Valid {
+			m.LastAccessedAt = &lastAcc.Time
+		}
+		// Convert BM25 negative rank to normalized 0..1 score (higher is better)
+		// BM25 rank in SQLite is negative where more negative = better match
+		if rank < 0 {
+			m.Score = float32(1.0 / (1.0 + math.Abs(rank)*0.1))
+		} else {
+			m.Score = 0.5
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
+// ListCandidateMemoriesForScopes loads all memories for given scopes (e.g. global, channel, user)
+func (d *DB) ListCandidateMemoriesForScopes(scopeFilter []struct{ Scope, ScopeID string }) ([]MemoryItemRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if len(scopeFilter) == 0 {
+		return nil, nil
+	}
+
+	var clauses []string
+	var args []interface{}
+	for _, sf := range scopeFilter {
+		clauses = append(clauses, "(scope = ? AND scope_id = ?)")
+		args = append(args, sf.Scope, sf.ScopeID)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, last_accessed_at, created_at, updated_at
+		FROM memories
+		WHERE %s
+		ORDER BY updated_at DESC
+	`, strings.Join(clauses, " OR "))
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []MemoryItemRecord
+	for rows.Next() {
+		var m MemoryItemRecord
+		var embBytes []byte
+		var metaStr string
+		var lastAcc sql.NullTime
+
+		if err := rows.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		m.Embedding = BytesToFloat32Slice(embBytes)
+		if metaStr != "" {
+			_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
+		}
+		if lastAcc.Valid {
+			m.LastAccessedAt = &lastAcc.Time
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
+// DeleteMemory deletes a memory record by ID
+func (d *DB) DeleteMemory(id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM memories WHERE id = ?", id)
+	return err
+}
+
+// DeleteMemoryByKey deletes a memory record by scope, scope_id, and key
+func (d *DB) DeleteMemoryByKey(scope, scopeID, key string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM memories WHERE scope = ? AND scope_id = ? AND key = ?", scope, scopeID, key)
+	return err
+}
+
+// ClearMemoriesByScope deletes all memories in a given scope and scopeID
+func (d *DB) ClearMemoriesByScope(scope, scopeID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM memories WHERE scope = ? AND scope_id = ?", scope, scopeID)
+	return err
+}
+
+// IncrementMemoryAccess increments access count and updates last_accessed_at timestamp
+func (d *DB) IncrementMemoryAccess(id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("UPDATE memories SET access_count = access_count + 1, last_accessed_at = CURRENT_TIMESTAMP WHERE id = ?", id)
+	return err
+}
+
+// --- Legacy Memory Items Compatibility ---
+
+func (d *DB) AddMemoryItem(scope, scopeID, keyTag, content, category string) error {
+	return d.UpsertMemory(&MemoryItemRecord{
+		Scope:    scope,
+		ScopeID:  scopeID,
+		Key:      keyTag,
+		Content:  content,
+		Category: category,
+		Type:     "factual",
+	})
 }
 
 func (d *DB) UpsertMemoryItem(scope, scopeID, keyTag, content, category string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	var existingID string
-	err := d.db.QueryRow("SELECT id FROM memory_items WHERE scope = ? AND scope_id = ? AND key_tag = ?", scope, scopeID, keyTag).Scan(&existingID)
-	if err == nil && existingID != "" {
-		_, updateErr := d.db.Exec("UPDATE memory_items SET content = ?, category = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", content, category, existingID)
-		return updateErr
-	}
-
-	id := uuid.New().String()
-	_, insertErr := d.db.Exec("INSERT INTO memory_items (id, scope, scope_id, key_tag, content, category) VALUES (?, ?, ?, ?, ?, ?)",
-		id, scope, scopeID, keyTag, content, category)
-	return insertErr
+	return d.UpsertMemory(&MemoryItemRecord{
+		Scope:    scope,
+		ScopeID:  scopeID,
+		Key:      keyTag,
+		Content:  content,
+		Category: category,
+		Type:     "factual",
+	})
 }
 
 func (d *DB) ListMemoryItems(scope, scopeID string) ([]MemoryRecord, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	rows, err := d.db.Query("SELECT id, scope, scope_id, key_tag, content, category, created_at, updated_at FROM memory_items WHERE scope = ? AND scope_id = ? ORDER BY updated_at DESC", scope, scopeID)
+	items, err := d.ListMemoriesByScope(scope, scopeID, "", 100)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var list []MemoryRecord
-	for rows.Next() {
-		var m MemoryRecord
-		if err := rows.Scan(&m.ID, &m.Scope, &m.ScopeID, &m.KeyTag, &m.Content, &m.Category, &m.CreatedAt, &m.UpdatedAt); err != nil {
-			return nil, err
-		}
-		list = append(list, m)
+	var records []MemoryRecord
+	for _, it := range items {
+		records = append(records, MemoryRecord{
+			ID:        it.ID,
+			Scope:     it.Scope,
+			ScopeID:   it.ScopeID,
+			KeyTag:    it.Key,
+			Content:   it.Content,
+			Category:  it.Category,
+			CreatedAt: it.CreatedAt,
+			UpdatedAt: it.UpdatedAt,
+		})
 	}
-	return list, nil
+	return records, nil
 }
 
 func (d *DB) SearchMemoryItems(scope, scopeID, query string) ([]MemoryRecord, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	pattern := "%" + strings.TrimSpace(query) + "%"
-	rows, err := d.db.Query("SELECT id, scope, scope_id, key_tag, content, category, created_at, updated_at FROM memory_items WHERE scope = ? AND scope_id = ? AND (key_tag LIKE ? OR content LIKE ? OR category LIKE ?) ORDER BY updated_at DESC", scope, scopeID, pattern, pattern, pattern)
+	items, err := d.SearchMemoriesFTS5(scope, scopeID, query, 50)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var list []MemoryRecord
-	for rows.Next() {
-		var m MemoryRecord
-		if err := rows.Scan(&m.ID, &m.Scope, &m.ScopeID, &m.KeyTag, &m.Content, &m.Category, &m.CreatedAt, &m.UpdatedAt); err != nil {
-			return nil, err
-		}
-		list = append(list, m)
+	var records []MemoryRecord
+	for _, it := range items {
+		records = append(records, MemoryRecord{
+			ID:        it.ID,
+			Scope:     it.Scope,
+			ScopeID:   it.ScopeID,
+			KeyTag:    it.Key,
+			Content:   it.Content,
+			Category:  it.Category,
+			CreatedAt: it.CreatedAt,
+			UpdatedAt: it.UpdatedAt,
+		})
 	}
-	return list, nil
+	return records, nil
 }
 
 func (d *DB) DeleteMemoryItem(id string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	_, err := d.db.Exec("DELETE FROM memory_items WHERE id = ?", id)
-	return err
-}
-
-func (d *DB) DeleteMemoryByKey(scope, scopeID, keyTag string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	_, err := d.db.Exec("DELETE FROM memory_items WHERE scope = ? AND scope_id = ? AND key_tag = ?", scope, scopeID, keyTag)
-	return err
+	return d.DeleteMemory(id)
 }
 
 // --- Proxy Node Operations ---

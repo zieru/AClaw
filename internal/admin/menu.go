@@ -18,7 +18,7 @@ func MainMenuKeyboard() *tele.ReplyMarkup {
 	btnLimits := menu.Data("🛡️ Limits & Footer", "menu_limits")
 	btnMDFiles := menu.Data("📝 Manage .MD Bot", "menu_md")
 	btnCron := menu.Data("⏰ Cron Scheduler", "menu_cron")
-	btnMemory := menu.Data("🧠 Memory (OmniRoute)", "menu_memory")
+	btnMemory := menu.Data("🧠 Memory (SQLite FTS5)", "menu_memory")
 	btnTopic := menu.Data("🧵 Kelola Topik Chat", "menu_topic")
 	btnStats := menu.Data("📊 Audit Log & Stats", "menu_stats")
 	btnTools := menu.Data("🧰 Tool Permissions", "menu_tools")
