@@ -229,7 +229,7 @@ func TestLiveBrowserUseMCPConnection(t *testing.T) {
 		tools: make(map[string]Tool),
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
 	if err := mgr.StartAndRegister(ctx, reg); err != nil {

@@ -302,7 +302,7 @@ func (m *MCPManager) StartAndRegister(ctx context.Context, reg *Registry) error 
 			continue
 		}
 
-		initCtx, cancelInit := context.WithTimeout(ctx, 15*time.Second)
+		initCtx, cancelInit := context.WithTimeout(ctx, 35*time.Second)
 		initReq := mcp.InitializeRequest{}
 		initReq.Params.ClientInfo = mcp.Implementation{
 			Name:    "goassistant",

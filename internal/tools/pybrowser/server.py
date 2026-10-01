@@ -204,15 +204,21 @@ async def run_camoufox_task(
     clean_task: str,
     target_url: Optional[str],
     llm,
+    action: Optional[str] = None,
     model_name: Optional[str] = "Auto",
     headless: bool = True,
     attach_screenshot: bool = True,
+    ignore_ssl: bool = False,
 ) -> str:
     """
     Eksekusi penjelajahan web stealth tingkat tinggi menggunakan Camoufox (Firefox C++ engine-level spoofing)
-    untuk membobol Cloudflare Turnstile, WAF, dan anti-bot pada situs seperti booking.kai.id.
+    untuk membobol Cloudflare Turnstile, WAF, bot detection, dan proteksi fingerprinting (Pixelscan, KAI, dll).
+
+    ignore_ssl (bool): Jika True, abaikan error sertifikat SSL (ignore_http_errors) pada context session ini saja.
+    Hanya untuk akses read-only, bukan transaksi/pembayaran. Per-sesi, tidak global.
     """
     import re
+    from urllib.parse import urljoin
     from camoufox.async_api import AsyncCamoufox
 
     # Resolusi URL awal dari task jika url tidak diberikan langsung
@@ -223,6 +229,8 @@ async def run_camoufox_task(
             url_to_open = urls[0]
             if not url_to_open.startswith("http"):
                 url_to_open = f"https://{url_to_open}"
+        elif "pixelscan" in clean_task.lower():
+            url_to_open = "https://pixelscan.net/"
         elif "kai" in clean_task.lower():
             url_to_open = "https://booking.kai.id/"
         else:
@@ -234,13 +242,22 @@ async def run_camoufox_task(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     screenshot_path = os.path.join(screenshot_dir, f"camoufox_{timestamp}.png")
 
+    ssl_error_detected = False
+
     try:
         async with AsyncCamoufox(
             headless=headless,
             humanize=True,
             geoip=True,
         ) as browser:
-            page = await browser.new_page()
+            # Bypass SSL hanya per-sesi saat diminta (ignore_http_errors context option).
+            # Camoufox menerapkan fingerprint di level launch (env CAMOU_CONFIG_* + profile),
+            # jadi context baru tetap ter-fingerprint dan tidak merusak anti-detect.
+            if ignore_ssl:
+                context = await browser.new_context(ignore_http_errors=True)
+                page = await context.new_page()
+            else:
+                page = await browser.new_page()
             await page.set_viewport_size({"width": 1920, "height": 1080})
 
             try:
@@ -248,7 +265,26 @@ async def run_camoufox_task(
             except Exception:
                 pass
 
-            # Berikan waktu jeda agar Cloudflare Turnstile menyelesaikan verifikasi otomatis
+            # Deteksi halaman peringatan sertifikat SSL Firefox (mis. sertifikat expired/invalid).
+            # Ini menjadi pemicu auto-fallback untuk retry dengan ignore_ssl=True.
+            try:
+                _ssl_title = await page.title()
+                _ssl_content = await page.content()
+                ssl_error_detected = any(
+                    k in _ssl_title for k in [
+                        "Warning: Security Risk", "Potential Security Issue",
+                        "Your connection is not secure", "did not connect",
+                    ]
+                ) or any(
+                    k in _ssl_content for k in [
+                        "SEC_ERROR", "SSL_ERROR", "MOZILLA_PKIX_ERROR",
+                        "Certificate is not trusted", "safety warning",
+                    ]
+                )
+            except Exception:
+                ssl_error_detected = False
+
+            # Berikan waktu jeda agar Cloudflare Turnstile / inisialisasi skrip selesai
             await asyncio.sleep(4)
 
             # Cek jika masih di halaman challenge Turnstile, tunggu tambahan beberapa detik
@@ -259,32 +295,65 @@ async def run_camoufox_task(
                 title = await page.title()
 
             # -----------------------------------------------------------------
-            # INTERACTIVE ACTION EXECUTOR (Form Filling, Typing, Clicking)
+            # INTERACTIVE ACTION EXECUTOR (Form Filling, Typing, Clicking, Scan)
             # -----------------------------------------------------------------
-            interactive_keywords = ["login", "masuk", "isi", "ketik", "klik", "submit", "daftar", "pesan", "booking", "cari", "username", "password", "email"]
-            wants_interaction = any(kw in clean_task.lower() for kw in interactive_keywords)
+            interactive_keywords = [
+                "login", "masuk", "isi", "ketik", "klik", "submit", "daftar",
+                "pesan", "booking", "cari", "username", "password", "email",
+                "scan", "test", "cek", "check", "verifikasi", "fingerprint",
+                "jalankan", "run", "pilih", "select", "tombol", "button", "tekan", "press"
+            ]
+            wants_interaction = (action in ["click", "type", "fill", "press_key", "eval_js"]) or any(kw in clean_task.lower() for kw in interactive_keywords)
 
             action_log = []
             if wants_interaction:
                 import json
-                # Kumpulkan elemen form & interaktif yang terlihat di halaman
+                # Kumpulkan seluruh elemen interaktif yang terlihat (button, link <a>, input, select, dll)
                 elements = await page.evaluate("""
                     () => {
                         const items = [];
-                        document.querySelectorAll('input:not([type="hidden"]), select, textarea, button, input[type="submit"]').forEach((el) => {
+                        window._camoufoxInteractive = [];
+                        const selectors = 'button, a, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [role="tab"], [role="checkbox"]';
+                        document.querySelectorAll(selectors).forEach((el) => {
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0) {
+                            const style = window.getComputedStyle(el);
+                            if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0') {
+                                const idx = items.length;
+                                window._camoufoxInteractive.push(el);
+                                el.setAttribute('data-camoufox-idx', idx.toString());
+                                
+                                let label = (el.innerText || el.value || el.getAttribute('aria-label') || el.title || el.placeholder || '').trim();
+                                if (label.length > 80) label = label.slice(0, 80) + '...';
+                                
+                                let sel = '';
+                                if (el.id) {
+                                    sel = '#' + CSS.escape(el.id);
+                                } else if (el.name) {
+                                    sel = `${el.tagName.toLowerCase()}[name="${CSS.escape(el.name)}"]`;
+                                } else if (el.tagName.toLowerCase() === 'a' && el.getAttribute('href')) {
+                                    const href = el.getAttribute('href');
+                                    if (href && !href.startsWith('javascript:')) {
+                                        sel = `a[href="${CSS.escape(href)}"]`;
+                                    }
+                                }
+                                if (!sel) {
+                                    sel = `[data-camoufox-idx="${idx}"]`;
+                                }
+
                                 items.push({
+                                    idx: idx,
                                     tag: el.tagName.toLowerCase(),
                                     type: el.type || '',
                                     id: el.id || '',
                                     name: el.name || '',
+                                    selector: sel,
+                                    text: label,
+                                    href: el.getAttribute('href') || '',
                                     placeholder: el.placeholder || '',
-                                    text: el.innerText ? el.innerText.trim().slice(0, 50) : (el.value || ''),
                                 });
                             }
                         });
-                        return items;
+                        return items.slice(0, 100);
                     }
                 """)
 
@@ -307,22 +376,21 @@ async def run_camoufox_task(
                 captcha_info = f"Teks Captcha yang berhasil di-OCR: '{captcha_val}'" if captcha_val else "Tidak ada atau gagal membaca captcha"
                 planner_prompt = f"""Kamu adalah browser automation controller.
 Tugas Pengguna: {clean_task}
-Halaman Saat Ini: {title} ({url_to_open})
-Elemen Interaktif di Halaman:
+Halaman Saat Ini: {title} ({page.url})
+Elemen Interaktif di Halaman (Top 100):
 {json.dumps(elements, indent=2, ensure_ascii=False)}
 Status Captcha: {captcha_info}
 
-Berdasarkan tugas pengguna, tentukan urutan aksi interaksi form (fill, type, click).
+Berdasarkan tugas pengguna, tentukan urutan aksi interaksi web (click, fill, type, press, eval_js).
 Balas HANYA dengan valid JSON array berisi daftar aksi, contoh:
 [
-  {{"action": "fill", "selector": "#username", "value": "user@example.com"}},
-  {{"action": "fill", "selector": "#password", "value": "rahasia123"}},
-  {{"action": "fill", "selector": "#captcha", "value": "{captcha_val}"}},
-  {{"action": "click", "selector": "#btnLogin"}}
+  {{"action": "click", "idx": 5, "text": "Scan My Browser Now"}},
+  {{"action": "fill", "idx": 2, "value": "user@example.com"}}
 ]
 PENTING:
-- Gunakan selector CSS spesifik (utamakan '#id' atau '[name=...]').
-- Jika tugas adalah login dan ada captcha, pastikan masukkan nilai captcha ke field captcha.
+- Gunakan field `idx` (nomor indeks numerik dari daftar elemen di atas) agar browser dapat mengklik/mengisi target secara presisi tanpa salah sasaran.
+- Untuk aksi click, sertakan juga "text" atau "selector" dan "href" jika ada.
+- Jika tugas adalah melakukan scan fingerprint di pixelscan dan terdapat tombol/link seperti "Scan My Browser Now" atau "Fingerprint Check", pilih elemen tersebut untuk diklik.
 - Jika tidak ada aksi yang diperlukan, balas dengan `[]`.
 """
                 try:
@@ -335,36 +403,148 @@ PENTING:
                         except Exception:
                             actions = []
 
-                    # Heuristic fallback jika AI planner tidak menghasilkan aksi tapi tugasnya login
-                    if not actions and any(k in clean_task.lower() for k in ["login", "masuk"]):
-                        user_match = re.search(r'([\w\.-]+@[\w\.-]+\.\w+)', clean_task)
-                        pass_match = re.search(r'password\s+([^\s,]+)', clean_task, re.IGNORECASE)
-                        if user_match:
-                            actions.append({"action": "fill", "selector": "#username", "value": user_match.group(1)})
-                        if pass_match:
-                            actions.append({"action": "fill", "selector": "#password", "value": pass_match.group(1)})
-                        if captcha_val:
-                            actions.append({"action": "fill", "selector": "#captcha", "value": captcha_val})
-                        actions.append({"action": "click", "selector": "#btnLogin"})
+                    # Heuristic fallback jika AI planner tidak menghasilkan aksi tapi tugasnya jelas:
+                    if not actions:
+                        if any(k in clean_task.lower() for k in ["login", "masuk"]):
+                            user_match = re.search(r'([\w\.-]+@[\w\.-]+\.\w+)', clean_task)
+                            pass_match = re.search(r'password\s+([^\s,]+)', clean_task, re.IGNORECASE)
+                            if user_match:
+                                actions.append({"action": "fill", "selector": "#username", "value": user_match.group(1)})
+                            if pass_match:
+                                actions.append({"action": "fill", "selector": "#password", "value": pass_match.group(1)})
+                            if captcha_val:
+                                actions.append({"action": "fill", "selector": "#captcha", "value": captcha_val})
+                            actions.append({"action": "click", "selector": "#btnLogin"})
+                        elif any(k in clean_task.lower() for k in ["pixelscan", "fingerprint", "scan"]):
+                            for el in elements:
+                                el_txt = el.get("text", "").lower()
+                                if "scan my browser" in el_txt or "fingerprint check" in el_txt:
+                                    actions.append({
+                                        "action": "click",
+                                        "idx": el.get("idx"),
+                                        "selector": el.get("selector"),
+                                        "text": el.get("text"),
+                                        "href": el.get("href")
+                                    })
+                                    break
 
                     for act in actions:
                         action_type = act.get("action", "").lower()
+                        idx = act.get("idx")
                         sel = act.get("selector", "")
+                        text_val = act.get("text", "")
                         val = act.get("value", "")
-                        if action_type in ["fill", "type"] and sel:
-                            await page.fill(sel, str(val))
-                            is_pwd = "pass" in sel.lower() or "pwd" in sel.lower()
-                            action_log.append(f"• Mengisi {sel}: {'••••••••' if is_pwd else val}")
-                        elif action_type == "click" and sel:
-                            await page.click(sel)
-                            action_log.append(f"• Mengklik {sel}")
-                            await asyncio.sleep(4)
-                        elif action_type == "press" and val:
-                            await page.keyboard.press(str(val))
-                            action_log.append(f"• Menekan tombol keyboard {val}")
+                        href = act.get("href", "")
+                        if not href and idx is not None:
+                            for el in elements:
+                                if el.get("idx") == idx:
+                                    href = el.get("href", "")
+                                    break
+
+                        try:
+                            if action_type in ["fill", "type"]:
+                                filled = False
+                                if idx is not None:
+                                    filled = await page.evaluate("""({i, v}) => {
+                                        const el = (window._camoufoxInteractive && window._camoufoxInteractive[i]) || document.querySelector(`[data-camoufox-idx="${i}"]`);
+                                        if (el) {
+                                            el.focus();
+                                            el.value = v;
+                                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                                            return true;
+                                        }
+                                        return false;
+                                    }""", {"i": idx, "v": str(val)})
+                                if not filled and sel:
+                                    await page.fill(sel, str(val), timeout=5000)
+                                    filled = True
+
+                                is_pwd = "pass" in str(sel).lower() or "pwd" in str(sel).lower()
+                                display_val = "••••••••" if is_pwd else val
+                                action_log.append(f"• Mengisi {sel or f'elemen [{idx}]'}: {display_val}")
+
+                            elif action_type == "click":
+                                clicked = False
+                                target_desc = text_val or sel or (f"elemen [{idx}]" if idx is not None else "tombol")
+
+                                # 1. Klik DOM via idx
+                                if idx is not None:
+                                    clicked = await page.evaluate("""(i) => {
+                                        const el = (window._camoufoxInteractive && window._camoufoxInteractive[i]) || document.querySelector(`[data-camoufox-idx="${i}"]`);
+                                        if (el) {
+                                            el.scrollIntoView({ behavior: 'instant', block: 'center' });
+                                            el.click();
+                                            return true;
+                                        }
+                                        return false;
+                                    }""", idx)
+
+                                # 2. Klik via Playwright Locator Text
+                                if not clicked and text_val:
+                                    try:
+                                        loc = page.locator(f"text={text_val}").first
+                                        if await loc.count() > 0:
+                                            await loc.click(timeout=5000)
+                                            clicked = True
+                                    except Exception:
+                                        pass
+
+                                # 3. Klik via CSS Selector
+                                if not clicked and sel:
+                                    try:
+                                        await page.click(sel, timeout=5000)
+                                        clicked = True
+                                    except Exception:
+                                        clicked = await page.evaluate("""(s) => {
+                                            const el = document.querySelector(s);
+                                            if (el) {
+                                                el.scrollIntoView({ behavior: 'instant', block: 'center' });
+                                                el.click();
+                                                return true;
+                                            }
+                                            return false;
+                                        }""", sel)
+
+                                # 4. Navigasi langsung jika elemen bertipe tautan <a> dengan href
+                                await asyncio.sleep(1)
+                                if href and (not clicked or page.url == url_to_open):
+                                    full_target = urljoin(page.url, href)
+                                    if page.url != full_target:
+                                        try:
+                                            await page.goto(full_target, wait_until="domcontentloaded", timeout=30000)
+                                            clicked = True
+                                        except Exception:
+                                            pass
+
+                                if clicked:
+                                    action_log.append(f"• Berhasil mengklik: {target_desc}")
+                                else:
+                                    action_log.append(f"• Gagal mengklik: {target_desc}")
+
+                                await asyncio.sleep(3)
+
+                            elif action_type == "eval_js":
+                                script = act.get("script", "") or val
+                                if script:
+                                    js_out = await page.evaluate(script)
+                                    action_log.append(f"• Eksekusi JS: {js_out}")
+
+                            elif action_type == "press":
+                                key = act.get("key") or val or "Enter"
+                                await page.keyboard.press(str(key))
+                                action_log.append(f"• Menekan tombol keyboard {key}")
+                                await asyncio.sleep(2)
+
+                        except Exception as act_err:
+                            action_log.append(f"• Kendala aksi {action_type}: {act_err}")
 
                     # Tunggu jeda setelah eksekusi seluruh aksi agar halaman baru termuat
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(3)
+                    # Khusus pixelscan atau situs scanner fingerprint, beri waktu hingga analisis selesai
+                    if "pixelscan" in page.url or "pixelscan" in clean_task.lower():
+                        await asyncio.sleep(7)
+
                     title = await page.title()
                 except Exception as plan_err:
                     action_log.append(f"• Gagal mengeksekusi rencana aksi: {plan_err}")
@@ -374,7 +554,7 @@ PENTING:
                 try:
                     await page.screenshot(path=screenshot_path, full_page=False)
                     if os.path.exists(screenshot_path):
-                        attachment_tag = f"\n\n[ATTACH_FILE:{screenshot_path}|CAPTION:Tangkapan Layar Camoufox Stealth ({url_to_open})]"
+                        attachment_tag = f"\n\n[ATTACH_FILE:{screenshot_path}|CAPTION:Tangkapan Layar Camoufox Stealth ({page.url})]"
                 except Exception:
                     pass
 
@@ -383,29 +563,31 @@ PENTING:
 
             action_log_str = "\n".join(action_log) if action_log else ""
             analysis_prompt = (
-                f"Kamu telah berhasil membuka situs {url_to_open} menggunakan Camoufox Stealth Engine (Firefox anti-detect).\n"
+                f"Kamu telah berhasil membuka situs {page.url} menggunakan Camoufox Stealth Engine (Firefox anti-detect).\n"
                 f"Judul Halaman Sekarang: {title}\n"
                 f"Tugas Pengguna: {clean_task}\n\n"
                 f"Aksi yang Baru Saja Dijalankan:\n{action_log_str if action_log_str else 'Hanya membaca halaman'}\n\n"
                 f"Isi Konten Halaman Saat Ini (Setelah Aksi):\n{truncated_text}\n\n"
-                f"Jelaskan apakah login atau aksi tersebut berhasil/gagal berdasarkan isi halaman yang termuat, dan berikan laporan informatif yang rapi."
+                f"Jelaskan apakah scan/aksi/tugas tersebut berhasil atau gagal berdasarkan isi halaman yang termuat, dan berikan laporan informatif yang rapi."
             )
             summary = await call_llm(llm, analysis_prompt)
             if not summary:
-                summary = f"Berhasil memproses {url_to_open} (Judul: {title}).\nRingkasan isi halaman:\n{truncated_text[:800]}"
+                summary = f"Berhasil memproses {page.url} (Judul: {title}).\nRingkasan isi halaman:\n{truncated_text[:800]}"
 
             actions_header = f"📋 <b>Aksi yang Dijalankan:</b>\n{action_log_str}\n\n" if action_log_str else ""
-            return f"🦊 <b>[Camoufox Stealth Engine - {model_name}]</b>\n\n{actions_header}{summary}{attachment_tag}"
+            report = f"🦊 <b>[Camoufox Stealth Engine - {model_name}]</b>\n\n{actions_header}{summary}{attachment_tag}"
+            return report, ssl_error_detected
     except Exception as err:
-        return f"❌ Gagal menjalankan Camoufox Stealth Engine: {err}"
+        return f"❌ Gagal menjalankan Camoufox Stealth Engine: {err}", False
 
 
 @mcp.tool(
     name="browser",
     description=(
-        "Browser otonom (autonomous web agent) berbasis Python dengan Dual-Engine (Chromium + Camoufox Stealth). "
-        "AI dapat menjelajahi web secara mandiri untuk mencari informasi, membandingkan harga/tiket (Traveloka, KAI, Tokopedia, dll), "
-        "membuka URL, mengisi form formulir, mengekstrak data dari berbagai halaman web, dan menembus proteksi Cloudflare/WAF. "
+        "Browser otonom (autonomous web agent) berbasis Python dengan Camoufox Stealth Engine sebagai PRIMARY browser. "
+        "Camoufox menggunakan Firefox C++ spoofing engine level tanpa ketergantungan Docker/Zenika, mampu menembus Cloudflare Turnstile, "
+        "WAF, anti-bot, serta anti-fingerprinting (Pixelscan, CreepJS, KAI, dll). "
+        "AI dapat menjelajahi web secara mandiri, membuka URL, mengklik tombol, mengisi form formulir, mengekstrak data dari berbagai halaman web. "
         "Mendukung model apa pun (DeepSeek, GLM, Gemini, GPT-4o, Claude) dan otomatis mewarisi model aktif orchestrator."
     )
 )
@@ -421,11 +603,18 @@ async def browser(
     max_steps: int = 15,
     use_vision: Optional[bool] = None,
     attach_screenshot: bool = True,
-    engine: str = "auto"
+    engine: str = "camoufox",
+    ignore_ssl: bool = False,
 ) -> str:
     """
     Eksekusi tugas browser otonom dengan kontrol dinamis dan dukungan model multi-provider.
-    Mendukung Dual-Engine: Engine 1 (Chromium CDP default) & Engine 2 (Camoufox Stealth).
+    Camoufox Stealth adalah Primary Browser default (bebas Docker Zenika).
+    Chromium CDP tersedia sebagai opsi sekunder jika engine='chromium'.
+
+    ignore_ssl (bool): Jika True, abaikan error sertifikat SSL pada sesi Camoufox ini saja
+    (ignore_http_errors). Tanpa Chromium — tetap Camoufox. Untuk akses read-only, bukan transaksi.
+    Per-sesi, tidak global. Saat False dan halaman menampilkan peringatan sertifikat, otomatis
+    di-retry sekali dengan bypass SSL.
     """
     try:
         clean_task = (task or "").strip()
@@ -440,23 +629,57 @@ async def browser(
         llm, vision_enabled = resolve_llm_and_vision(model, provider, use_vision, api_base, api_key)
 
         # -------------------------------------------------------------
-        # DUAL-ENGINE ROUTING
+        # DUAL-ENGINE ROUTING: Camoufox is PRIMARY (Docker Zenika bypassed)
         # -------------------------------------------------------------
-        # Deteksi awal: Jika target adalah domain Cloudflare ketat (seperti KAI / Turnstile)
-        is_kai_or_cloudflare = bool(
-            (url and ("kai.id" in url.lower() or "cloudflare" in url.lower()))
-            or ("kai.id" in clean_task.lower() or "kai access" in clean_task.lower())
-        )
-        should_use_camoufox = (engine.lower() == "camoufox") or (engine.lower() == "auto" and is_kai_or_cloudflare and is_camoufox_ready())
+        is_chromium_forced = (engine.lower() == "chromium")
+        use_camoufox = not is_chromium_forced and is_camoufox_ready()
 
-        if should_use_camoufox:
-            if is_camoufox_ready():
-                return await run_camoufox_task(clean_task, url, llm, model_name=model, headless=headless, attach_screenshot=attach_screenshot)
-            elif engine.lower() == "camoufox":
-                return "⚠️ Engine Camoufox belum terpasang binary-nya di VPS. Silakan jalankan 'uv run python -m camoufox fetch' di server."
+        if use_camoufox:
+            # Eksplisit: ignore_ssl=True langsung bypass sejak awal (domain apa pun).
+            if ignore_ssl:
+                result, _ = await run_camoufox_task(
+                    clean_task,
+                    url,
+                    llm,
+                    action=action,
+                    model_name=model,
+                    headless=headless,
+                    attach_screenshot=attach_screenshot,
+                    ignore_ssl=True,
+                )
+                return result
+
+            # Normal: coba tanpa bypass SSL.
+            result, ssl_error = await run_camoufox_task(
+                clean_task,
+                url,
+                llm,
+                action=action,
+                model_name=model,
+                headless=headless,
+                attach_screenshot=attach_screenshot,
+                ignore_ssl=False,
+            )
+
+            # Auto-fallback: halaman menampilkan peringatan sertifikat SSL -> retry sekali dgn bypass.
+            if ssl_error:
+                result, _ = await run_camoufox_task(
+                    clean_task,
+                    url,
+                    llm,
+                    action=action,
+                    model_name=model,
+                    headless=headless,
+                    attach_screenshot=attach_screenshot,
+                    ignore_ssl=True,
+                )
+                result += "\n\n⚠️ <i>Peringatan sertifikat SSL terdeteksi; akses di-retry dengan bypass SSL (per-sesi, read-only).</i>"
+            return result
+        elif engine.lower() == "camoufox" and not is_camoufox_ready():
+            return "⚠️ Engine Camoufox belum terpasang binary-nya di sistem. Silakan jalankan 'uv run python -m camoufox fetch' di server."
 
         # -------------------------------------------------------------
-        # ENGINE 1: Standard Chromium / Playwright / Docker CDP
+        # ENGINE 2 (Fallback / Secondary): Chromium CDP / Local Chrome
         # -------------------------------------------------------------
         # 1. Cek apakah ada Docker Chromium CDP aktif di 127.0.0.1:9222 atau env CDP_URL
         cdp_endpoint = os.getenv("CDP_URL")
@@ -531,7 +754,11 @@ async def browser(
             or "just a moment..." in final_result.lower()
         )
         if is_blocked and is_camoufox_ready() and engine.lower() != "chromium":
-            return await run_camoufox_task(clean_task, url, llm, model_name=model, headless=headless, attach_screenshot=attach_screenshot)
+            result, ssl_error = await run_camoufox_task(clean_task, url, llm, action=action, model_name=model, headless=headless, attach_screenshot=attach_screenshot)
+            if ssl_error:
+                result, _ = await run_camoufox_task(clean_task, url, llm, action=action, model_name=model, headless=headless, attach_screenshot=attach_screenshot, ignore_ssl=True)
+                result += "\n\n⚠️ <i>Peringatan sertifikat SSL terdeteksi; akses di-retry dengan bypass SSL (per-sesi, read-only).</i>"
+            return result
 
         # Ambil screenshot halaman terakhir jika diminta dan tersedia
         attachment_tag = ""

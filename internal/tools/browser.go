@@ -30,7 +30,7 @@ func (b *BrowserAutomationTool) Name() string {
 }
 
 func (b *BrowserAutomationTool) Description() string {
-	return "Browser otomatis (Chrome/Edge/Docker Zenika) berbasis arsitektur browser-use & Chrome DevTools Protocol (CDP). Mampu merender website modern berbasis JavaScript (React, Vue, SPA). AI dapat membuka URL, membaca teks bersih, melihat elemen interaktif berindeks numerik [0..N], mengklik elemen via index, mengisi form input via index dengan dukungan event React, menekan tombol keyboard (Enter/Escape/Tab), scroll, atau mengambil screenshot berlabel Set-of-Marks (SoM)."
+	return "Browser otomatis (Camoufox Stealth Primary / Chrome / Edge) berbasis arsitektur browser-use & Chrome DevTools Protocol (CDP). Mampu merender website modern berbasis JavaScript (React, Vue, SPA). AI dapat membuka URL, membaca teks bersih, melihat elemen interaktif berindeks numerik [0..N], mengklik elemen via index, mengisi form input via index dengan dukungan event React, menekan tombol keyboard (Enter/Escape/Tab), scroll, atau mengambil screenshot berlabel Set-of-Marks (SoM)."
 }
 
 func (b *BrowserAutomationTool) Parameters() ParametersSchema {
@@ -358,11 +358,12 @@ func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]int
 	}
 }
 
-// ensureDockerChrome memeriksa apakah container Docker zenika/alpine-chrome aktif, atau otomatis menyalakannya
+// ensureDockerChrome memeriksa apakah port CDP 9222 sudah aktif (jika ada CDP lokal/Docker yang berjalan).
+// Kita abaikan pemaksaan auto-launch Docker zenika/alpine-chrome agar Camoufox menjadi primary dan resource hemat.
 func ensureDockerChrome(ctx context.Context) (string, error) {
 	client := &http.Client{Timeout: 1 * time.Second}
 
-	// 1. Cek jika port CDP 9222 sudah siap & aktif
+	// Cek jika port CDP 9222 sudah siap & aktif
 	if resp, err := client.Get("http://127.0.0.1:9222/json/version"); err == nil && resp.StatusCode == 200 {
 		_ = resp.Body.Close()
 		if u, err := launcher.ResolveURL("http://127.0.0.1:9222"); err == nil && u != "" {
@@ -370,56 +371,7 @@ func ensureDockerChrome(ctx context.Context) (string, error) {
 		}
 	}
 
-	// 2. Cek apakah CLI docker terinstall di sistem host
-	if _, err := exec.LookPath("docker"); err != nil {
-		return "", fmt.Errorf("docker CLI tidak ditemukan di host: %w", err)
-	}
-
-	// 3. Inspeksi status container goassistant-chrome
-	checkCtx, checkCancel := context.WithTimeout(ctx, 4*time.Second)
-	defer checkCancel()
-
-	out, _ := exec.CommandContext(checkCtx, "docker", "ps", "-a", "--filter", "name=goassistant-chrome", "--format", "{{.Names}}#{{.Status}}").Output()
-	rawStatus := strings.TrimSpace(string(out))
-
-	if !strings.Contains(rawStatus, "goassistant-chrome") {
-		// Container belum ada -> buat dan jalankan container secara otomatis
-		runCtx, runCancel := context.WithTimeout(ctx, 45*time.Second)
-		defer runCancel()
-
-		runCmd := exec.CommandContext(runCtx, "docker", "run", "-d",
-			"--name", "goassistant-chrome",
-			"-p", "127.0.0.1:9222:9222",
-			"--restart=unless-stopped",
-			"--shm-size=256m",
-			"--memory=512m",
-			"zenika/alpine-chrome",
-			"--no-sandbox",
-			"--remote-debugging-address=0.0.0.0",
-			"--remote-debugging-port=9222",
-		)
-		if err := runCmd.Run(); err != nil {
-			return "", fmt.Errorf("gagal meluncurkan docker container zenika/alpine-chrome: %w", err)
-		}
-	} else if !strings.Contains(rawStatus, "Up") {
-		// Container sudah ada namun mati -> start container
-		startCtx, startCancel := context.WithTimeout(ctx, 6*time.Second)
-		defer startCancel()
-		_ = exec.CommandContext(startCtx, "docker", "start", "goassistant-chrome").Run()
-	}
-
-	// 4. Polling hingga endpoint CDP merespon (max 6 detik)
-	for i := 0; i < 12; i++ {
-		time.Sleep(500 * time.Millisecond)
-		if resp, err := client.Get("http://127.0.0.1:9222/json/version"); err == nil && resp.StatusCode == 200 {
-			_ = resp.Body.Close()
-			if u, err := launcher.ResolveURL("http://127.0.0.1:9222"); err == nil && u != "" {
-				return u, nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("timeout menunggu Docker Chrome CDP siap di 127.0.0.1:9222")
+	return "", fmt.Errorf("CDP 127.0.0.1:9222 tidak aktif (docker zenika diabaikan)")
 }
 
 // buildDomTreeScript menginjeksi engine DOM parsing ala browser-use untuk mendeteksi
