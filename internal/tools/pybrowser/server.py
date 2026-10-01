@@ -1,8 +1,10 @@
 import asyncio
+import atexit
 import os
 import shutil
 import socket
 import sys
+import time
 from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
@@ -202,92 +204,214 @@ def is_camoufox_ready() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# SESSION MANAGER — Camoufox Persistent Context (resume browsing antar tool call)
+# SESSION MANAGER — Camoufox Persistent Context (Lifecycle & Memory Control)
 # ---------------------------------------------------------------------------
 # Setiap `session_id` mendapat persistent context sendiri (user_data_dir di disk)
 # sehingga cookie/login/localStorage/lokasi halaman dipertahankan antar panggilan tool.
-# Ini memungkinkan alur: buka site -> lihat login -> tanya kredensial -> lanjut (bukan ngulang).
+# Manajemen Memori:
+# - CAMOUFOX_MAX_SESSIONS: Batas maksimum sesi aktif di RAM (default: 1). Jika ada sesi baru,
+#   sesi yang paling lama tidak digunakan (LRU) otomatis ditutup dan disimpan ke disk.
+# - CAMOUFOX_SESSION_TTL: Waktu idle maksimum (detik) sebelum sesi ditutup otomatis (default: 300s = 5m).
+# - Tab Reuse: Memanfaatkan tab awal bawaan Playwright (pages[0]) alih-alih membuka tab baru terus-menerus.
+# - Explicit Close: Aksi action="close" menutup sesi seketika dan melepaskan seluruh memori RAM.
 # ---------------------------------------------------------------------------
 
+CAMOUFOX_MAX_SESSIONS = int(os.getenv("CAMOUFOX_MAX_SESSIONS", "1"))
+CAMOUFOX_SESSION_TTL = float(os.getenv("CAMOUFOX_SESSION_TTL", "300"))  # 5 menit
+
 _SESSION_LOCK = asyncio.Lock()
-# session_id -> { "ctx": BrowserContext, "page": Page, "browser": AsyncCamoufox, "user_data_dir": str }
+# session_id -> { "ctx": BrowserContext, "page": Page, "browser": AsyncCamoufox, "user_data_dir": str, "last_activity": float, "ignore_ssl": bool }
 _ACTIVE_SESSIONS: dict = {}
+_REAPER_TASK: Optional[asyncio.Task] = None
+
+
+async def _ensure_reaper_started() -> None:
+    global _REAPER_TASK
+    if _REAPER_TASK is None or _REAPER_TASK.done():
+        try:
+            loop = asyncio.get_running_loop()
+            _REAPER_TASK = loop.create_task(_session_reaper())
+        except RuntimeError:
+            pass
+
+
+async def _session_reaper() -> None:
+    """Background task untuk membersihkan sesi browser yang idle melebihi TTL."""
+    while True:
+        try:
+            await asyncio.sleep(30)
+            now = time.time()
+            async with _SESSION_LOCK:
+                expired = [
+                    sid for sid, data in _ACTIVE_SESSIONS.items()
+                    if (now - data.get("last_activity", now)) > CAMOUFOX_SESSION_TTL
+                ]
+                for sid in expired:
+                    await _close_session_locked(sid)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+
+
+async def _close_session_locked(session_id: str) -> bool:
+    """Tutup sesi Camoufox, semua halamannya, dan hentikan proses binary agar memori RAM terbebas penuh."""
+    entry = _ACTIVE_SESSIONS.pop(session_id, None)
+    if not entry:
+        return False
+
+    ctx = entry.get("ctx")
+    if ctx is not None:
+        try:
+            for p in list(getattr(ctx, "pages", [])):
+                try:
+                    await p.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            await ctx.close()
+        except Exception:
+            pass
+
+    browser = entry.get("browser")
+    if browser is not None:
+        try:
+            await browser.__aexit__(None, None, None)
+        except Exception:
+            pass
+
+    return True
+
+
+async def _evict_oldest_session_if_needed() -> None:
+    """Jika jumlah sesi mencapai batas maksimum, tutup sesi tertua (LRU) untuk menghindari OOM."""
+    while len(_ACTIVE_SESSIONS) >= CAMOUFOX_MAX_SESSIONS and _ACTIVE_SESSIONS:
+        oldest_sid = min(
+            _ACTIVE_SESSIONS.keys(),
+            key=lambda sid: _ACTIVE_SESSIONS[sid].get("last_activity", 0)
+        )
+        await _close_session_locked(oldest_sid)
 
 
 async def _get_or_create_camoufox_session(
     session_id: str,
     headless: bool,
+    ignore_ssl: bool = False,
 ) -> "tuple":
     """
     Ambil sesi Camoufox yang sudah ada untuk session_id, atau buat baru (persistent context).
-    Mengembalikan (context, page). Browser tetap hidup antar panggilan (tidak di-close).
+    Mengembalikan (context, page).
     """
     import re
     from camoufox.async_api import AsyncCamoufox
 
+    await _ensure_reaper_started()
+
     async with _SESSION_LOCK:
         entry = _ACTIVE_SESSIONS.get(session_id)
+        # Jika opsi ignore_ssl berubah (misal retry SSL fallback), buat ulang sesi
+        if entry is not None and entry.get("ignore_ssl") != ignore_ssl:
+            await _close_session_locked(session_id)
+            entry = None
+
         if entry is not None:
+            ctx = entry.get("ctx")
             page = entry.get("page")
-            # Validasi page masih responsif; jika sudah mati, buat halaman baru.
+            # Validasi page masih responsif
             if page is not None:
                 try:
                     await page.evaluate("() => 1")
-                    return entry["ctx"], page
+                    entry["last_activity"] = time.time()
+                    return ctx, page
                 except Exception:
                     try:
                         await page.close()
                     except Exception:
                         pass
                     entry["page"] = None
-            if entry.get("ctx") is not None:
+
+            if ctx is not None:
                 try:
-                    new_page = await entry["ctx"].new_page()
-                    await new_page.set_viewport_size({"width": 1920, "height": 1080})
-                    entry["page"] = new_page
-                    return entry["ctx"], new_page
+                    pages = getattr(ctx, "pages", [])
+                    if pages:
+                        active_p = pages[0]
+                    else:
+                        active_p = await ctx.new_page()
+                        await active_p.set_viewport_size({"width": 1920, "height": 1080})
+
+                    # Tutup tab ekstra yang mungkin tertinggal
+                    for extra in pages[1:]:
+                        try:
+                            await extra.close()
+                        except Exception:
+                            pass
+
+                    entry["page"] = active_p
+                    entry["last_activity"] = time.time()
+                    return ctx, active_p
                 except Exception:
                     pass
+
             # Sesi tidak valid -> tutup & buat baru
             await _close_session_locked(session_id)
 
         # ---- Buat sesi baru (persistent context) ----
+        await _evict_oldest_session_if_needed()
+
         sess_root = os.path.abspath(os.path.join(project_root, "data", "browser", "sessions"))
         os.makedirs(sess_root, exist_ok=True)
         safe_id = re.sub(r'[^A-Za-z0-9_.-]', '_', session_id) if session_id else "default"
         user_data_dir = os.path.join(sess_root, f"camoufox_{safe_id}")
 
-        browser = AsyncCamoufox(
-            headless=headless,
-            humanize=True,
-            geoip=True,
-            persistent_context=True,
-            user_data_dir=user_data_dir,
-        )
+        # Konfigurasi efisiensi RAM Firefox
+        firefox_user_prefs = {
+            "browser.sessionhistory.max_total_viewers": 0,  # Bebaskan memori bfcache
+            "browser.sessionhistory.max_entries": 3,
+            "browser.cache.memory.enable": False,
+            "dom.ipc.processCount": 1,                      # Batasi sub-proses content
+        }
+
+        launch_kwargs = {
+            "headless": headless,
+            "humanize": True,
+            "geoip": True,
+            "persistent_context": True,
+            "user_data_dir": user_data_dir,
+            "firefox_user_prefs": firefox_user_prefs,
+        }
+        if ignore_ssl:
+            launch_kwargs["ignore_https_errors"] = True
+
+        browser = AsyncCamoufox(**launch_kwargs)
         ctx = await browser.__aenter__()
-        entry = {"ctx": ctx, "page": None, "browser": browser, "user_data_dir": user_data_dir}
+
+        # Playwright persistent context otomatis membuka tab awal (ctx.pages[0])
+        pages = getattr(ctx, "pages", [])
+        if pages:
+            active_page = pages[0]
+        else:
+            active_page = await ctx.new_page()
+            await active_page.set_viewport_size({"width": 1920, "height": 1080})
+
+        # Tutup tab ekstra bila ada
+        for extra in pages[1:]:
+            try:
+                await extra.close()
+            except Exception:
+                pass
+
+        entry = {
+            "ctx": ctx,
+            "page": active_page,
+            "browser": browser,
+            "user_data_dir": user_data_dir,
+            "last_activity": time.time(),
+            "ignore_ssl": ignore_ssl,
+        }
         _ACTIVE_SESSIONS[session_id] = entry
-
-        new_page = await ctx.new_page()
-        await new_page.set_viewport_size({"width": 1920, "height": 1080})
-        entry["page"] = new_page
-        return ctx, new_page
-
-
-async def _close_session_locked(session_id: str) -> None:
-    entry = _ACTIVE_SESSIONS.pop(session_id, None)
-    if not entry:
-        return
-    try:
-        if entry.get("browser") is not None:
-            await entry["browser"].__aexit__(None, None, None)
-    except Exception:
-        pass
-    try:
-        if entry.get("ctx") is not None:
-            await entry["ctx"].close()
-    except Exception:
-        pass
+        return ctx, active_page
 
 
 async def run_camoufox_task(
@@ -320,6 +444,12 @@ async def run_camoufox_task(
     if not session_id:
         session_id = "default"
 
+    # Penanganan aksi tutup browser secara eksplisit
+    if (action or "").lower() in ["close", "exit", "quit", "tutup"]:
+        async with _SESSION_LOCK:
+            await _close_session_locked(session_id)
+        return f"🦊 Sesi Camoufox '{session_id}' berhasil ditutup dan memori sistem telah dibebaskan.", False
+
     # Resolusi URL awal dari task jika url tidak diberikan langsung
     url_to_open = target_url
     if not url_to_open:
@@ -344,7 +474,7 @@ async def run_camoufox_task(
     ssl_error_detected = False
 
     try:
-        ctx, page = await _get_or_create_camoufox_session(session_id, headless)
+        ctx, page = await _get_or_create_camoufox_session(session_id, headless, ignore_ssl=ignore_ssl)
 
         # Resume navigation: hanya navigasi bila belum di URL target atau dipaksa reload.
         current_page_url = ""
@@ -681,6 +811,9 @@ PENTING:
 
         actions_header = f"📋 <b>Aksi yang Dijalankan:</b>\n{action_log_str}\n\n" if action_log_str else ""
         report = f"🦊 <b>[Camoufox Stealth Engine - {model_name}]</b>\n\n{actions_header}{summary}{attachment_tag}"
+        async with _SESSION_LOCK:
+            if session_id in _ACTIVE_SESSIONS:
+                _ACTIVE_SESSIONS[session_id]["last_activity"] = time.time()
         return report, ssl_error_detected
     except Exception as err:
         return f"❌ Gagal menjalankan Camoufox Stealth Engine: {err}", False
@@ -692,7 +825,8 @@ PENTING:
         "Browser otonom (autonomous web agent) berbasis Python dengan Camoufox Stealth Engine sebagai PRIMARY browser. "
         "Camoufox menggunakan Firefox C++ spoofing engine level tanpa ketergantungan Docker/Zenika, mampu menembus Cloudflare Turnstile, "
         "WAF, anti-bot, serta anti-fingerprinting (Pixelscan, CreepJS, KAI, dll). "
-        "AI dapat menjelajahi web secara mandiri, membuka URL, mengklik tombol, mengisi form formulir, mengekstrak data dari berbagai halaman web. "
+        "AI dapat menjelajahi web secara mandiri, membuka URL, mengklik tombol, mengisi form formulir, mengekstrak data dari berbagai halaman web, "
+        "atau menutup sesi browser untuk membebaskan memori RAM sistem (action='close'). "
         "Mendukung model apa pun (DeepSeek, GLM, Gemini, GPT-4o, Claude) dan otomatis mewarisi model aktif orchestrator."
     )
 )
@@ -718,6 +852,9 @@ async def browser(
     Camoufox Stealth adalah Primary Browser default (bebas Docker Zenika).
     Chromium CDP tersedia sebagai opsi sekunder jika engine='chromium'.
 
+    action (str): Aksi khusus seperti 'open', 'click', 'type', atau 'close' untuk menutup
+    sesi browser dan membebaskan RAM secara instan.
+
     ignore_ssl (bool): Jika True, abaikan error sertifikat SSL pada sesi Camoufox ini saja
     (ignore_https_errors). Tanpa Chromium — tetap Camoufox. Untuk akses read-only, bukan transaksi.
     Per-sesi, tidak global. Saat False dan halaman menampilkan peringatan sertifikat, otomatis
@@ -729,6 +866,21 @@ async def browser(
     force_reload (bool): Jika True, paksa navigasi ulang ke URL meski sesi sudah di halaman itu.
     """
     try:
+        act_lower = (action or "").strip().lower()
+        if act_lower in ["close", "exit", "quit", "tutup"]:
+            target_sess = session_id or "default"
+            async with _SESSION_LOCK:
+                if target_sess == "all":
+                    count = len(_ACTIVE_SESSIONS)
+                    for sid in list(_ACTIVE_SESSIONS.keys()):
+                        await _close_session_locked(sid)
+                    return f"✅ Berhasil menutup seluruh ({count}) sesi browser Camoufox dan membebaskan RAM sistem."
+                else:
+                    closed = await _close_session_locked(target_sess)
+                    if closed:
+                        return f"✅ Sesi browser '{target_sess}' berhasil ditutup dan memori sistem telah dibebaskan."
+                    else:
+                        return f"ℹ️ Sesi browser '{target_sess}' tidak sedang aktif di memori."
         clean_task = (task or "").strip()
         if not clean_task:
             if url:

@@ -43,8 +43,8 @@ func (b *BrowserAutomationTool) Parameters() ParametersSchema {
 			},
 			"action": {
 				Type:        "string",
-				Description: "Aksi browser yang ingin dilakukan: 'open' (buka URL dan bangun pohon DOM interaktif berindeks [0..N]), 'click' (klik elemen berdasarkan nomor index atau selector), 'type' (isi teks ke form input berdasarkan nomor index atau selector), 'press_key' (tekan tombol keyboard seperti Enter/Escape/Tab), 'scroll' (scroll halaman ke bawah/atas atau ke elemen index tertentu), 'screenshot' (ambil tangkapan layar .png dengan opsi Set-of-Marks berlabel angka), 'eval_js' (eksekusi JavaScript di halaman). Default: open.",
-				Enum:        []string{"open", "click", "type", "press_key", "scroll", "screenshot", "eval_js"},
+				Description: "Aksi browser yang ingin dilakukan: 'open' (buka URL dan bangun pohon DOM interaktif berindeks [0..N]), 'click' (klik elemen berdasarkan nomor index atau selector), 'type' (isi teks ke form input berdasarkan nomor index atau selector), 'press_key' (tekan tombol keyboard seperti Enter/Escape/Tab), 'scroll' (scroll halaman ke bawah/atas atau ke elemen index tertentu), 'screenshot' (ambil tangkapan layar .png dengan opsi Set-of-Marks berlabel angka), 'eval_js' (eksekusi JavaScript di halaman), 'close' (tutup sesi browser dan bebaskan memori RAM sistem). Default: open.",
+				Enum:        []string{"open", "click", "type", "press_key", "scroll", "screenshot", "eval_js", "close"},
 			},
 			"url": {
 				Type:        "string",
@@ -217,6 +217,26 @@ func (s *browserSession) GetPage(ctx context.Context, targetURL string, waitSeco
 	return pTimeout, nil
 }
 
+func (s *browserSession) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.page != nil {
+		_ = s.page.Close()
+		s.page = nil
+	}
+	if s.browser != nil {
+		_ = s.browser.Close()
+		s.browser = nil
+	}
+	if s.launcher != nil {
+		s.launcher.Kill()
+		s.launcher.Cleanup()
+		s.launcher = nil
+	}
+	s.currentURL = ""
+}
+
 func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]interface{}) (res string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -300,6 +320,12 @@ func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]int
 	withSoM := true
 	if somVal, ok := args["som"].(bool); ok {
 		withSoM = somVal
+	}
+
+	// Aksi 'close': tutup browser dan bebaskan seluruh resource RAM
+	if action == "close" {
+		globalBrowserSession.Close()
+		return "✅ Sesi browser lokal CDP berhasil ditutup dan memori RAM telah dibebaskan.", nil
 	}
 
 	// Untuk aksi 'open', lakukan navigasi atau reload jika diminta URL baru.
