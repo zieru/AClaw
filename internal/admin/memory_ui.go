@@ -6,6 +6,7 @@ import (
 	"html"
 	"strconv"
 	"strings"
+	"time"
 
 	"goassistant/internal/memory"
 	"goassistant/internal/storage"
@@ -342,6 +343,36 @@ func (ui *MemoryUI) HandleMemory(c tele.Context) error {
 			"Catatan memori kini telah siap digunakan dalam pencarian!",
 			res.TotalProcessed, res.Inserted, len(res.Errors)), tele.ModeHTML)
 
+	case "test", "testembed", "checkembed":
+		_ = c.Send("🧪 <i>Menguji koneksi vektor embedding ke provider... Mohon tunggu.</i>", tele.ModeHTML)
+		res, err := ui.memoryManager.TestEmbedding(context.Background())
+		if err != nil {
+			return c.Send(fmt.Sprintf("❌ <b>Uji Koneksi Gagal!</b>\n\n<b>Error:</b> <code>%v</code>", html.EscapeString(err.Error())), tele.ModeHTML)
+		}
+		statusIcon := "🟢"
+		if !res.Success {
+			statusIcon = "🔴"
+		}
+		msg := fmt.Sprintf("%s <b>HASIL DIAGNOSTIK KONEKSI EMBEDDING:</b>\n\n"+
+			"• <b>Provider:</b> <code>%s</code>\n"+
+			"• <b>Model:</b> <code>%s</code>\n"+
+			"• <b>Sumber Key:</b> <code>%s</code>\n"+
+			"• <b>Endpoint:</b> <code>%s</code>\n"+
+			"• <b>Status HTTP:</b> <code>%d</code>\n"+
+			"• <b>Latency:</b> <code>%s</code>\n"+
+			"• <b>Dimensi Vektor Dihasilkan:</b> <code>%d dims</code>\n"+
+			"• <b>Pesan:</b> %s",
+			statusIcon,
+			html.EscapeString(res.Provider),
+			html.EscapeString(res.Model),
+			html.EscapeString(res.KeySource),
+			html.EscapeString(res.Endpoint),
+			res.StatusCode,
+			res.Latency.Round(time.Millisecond),
+			res.Dimensions,
+			html.EscapeString(res.Message))
+		return c.Send(msg, tele.ModeHTML)
+
 	case "reset":
 		ui.memoryManager.ResetToDefaults()
 		return c.Send("🔄 <b>Seluruh pengaturan memory engine telah di-reset ke nilai default pabrik.</b>", tele.ModeHTML)
@@ -599,16 +630,28 @@ func (ui *MemoryUI) RenderMemoryEmbeddingMenu(userID string) (string, *tele.Repl
 		baseStr = "(default endpoint)"
 	}
 
+	keyInfo := "Tidak terdeteksi"
+	if ui.memoryManager.GetEmbedder() != nil {
+		if resolvedKey, keySource := ui.memoryManager.GetEmbedder().ResolveAPIKey(); resolvedKey != "" {
+			masked := resolvedKey
+			if len(masked) > 8 {
+				masked = masked[:4] + "..." + masked[len(masked)-4:]
+			}
+			keyInfo = fmt.Sprintf("<code>%s</code> (%s)", html.EscapeString(masked), html.EscapeString(keySource))
+		}
+	}
+
 	text := fmt.Sprintf("🔌 <b>PENGATURAN REMOTE VECTOR EMBEDDING</b>\n\n"+
 		"• <b>Status:</b> %s\n"+
 		"• <b>Provider:</b> <code>%s</code>\n"+
 		"• <b>Model:</b> <code>%s</code>\n"+
 		"• <b>Dimensi Vektor:</b> <code>%d dims</code>\n"+
 		"• <b>Similarity Threshold:</b> <code>%.2f</code> (Cosine)\n"+
-		"• <b>Base URL:</b> <code>%s</code>\n\n"+
+		"• <b>Base URL:</b> <code>%s</code>\n"+
+		"• <b>Sumber API Key:</b> %s\n\n"+
 		"<i>Vektor embedding digunakan untuk strategi pencarian Semantic dan Hybrid.</i>",
 		embTag, html.EscapeString(emb.Provider), html.EscapeString(modelStr),
-		emb.Dimensions, cfg.SimilarityThreshold, html.EscapeString(baseStr))
+		emb.Dimensions, cfg.SimilarityThreshold, html.EscapeString(baseStr), keyInfo)
 
 	menu := &tele.ReplyMarkup{}
 	btnToggle := menu.Data(embTag, "mem_toggle_embed")
@@ -628,6 +671,7 @@ func (ui *MemoryUI) RenderMemoryEmbeddingMenu(userID string) (string, *tele.Repl
 	btnSim70 := menu.Data(fmt.Sprintf("%s 0.70", checkMemMark(cfg.SimilarityThreshold == 0.70)), "mem_sim_70")
 	btnSim80 := menu.Data(fmt.Sprintf("%s 0.80", checkMemMark(cfg.SimilarityThreshold == 0.80)), "mem_sim_80")
 
+	btnTestEmbed := menu.Data("🧪 Uji Koneksi Embedding", "mem_test_embed")
 	btnBack := menu.Data("🔙 Kembali ke Dashboard", "mem_refresh")
 
 	menu.Inline(
@@ -635,6 +679,7 @@ func (ui *MemoryUI) RenderMemoryEmbeddingMenu(userID string) (string, *tele.Repl
 		menu.Row(btnOAI, btnGem, btnOll, btnCust),
 		menu.Row(btnDim768, btnDim1536, btnDim3072),
 		menu.Row(btnSim50, btnSim60, btnSim70, btnSim80),
+		menu.Row(btnTestEmbed),
 		menu.Row(btnBack),
 	)
 
@@ -1087,6 +1132,36 @@ func (ui *MemoryUI) HandleCallback(c tele.Context, data string) error {
 		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Ollama mxbai-embed-large"})
 		text, menu := ui.RenderMemoryEmbeddingMenu(userID)
 		return c.EditOrSend(text, menu, tele.ModeHTML)
+
+	case "mem_test_embed":
+		_ = c.Respond(&tele.CallbackResponse{Text: "🧪 Menguji koneksi embedding..."})
+		res, err := ui.memoryManager.TestEmbedding(context.Background())
+		if err != nil {
+			return c.Send(fmt.Sprintf("❌ <b>Uji Koneksi Gagal!</b>\n\n<b>Error:</b> <code>%v</code>", html.EscapeString(err.Error())), tele.ModeHTML)
+		}
+		statusIcon := "🟢"
+		if !res.Success {
+			statusIcon = "🔴"
+		}
+		msg := fmt.Sprintf("%s <b>HASIL DIAGNOSTIK KONEKSI EMBEDDING:</b>\n\n"+
+			"• <b>Provider:</b> <code>%s</code>\n"+
+			"• <b>Model:</b> <code>%s</code>\n"+
+			"• <b>Sumber Key:</b> <code>%s</code>\n"+
+			"• <b>Endpoint:</b> <code>%s</code>\n"+
+			"• <b>Status HTTP:</b> <code>%d</code>\n"+
+			"• <b>Latency:</b> <code>%s</code>\n"+
+			"• <b>Dimensi Vektor Dihasilkan:</b> <code>%d dims</code>\n"+
+			"• <b>Pesan:</b> %s",
+			statusIcon,
+			html.EscapeString(res.Provider),
+			html.EscapeString(res.Model),
+			html.EscapeString(res.KeySource),
+			html.EscapeString(res.Endpoint),
+			res.StatusCode,
+			res.Latency.Round(time.Millisecond),
+			res.Dimensions,
+			html.EscapeString(res.Message))
+		return c.Send(msg, tele.ModeHTML)
 
 	// Data Management Callbacks
 	case "mem_list_now":

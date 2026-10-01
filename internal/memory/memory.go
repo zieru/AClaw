@@ -59,7 +59,7 @@ func NewManager(db *storage.DB, cfg config.MemoryConfig, embedder Embedder, pm *
 	// Re-evaluate embedder if configuration specifies embedding
 	embCfg := cfg.GetEmbeddingConfig()
 	if embedder == nil || embCfg.Enabled {
-		embedder = NewEmbedder(embCfg)
+		embedder = NewEmbedder(embCfg, db)
 	}
 
 	var ext *AutoExtractor
@@ -876,7 +876,7 @@ func (m *Manager) SetEmbeddingModel(model string) {
 		m.cfg.Embedding.Enabled = true
 		m.cfg.EmbeddingSource.Enabled = true
 	}
-	m.embedder = NewEmbedder(m.cfg.Embedding)
+	m.embedder = NewEmbedder(m.cfg.Embedding, m.db)
 	if m.extractor != nil {
 		m.extractor.SetEmbedder(m.embedder)
 	}
@@ -890,7 +890,7 @@ func (m *Manager) SetEmbeddingProvider(prov string) {
 	cleanProv := strings.TrimSpace(strings.ToLower(prov))
 	m.cfg.Embedding.Provider = cleanProv
 	m.cfg.EmbeddingSource.Provider = cleanProv
-	m.embedder = NewEmbedder(m.cfg.Embedding)
+	m.embedder = NewEmbedder(m.cfg.Embedding, m.db)
 	if m.extractor != nil {
 		m.extractor.SetEmbedder(m.embedder)
 	}
@@ -904,7 +904,7 @@ func (m *Manager) SetEmbeddingBaseURL(baseURL string) {
 	cleanURL := strings.TrimSpace(baseURL)
 	m.cfg.Embedding.BaseURL = cleanURL
 	m.cfg.EmbeddingSource.BaseURL = cleanURL
-	m.embedder = NewEmbedder(m.cfg.Embedding)
+	m.embedder = NewEmbedder(m.cfg.Embedding, m.db)
 	if m.extractor != nil {
 		m.extractor.SetEmbedder(m.embedder)
 	}
@@ -918,7 +918,7 @@ func (m *Manager) SetEmbeddingAPIKey(apiKey string) {
 	cleanKey := strings.TrimSpace(apiKey)
 	m.cfg.Embedding.APIKey = cleanKey
 	m.cfg.EmbeddingSource.APIKey = cleanKey
-	m.embedder = NewEmbedder(m.cfg.Embedding)
+	m.embedder = NewEmbedder(m.cfg.Embedding, m.db)
 	if m.extractor != nil {
 		m.extractor.SetEmbedder(m.embedder)
 	}
@@ -933,7 +933,7 @@ func (m *Manager) SetEmbeddingDimensions(dims int) {
 		m.cfg.Embedding.Dimensions = dims
 		m.cfg.EmbeddingSource.Dimensions = dims
 	}
-	m.embedder = NewEmbedder(m.cfg.Embedding)
+	m.embedder = NewEmbedder(m.cfg.Embedding, m.db)
 	if m.extractor != nil {
 		m.extractor.SetEmbedder(m.embedder)
 	}
@@ -946,7 +946,7 @@ func (m *Manager) SetEmbeddingEnabled(enabled bool) {
 	m.mu.Lock()
 	m.cfg.Embedding.Enabled = enabled
 	m.cfg.EmbeddingSource.Enabled = enabled
-	m.embedder = NewEmbedder(m.cfg.Embedding)
+	m.embedder = NewEmbedder(m.cfg.Embedding, m.db)
 	if m.extractor != nil {
 		m.extractor.SetEmbedder(m.embedder)
 	}
@@ -979,12 +979,27 @@ func (m *Manager) ResetToDefaults() {
 	m.cfg.Embedding.APIKey = ""
 	m.cfg.Embedding.Dimensions = 1536
 	m.cfg.EmbeddingSource = m.cfg.Embedding
-	m.embedder = NewEmbedder(m.cfg.Embedding)
+	m.embedder = NewEmbedder(m.cfg.Embedding, m.db)
 	if m.extractor != nil {
 		m.extractor.SetEmbedder(m.embedder)
 	}
 	m.mu.Unlock()
 	m.persistConfig()
+}
+
+// TestEmbedding runs a diagnostic test to verify embedding provider connectivity
+func (m *Manager) TestEmbedding(ctx context.Context) (*EmbedTestResult, error) {
+	if m == nil {
+		return nil, fmt.Errorf("memory manager is nil")
+	}
+	m.mu.RLock()
+	emb := m.embedder
+	m.mu.RUnlock()
+
+	if emb == nil {
+		return nil, fmt.Errorf("embedder belum diinisialisasi")
+	}
+	return emb.TestConnection(ctx)
 }
 
 // ImportSeedCSV imports memories from an export CSV file for a scope/user

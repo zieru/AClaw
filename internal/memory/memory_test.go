@@ -42,6 +42,14 @@ func (m *mockEmbedder) Dimensions() int {
 	return 3
 }
 
+func (m *mockEmbedder) TestConnection(ctx context.Context) (*EmbedTestResult, error) {
+	return &EmbedTestResult{Success: true, Dimensions: 3, StatusCode: 200}, nil
+}
+
+func (m *mockEmbedder) ResolveAPIKey() (string, string) {
+	return "mock-key", "mock"
+}
+
 func TestEmbedderCosineSimilarity(t *testing.T) {
 	v1 := []float32{1.0, 0.0, 0.0}
 	v2 := []float32{1.0, 0.0, 0.0}
