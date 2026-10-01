@@ -2,26 +2,31 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
-	"goassistant/internal/config"
-	"goassistant/internal/omniroute"
+	"goassistant/internal/search"
 )
 
-type WebSearchTool struct{}
+// WebSearchTool provides capability for LLMs to query live web information
+type WebSearchTool struct {
+	engine *search.Engine
+}
+
+// NewWebSearchTool creates a new WebSearchTool instance with an optional custom engine
+func NewWebSearchTool(engine *search.Engine) *WebSearchTool {
+	return &WebSearchTool{
+		engine: engine,
+	}
+}
 
 func (t *WebSearchTool) Name() string {
 	return "web_search"
 }
 
 func (t *WebSearchTool) Description() string {
-	return "Mencari informasi terkini dari internet menggunakan web search query."
+	return "Mencari informasi terkini dari internet menggunakan multi-provider search engine (Tavily, Firecrawl, DuckDuckGo)."
 }
 
 func (t *WebSearchTool) Parameters() ParametersSchema {
@@ -37,95 +42,50 @@ func (t *WebSearchTool) Parameters() ParametersSchema {
 	}
 }
 
-type ddgResponse struct {
-	AbstractText string `json:"AbstractText"`
-	AbstractURL  string `json:"AbstractURL"`
-	Heading      string `json:"Heading"`
-	RelatedTopics []struct {
-		Text     string `json:"Text"`
-		FirstURL string `json:"FirstURL"`
-	} `json:"RelatedTopics"`
-}
-
 func (t *WebSearchTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	q, ok := args["query"].(string)
 	if !ok || strings.TrimSpace(q) == "" {
 		return "", fmt.Errorf("parameter 'query' wajib diisi")
 	}
+	q = strings.TrimSpace(q)
 
-	// 1. Try OmniRoute upstream search first if configured
-	if cfg := config.Get(); cfg != nil && cfg.OmniRoute.Enabled && cfg.OmniRoute.UseUpstreamSearch {
-		if omniClient := omniroute.GetClient(); omniClient != nil {
-			if searchRes, err := omniClient.Search(ctx, q); err == nil && len(searchRes.Results) > 0 {
-				var sb strings.Builder
-				sb.WriteString(fmt.Sprintf("Hasil Pencarian Web untuk: %s\n\n", q))
-				for i, res := range searchRes.Results {
-					if i >= 5 {
-						break
-					}
-					snippet := strings.TrimSpace(res.Snippet)
-					if snippet != "" {
-						sb.WriteString(fmt.Sprintf("%d. %s\n   URL: %s\n   Ringkasan: %s\n\n", i+1, res.Title, res.URL, snippet))
-					} else {
-						sb.WriteString(fmt.Sprintf("%d. %s\n   URL: %s\n\n", i+1, res.Title, res.URL))
-					}
-				}
-				return sb.String(), nil
+	// Check global cache
+	if cachedVal, found := GetGlobalToolCache().Get(t.Name(), args); found {
+		return cachedVal, nil
+	}
+
+	// Use injected engine or singleton
+	eng := t.engine
+	if eng == nil {
+		eng = search.GetGlobalEngine()
+	}
+
+	searchRes, err := eng.Search(ctx, q)
+	if err != nil {
+		return "", fmt.Errorf("gagal melakukan pencarian web: %w", err)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Hasil Pencarian Web untuk: %s (via %s)\n\n", q, searchRes.Provider))
+
+	if searchRes.Answer != "" {
+		sb.WriteString(fmt.Sprintf("💡 Ringkasan Jawaban AI:\n%s\n\n", searchRes.Answer))
+	}
+
+	if len(searchRes.Results) == 0 {
+		sb.WriteString("Tidak ada hasil dokumen spesifik yang ditemukan.")
+	} else {
+		for i, res := range searchRes.Results {
+			snippet := strings.TrimSpace(res.Snippet)
+			if snippet != "" {
+				sb.WriteString(fmt.Sprintf("%d. %s\n   URL: %s\n   Ringkasan: %s\n\n", i+1, res.Title, res.URL, snippet))
+			} else {
+				sb.WriteString(fmt.Sprintf("%d. %s\n   URL: %s\n\n", i+1, res.Title, res.URL))
 			}
 		}
 	}
 
-	// 2. DuckDuckGo fallback if OmniRoute search is unavailable
-	client := &http.Client{Timeout: 10 * time.Second}
-	reqURL := fmt.Sprintf("https://api.duckduckgo.com/?q=%s&format=json&no_html=1&skip_disambig=1", url.QueryEscape(q))
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("User-Agent", "GoAssistant/1.0")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("gagal melakukan pencarian web: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	var data ddgResponse
-	if err := json.Unmarshal(body, &data); err != nil {
-		return string(body[:min(len(body), 500)]), nil
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Hasil Pencarian Web untuk: %s\n\n", q))
-	if data.AbstractText != "" {
-		sb.WriteString(fmt.Sprintf("- Ringkasan: %s\n  Sumber: %s\n\n", data.AbstractText, data.AbstractURL))
-	}
-
-	count := 0
-	for _, topic := range data.RelatedTopics {
-		if topic.Text != "" && count < 5 {
-			sb.WriteString(fmt.Sprintf("- %s (%s)\n", topic.Text, topic.FirstURL))
-			count++
-		}
-	}
-
-	if sb.Len() == len(fmt.Sprintf("Hasil Pencarian Web untuk: %s\n\n", q)) {
-		sb.WriteString("Tidak ada ringkasan instan langsung ditemukan. Silakan gunakan query yang lebih spesifik.")
-	}
-
-	res := sb.String()
-	GetGlobalToolCache().Set(t.Name(), args, res, 30*time.Minute)
-	return res, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	out := sb.String()
+	GetGlobalToolCache().Set(t.Name(), args, out, 30*time.Minute)
+	return out, nil
 }

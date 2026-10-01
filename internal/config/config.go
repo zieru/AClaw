@@ -97,6 +97,8 @@ type AppConfig struct {
 		GroupName           string   `yaml:"group_name"`
 	} `yaml:"webshare"`
 
+	Search SearchConfig `yaml:"search"`
+
 	OmniRoute OmniRouteConfig `yaml:"omniroute"`
 
 	Memory MemoryConfig `yaml:"memory"`
@@ -123,6 +125,31 @@ type EmbeddingConfig struct {
 	BaseURL    string `yaml:"base_url"`
 	APIKey     string `yaml:"api_key"`
 	Dimensions int    `yaml:"dimensions"`
+}
+
+// SearchConfig defines configuration for GoAssistant's multi-provider search engine
+type SearchConfig struct {
+	Enabled         bool            `yaml:"enabled"`
+	Provider        string          `yaml:"provider"` // "auto", "tavily", "firecrawl", "duckduckgo"
+	MaxResults      int             `yaml:"max_results"`
+	FallbackEnabled bool            `yaml:"fallback_enabled"`
+	TimeoutSeconds  int             `yaml:"timeout_seconds"`
+	Tavily          TavilyConfig    `yaml:"tavily"`
+	Firecrawl       FirecrawlConfig `yaml:"firecrawl"`
+}
+
+// TavilyConfig defines configuration for Tavily Search API
+type TavilyConfig struct {
+	APIKey        string `yaml:"api_key"`
+	BaseURL       string `yaml:"base_url"`
+	SearchDepth   string `yaml:"search_depth"`   // "basic" or "advanced"
+	IncludeAnswer bool   `yaml:"include_answer"` // include quick AI answer
+}
+
+// FirecrawlConfig defines configuration for Firecrawl Search API
+type FirecrawlConfig struct {
+	APIKey  string `yaml:"api_key"`
+	BaseURL string `yaml:"base_url"`
 }
 
 // OmniRouteConfig defines configuration for co-located OmniRoute gateway collaboration
@@ -210,10 +237,20 @@ func Load(configPath string) (*AppConfig, error) {
 		cfg.Webshare.SyncIntervalMinutes = 60
 		cfg.Webshare.AutoSync = false
  
+		cfg.Search.Enabled = true
+		cfg.Search.Provider = "auto"
+		cfg.Search.MaxResults = 5
+		cfg.Search.FallbackEnabled = true
+		cfg.Search.TimeoutSeconds = 15
+		cfg.Search.Tavily.BaseURL = "https://api.tavily.com"
+		cfg.Search.Tavily.SearchDepth = "basic"
+		cfg.Search.Tavily.IncludeAnswer = true
+		cfg.Search.Firecrawl.BaseURL = "https://api.firecrawl.dev"
+
 		cfg.OmniRoute.Enabled = true
 		cfg.OmniRoute.BaseURL = "http://localhost:20128"
 		cfg.OmniRoute.Password = ""
-		cfg.OmniRoute.UseUpstreamSearch = true
+		cfg.OmniRoute.UseUpstreamSearch = false // Severed: Web Search is now standalone multi-provider in GoAssistant
 		cfg.OmniRoute.UseUpstreamMemory = false // Severed: Standalone memory in GoAssistant
 
 		cfg.Memory.Enabled = true
@@ -245,6 +282,15 @@ func Load(configPath string) (*AppConfig, error) {
 
 		if envWebshare := os.Getenv("WEBSHARE_API_KEY"); envWebshare != "" {
 			cfg.Webshare.APIKey = envWebshare
+		}
+		if envTavilyKey := os.Getenv("TAVILY_API_KEY"); envTavilyKey != "" {
+			cfg.Search.Tavily.APIKey = envTavilyKey
+		}
+		if envFirecrawlKey := os.Getenv("FIRECRAWL_API_KEY"); envFirecrawlKey != "" {
+			cfg.Search.Firecrawl.APIKey = envFirecrawlKey
+		}
+		if envSearchProv := os.Getenv("SEARCH_PROVIDER"); envSearchProv != "" {
+			cfg.Search.Provider = envSearchProv
 		}
 		if envWebAdminKey := os.Getenv("WEBADMIN_API_KEY"); envWebAdminKey != "" {
 			cfg.WebAdmin.APIKey = envWebAdminKey

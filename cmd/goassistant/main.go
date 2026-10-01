@@ -25,6 +25,7 @@ import (
 	"goassistant/internal/omniroute"
 	"goassistant/internal/provider"
 	"goassistant/internal/proxy"
+	"goassistant/internal/search"
 	"goassistant/internal/storage"
 	"goassistant/internal/tools"
 	"goassistant/internal/version"
@@ -95,6 +96,8 @@ func main() {
 	log.Printf("📦 Database SQLite berhasil dimuat: %s", cfg.Server.DBPath)
 
 	// 3. Initialize Core Managers
+	search.InitGlobalEngine(cfg.Search)
+	log.Printf("🔍 Web Search Engine aktif (Provider: %s, Fallback: %t)", cfg.Search.Provider, cfg.Search.FallbackEnabled)
 	toolReg := tools.GetRegistry()
 	provMgr := provider.GetManager()
 	embedder := memory.NewEmbedder(cfg.Memory.Embedding)

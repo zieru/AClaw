@@ -120,8 +120,25 @@ func (a *AdminBot) RenderStatusSummary(c tele.Context) string {
 		}
 		sb.WriteString("🚀 <b>OmniRoute Gateway (:20128):</b>\n")
 		sb.WriteString(fmt.Sprintf("• Status: %s | Host: <code>%s</code>\n", omniStatus, html.EscapeString(a.cfg.OmniRoute.BaseURL)))
-		sb.WriteString(fmt.Sprintf("• Kolaborasi: Search: <code>%t</code> | Shared Memory: <code>%t</code>\n\n", a.cfg.OmniRoute.UseUpstreamSearch, a.cfg.OmniRoute.UseUpstreamMemory))
+		sb.WriteString(fmt.Sprintf("• Kolaborasi: Search: <code>%t (Mandiri)</code> | Shared Memory: <code>%t (Mandiri)</code>\n\n", a.cfg.OmniRoute.UseUpstreamSearch, a.cfg.OmniRoute.UseUpstreamMemory))
 	}
+
+	// Web Search Multi-Provider Engine
+	searchStatus := "🔴 <b>Nonaktif</b>"
+	if a.cfg.Search.Enabled {
+		var provList []string
+		if a.cfg.Search.Tavily.APIKey != "" {
+			provList = append(provList, "Tavily")
+		}
+		if a.cfg.Search.Firecrawl.APIKey != "" {
+			provList = append(provList, "Firecrawl")
+		}
+		provList = append(provList, "DuckDuckGo")
+		searchStatus = fmt.Sprintf("🟢 <b>Aktif</b> (Mode: <code>%s</code> | Providers: <code>%s</code>)",
+			html.EscapeString(a.cfg.Search.Provider), strings.Join(provList, ", "))
+	}
+	sb.WriteString("🔍 <b>Web Search Engine:</b>\n")
+	sb.WriteString(fmt.Sprintf("• Status: %s\n• Fallback: <code>%t</code>\n\n", searchStatus, a.cfg.Search.FallbackEnabled))
 
 	// 5. Proxy Pool (9Router Engine)
 	proxyStatus := "🔴 <b>Nonaktif</b>"
