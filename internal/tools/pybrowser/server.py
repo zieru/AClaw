@@ -222,6 +222,7 @@ async def _get_or_create_camoufox_session(
     Ambil sesi Camoufox yang sudah ada untuk session_id, atau buat baru (persistent context).
     Mengembalikan (context, page). Browser tetap hidup antar panggilan (tidak di-close).
     """
+    import re
     from camoufox.async_api import AsyncCamoufox
 
     async with _SESSION_LOCK:
