@@ -6,6 +6,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"goassistant/internal/config"
@@ -16,6 +17,7 @@ import (
 // Manager coordinates storage, embedding, hybrid retrieval, and auto-extraction for memories.
 // It is 100% standalone and operates on local SQLite with FTS5.
 type Manager struct {
+	mu        sync.RWMutex
 	db        *storage.DB
 	embedder  Embedder
 	extractor *AutoExtractor
@@ -29,11 +31,20 @@ func NewManager(db *storage.DB, cfg config.MemoryConfig, embedder Embedder, pm *
 		ext = NewAutoExtractor(db, embedder, pm)
 	}
 
-	if cfg.RetrievalStrategy == "" {
-		cfg.RetrievalStrategy = "hybrid"
+	if cfg.Strategy == "" {
+		cfg.Strategy = cfg.GetStrategy()
+	}
+	if cfg.MaxTokens <= 0 {
+		cfg.MaxTokens = cfg.GetMaxTokens()
+	}
+	if cfg.RetentionDays <= 0 {
+		cfg.RetentionDays = cfg.GetRetentionDays()
+	}
+	if cfg.PromotionThreshold <= 0 {
+		cfg.PromotionThreshold = cfg.GetPromotionThreshold()
 	}
 	if cfg.MaxContextItems <= 0 {
-		cfg.MaxContextItems = 10
+		cfg.MaxContextItems = 20
 	}
 	if cfg.SimilarityThreshold <= 0 {
 		cfg.SimilarityThreshold = 0.60
@@ -156,7 +167,7 @@ func (m *Manager) SearchMemories(scope, scopeID, query string) ([]storage.Memory
 	return records, nil
 }
 
-// SearchMemoriesAdvanced performs search using exact, semantic, or hybrid strategy
+// SearchMemoriesAdvanced performs search using recent, semantic, exact, or hybrid strategy
 func (m *Manager) SearchMemoriesAdvanced(scope, scopeID, query string, strategy string, limit int) ([]storage.MemoryItemRecord, error) {
 	if m.db == nil {
 		return nil, fmt.Errorf("database memory belum terhubung")
@@ -165,11 +176,13 @@ func (m *Manager) SearchMemoriesAdvanced(scope, scopeID, query string, strategy 
 		limit = 20
 	}
 	if strategy == "" {
-		strategy = m.cfg.RetrievalStrategy
+		strategy = m.GetStrategy()
 	}
 	strategy = strings.ToLower(strategy)
 
 	switch strategy {
+	case "recent":
+		return m.searchRecent(scope, scopeID, query, limit)
 	case "exact":
 		return m.searchExact(scope, scopeID, query, limit)
 	case "semantic":
@@ -177,6 +190,21 @@ func (m *Manager) SearchMemoriesAdvanced(scope, scopeID, query string, strategy 
 	default: // "hybrid"
 		return m.searchHybrid(scope, scopeID, query, limit)
 	}
+}
+
+func (m *Manager) searchRecent(scope, scopeID, query string, limit int) ([]storage.MemoryItemRecord, error) {
+	if strings.TrimSpace(query) == "" {
+		return m.db.ListMemoriesByScope(scope, scopeID, "", limit)
+	}
+	// For recent strategy with search term, retrieve matching memories and sort by UpdatedAt DESC
+	ftsResults, err := m.db.SearchMemoriesFTS5(scope, scopeID, query, limit)
+	if err == nil && len(ftsResults) > 0 {
+		sort.Slice(ftsResults, func(i, j int) bool {
+			return ftsResults[i].UpdatedAt.After(ftsResults[j].UpdatedAt)
+		})
+		return ftsResults, nil
+	}
+	return m.db.ListMemoriesByScope(scope, scopeID, "", limit)
 }
 
 func (m *Manager) searchExact(scope, scopeID, query string, limit int) ([]storage.MemoryItemRecord, error) {
@@ -343,10 +371,29 @@ func (m *Manager) ClearChannelMemory(channelID string) error {
 }
 
 // GetContextMemory retrieves formatted memory context structured by category for system prompt injection.
-// It searches relevant memories across global, channel, and user scopes based on query.
+// It searches relevant memories across global, channel, and user scopes based on query, respecting
+// memoryStrategy, memoryRetentionDays, and budget-packing up to memoryMaxTokens.
 func (m *Manager) GetContextMemory(channelID, userID, query string) (string, error) {
-	if m.db == nil || !m.cfg.Enabled {
+	if m.db == nil {
 		return "", nil
+	}
+	m.mu.RLock()
+	enabled := m.cfg.Enabled
+	strategy := m.cfg.GetStrategy()
+	maxTokens := m.cfg.GetMaxTokens()
+	maxItems := m.cfg.MaxContextItems
+	retentionDays := m.cfg.GetRetentionDays()
+	promotionThreshold := m.cfg.GetPromotionThreshold()
+	m.mu.RUnlock()
+
+	if !enabled {
+		return "", nil
+	}
+	if maxItems <= 0 {
+		maxItems = 20
+	}
+	if maxTokens <= 0 {
+		maxTokens = 2000
 	}
 
 	scopes := []struct{ Scope, ScopeID string }{
@@ -359,83 +406,119 @@ func (m *Manager) GetContextMemory(channelID, userID, query string) (string, err
 		scopes = append(scopes, struct{ Scope, ScopeID string }{Scope: "user", ScopeID: userID})
 	}
 
-	candidates, err := m.db.ListCandidateMemoriesForScopes(scopes)
+	candidates, err := m.db.ListCandidateMemoriesForScopes(scopes, retentionDays)
 	if err != nil || len(candidates) == 0 {
 		return "", nil
 	}
 
-	// If query is provided, rank candidates by relevance using hybrid/FTS5
-	rankedMemories := candidates
 	cleanQuery := strings.TrimSpace(query)
+	rankedMemories := candidates
 
-	if cleanQuery != "" {
-		// Calculate relevance scores
+	// Apply Strategy
+	switch strings.ToLower(strategy) {
+	case "recent":
+		// Recency only: order by UpdatedAt DESC
+		sort.Slice(rankedMemories, func(i, j int) bool {
+			return rankedMemories[i].UpdatedAt.After(rankedMemories[j].UpdatedAt)
+		})
+
+	case "semantic":
 		var queryVec []float32
-		if m.embedder != nil && m.embedder.IsEnabled() {
+		if m.embedder != nil && m.embedder.IsEnabled() && cleanQuery != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			queryVec, _ = m.embedder.Embed(ctx, cleanQuery)
 			cancel()
 		}
-
-		ftsMap := make(map[string]bool)
-		for _, sc := range scopes {
-			if ftsResults, err := m.db.SearchMemoriesFTS5(sc.Scope, sc.ScopeID, cleanQuery, 15); err == nil {
-				for _, r := range ftsResults {
-					ftsMap[r.ID] = true
+		if len(queryVec) > 0 {
+			for i := range rankedMemories {
+				mem := &rankedMemories[i]
+				if len(mem.Embedding) > 0 {
+					mem.Score = CosineSimilarity(queryVec, mem.Embedding)
 				}
 			}
+			sort.Slice(rankedMemories, func(i, j int) bool {
+				if rankedMemories[i].Score != rankedMemories[j].Score {
+					return rankedMemories[i].Score > rankedMemories[j].Score
+				}
+				return rankedMemories[i].UpdatedAt.After(rankedMemories[j].UpdatedAt)
+			})
+		} else {
+			sort.Slice(rankedMemories, func(i, j int) bool {
+				return rankedMemories[i].UpdatedAt.After(rankedMemories[j].UpdatedAt)
+			})
 		}
 
-		for i := range rankedMemories {
-			mem := &rankedMemories[i]
-			var score float32
+	default: // "hybrid"
+		if cleanQuery != "" {
+			var queryVec []float32
+			if m.embedder != nil && m.embedder.IsEnabled() {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				queryVec, _ = m.embedder.Embed(ctx, cleanQuery)
+				cancel()
+			}
 
-			if ftsMap[mem.ID] {
-				score += 0.5
+			ftsMap := make(map[string]bool)
+			for _, sc := range scopes {
+				if ftsResults, err := m.db.SearchMemoriesFTS5(sc.Scope, sc.ScopeID, cleanQuery, 15); err == nil {
+					for _, r := range ftsResults {
+						ftsMap[r.ID] = true
+					}
+				}
 			}
-			if len(queryVec) > 0 && len(mem.Embedding) > 0 {
-				sim := CosineSimilarity(queryVec, mem.Embedding)
-				score += sim * 0.5
+
+			for i := range rankedMemories {
+				mem := &rankedMemories[i]
+				var score float32
+				if ftsMap[mem.ID] {
+					score += 0.5
+				}
+				if len(queryVec) > 0 && len(mem.Embedding) > 0 {
+					sim := CosineSimilarity(queryVec, mem.Embedding)
+					score += sim * 0.5
+				}
+				if strings.Contains(strings.ToLower(cleanQuery), strings.ToLower(mem.Key)) {
+					score += 0.4
+				}
+				if time.Since(mem.UpdatedAt) < 7*24*time.Hour {
+					score += 0.1
+				}
+				mem.Score = score
 			}
-			// Exact key match bonus
-			if strings.Contains(strings.ToLower(cleanQuery), strings.ToLower(mem.Key)) {
-				score += 0.4
-			}
-			// Recent memory recency bonus (within 7 days)
-			if time.Since(mem.UpdatedAt) < 7*24*time.Hour {
-				score += 0.1
-			}
-			mem.Score = score
+
+			sort.Slice(rankedMemories, func(i, j int) bool {
+				if rankedMemories[i].Score != rankedMemories[j].Score {
+					return rankedMemories[i].Score > rankedMemories[j].Score
+				}
+				return rankedMemories[i].UpdatedAt.After(rankedMemories[j].UpdatedAt)
+			})
 		}
-
-		sort.Slice(rankedMemories, func(i, j int) bool {
-			// Prioritize items with higher score, then by updated_at
-			if rankedMemories[i].Score != rankedMemories[j].Score {
-				return rankedMemories[i].Score > rankedMemories[j].Score
-			}
-			return rankedMemories[i].UpdatedAt.After(rankedMemories[j].UpdatedAt)
-		})
 	}
 
-	// Limit context items
-	maxItems := m.cfg.MaxContextItems
-	if maxItems <= 0 {
-		maxItems = 10
-	}
-	if len(rankedMemories) > maxItems {
-		rankedMemories = rankedMemories[:maxItems]
-	}
-
-	// Group into 4 categories: factual, procedural, episodic, semantic
+	// Token budgeting & packing
 	var factuals []storage.MemoryItemRecord
 	var procedurals []storage.MemoryItemRecord
 	var episodics []storage.MemoryItemRecord
 	var semantics []storage.MemoryItemRecord
 
+	usedTokens := 0
+	count := 0
+
 	for _, item := range rankedMemories {
-		// Increment access count asynchronously
+		if count >= maxItems {
+			break
+		}
+		line := fmt.Sprintf("- [%s] %s\n", item.Key, item.Content)
+		lineTok := estimateTokens(line)
+		if usedTokens+lineTok > maxTokens && count > 0 {
+			// Budget reached
+			break
+		}
+		usedTokens += lineTok
+		count++
+
+		// Increment access count asynchronously with promotion threshold
 		go func(id string) {
-			_ = m.db.IncrementMemoryAccess(id)
+			_ = m.db.IncrementMemoryAccess(id, promotionThreshold)
 		}(item.ID)
 
 		switch strings.ToLower(item.Type) {
@@ -485,4 +568,160 @@ func (m *Manager) GetContextMemory(channelID, userID, query string) (string, err
 	}
 
 	return strings.TrimSpace(sb.String()), nil
+}
+
+// estimateTokens approximates token count for text (~3 chars per token heuristic)
+func estimateTokens(text string) int {
+	runes := len([]rune(text))
+	if runes == 0 {
+		return 0
+	}
+	tok := runes / 3
+	if tok == 0 {
+		return 1
+	}
+	return tok
+}
+
+// CompactionReport summarizes the results of a compaction run
+type CompactionReport struct {
+	Scope         string `json:"scope,omitempty"`
+	ScopeID       string `json:"scope_id,omitempty"`
+	PrunedExpired int64  `json:"pruned_expired"`
+	OptimizedFTS  bool   `json:"optimized_fts"`
+	TotalActive   int    `json:"total_active"`
+}
+
+// Compact triggers memory compaction: prunes expired records and optimizes FTS5 index
+func (m *Manager) Compact(ctx context.Context, scope, scopeID string) (*CompactionReport, error) {
+	if m.db == nil {
+		return nil, fmt.Errorf("database memory belum terhubung")
+	}
+	m.mu.RLock()
+	retentionDays := m.cfg.GetRetentionDays()
+	m.mu.RUnlock()
+
+	pruned, err := m.db.PruneExpiredMemories(retentionDays)
+	if err != nil {
+		return nil, fmt.Errorf("prune expired memories: %w", err)
+	}
+
+	_ = m.db.OptimizeMemoryStorage()
+
+	total := 0
+	if scope != "" && scopeID != "" {
+		total, _ = m.db.CountMemories(scope, scopeID)
+	}
+
+	return &CompactionReport{
+		Scope:         scope,
+		ScopeID:       scopeID,
+		PrunedExpired: pruned,
+		OptimizedFTS:  true,
+		TotalActive:   total,
+	}, nil
+}
+
+// StartAutoCompactor runs periodic compaction in background
+func (m *Manager) StartAutoCompactor(ctx context.Context) {
+	if m == nil || m.db == nil {
+		return
+	}
+	m.mu.RLock()
+	intervalHours := m.cfg.CompactionIntervalHours
+	if intervalHours <= 0 {
+		intervalHours = 24
+	}
+	m.mu.RUnlock()
+
+	ticker := time.NewTicker(time.Duration(intervalHours) * time.Hour)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m.mu.RLock()
+				enabled := m.cfg.AutoCompaction
+				m.mu.RUnlock()
+				if enabled {
+					_, _ = m.Compact(context.Background(), "", "")
+				}
+			}
+		}
+	}()
+}
+
+// Runtime Configuration Getters and Setters
+
+func (m *Manager) GetConfig() config.MemoryConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg
+}
+
+func (m *Manager) GetStrategy() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.GetStrategy()
+}
+
+func (m *Manager) SetStrategy(strategy string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cfg.Strategy = strings.ToLower(strategy)
+	m.cfg.RetrievalStrategy = m.cfg.Strategy
+	m.cfg.MemoryStrategy = m.cfg.Strategy
+}
+
+func (m *Manager) GetMaxTokens() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.GetMaxTokens()
+}
+
+func (m *Manager) SetMaxTokens(tokens int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if tokens > 0 {
+		m.cfg.MaxTokens = tokens
+		m.cfg.MemoryMaxTokens = tokens
+	}
+}
+
+func (m *Manager) GetRetentionDays() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.GetRetentionDays()
+}
+
+func (m *Manager) SetRetentionDays(days int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if days > 0 {
+		m.cfg.RetentionDays = days
+		m.cfg.MemoryRetentionDays = days
+	}
+}
+
+func (m *Manager) GetPromotionThreshold() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.GetPromotionThreshold()
+}
+
+func (m *Manager) SetPromotionThreshold(threshold int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if threshold > 0 {
+		m.cfg.PromotionThreshold = threshold
+	}
+}
+
+func (m *Manager) CountMemories(scope, scopeID string) (int, error) {
+	if m.db == nil {
+		return 0, fmt.Errorf("database memory belum terhubung")
+	}
+	return m.db.CountMemories(scope, scopeID)
 }

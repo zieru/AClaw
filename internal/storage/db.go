@@ -128,6 +128,8 @@ func Open(dbPath string) (*DB, error) {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_response_cache_expires ON response_cache(expires_at)")
+	_, _ = db.Exec("ALTER TABLE memories ADD COLUMN is_promoted INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_memories_promoted ON memories(scope, scope_id, is_promoted)")
 
 	// Ensure default global policy exists and has footer_mode 'full' by default
 	_, _ = db.Exec("INSERT OR IGNORE INTO channel_policies (id, scope, scope_id, footer_mode, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold) VALUES ('global', 'global', 'system', 'full', 10, 2048, 20, 1, 15)")
@@ -362,6 +364,7 @@ type MemoryItemRecord struct {
 	Category       string                 `json:"category"`
 	Embedding      []float32              `json:"-"`
 	Metadata       map[string]interface{} `json:"metadata"`
+	IsPromoted     bool                   `json:"is_promoted"` // 1 if promoted to permanent long-term memory
 	AccessCount    int                    `json:"access_count"`
 	LastAccessedAt *time.Time             `json:"last_accessed_at,omitempty"`
 	CreatedAt      time.Time              `json:"created_at"`
@@ -1611,10 +1614,14 @@ func (d *DB) UpsertMemory(item *MemoryItemRecord) error {
 	}
 
 	embBytes := Float32SliceToBytes(item.Embedding)
+	isPromVal := 0
+	if item.IsPromoted {
+		isPromVal = 1
+	}
 
 	query := `
-		INSERT INTO memories (id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO memories (id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(scope, scope_id, key) DO UPDATE SET
 			type = excluded.type,
 			content = excluded.content,
@@ -1622,12 +1629,13 @@ func (d *DB) UpsertMemory(item *MemoryItemRecord) error {
 			session_id = CASE WHEN excluded.session_id != '' THEN excluded.session_id ELSE memories.session_id END,
 			embedding = CASE WHEN excluded.embedding IS NOT NULL THEN excluded.embedding ELSE memories.embedding END,
 			metadata = excluded.metadata,
+			is_promoted = CASE WHEN excluded.is_promoted = 1 THEN 1 ELSE memories.is_promoted END,
 			updated_at = CURRENT_TIMESTAMP
 	`
 	_, err := d.db.Exec(query,
 		item.ID, item.Type, item.Scope, item.ScopeID, item.SessionID,
 		item.Key, item.Content, item.Category, embBytes, string(metaJSON),
-		item.AccessCount, item.CreatedAt, item.UpdatedAt)
+		isPromVal, item.AccessCount, item.CreatedAt, item.UpdatedAt)
 
 	return err
 }
@@ -1637,17 +1645,19 @@ func (d *DB) GetMemory(id string) (*MemoryItemRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, last_accessed_at, created_at, updated_at FROM memories WHERE id = ?`
+	query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at FROM memories WHERE id = ?`
 	row := d.db.QueryRow(query, id)
 
 	var m MemoryItemRecord
 	var embBytes []byte
 	var metaStr string
 	var lastAcc sql.NullTime
+	var isProm int
 
-	if err := row.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
+	if err := row.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &isProm, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		return nil, err
 	}
+	m.IsPromoted = (isProm == 1)
 	m.Embedding = BytesToFloat32Slice(embBytes)
 	if metaStr != "" {
 		_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
@@ -1663,17 +1673,19 @@ func (d *DB) GetMemoryByKey(scope, scopeID, key string) (*MemoryItemRecord, erro
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, last_accessed_at, created_at, updated_at FROM memories WHERE scope = ? AND scope_id = ? AND key = ?`
+	query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at FROM memories WHERE scope = ? AND scope_id = ? AND key = ?`
 	row := d.db.QueryRow(query, scope, scopeID, key)
 
 	var m MemoryItemRecord
 	var embBytes []byte
 	var metaStr string
 	var lastAcc sql.NullTime
+	var isProm int
 
-	if err := row.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
+	if err := row.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &isProm, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		return nil, err
 	}
+	m.IsPromoted = (isProm == 1)
 	m.Embedding = BytesToFloat32Slice(embBytes)
 	if metaStr != "" {
 		_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
@@ -1697,11 +1709,11 @@ func (d *DB) ListMemoriesByScope(scope, scopeID string, memType string, limit in
 	var err error
 
 	if memType != "" && strings.ToLower(memType) != "all" {
-		query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, last_accessed_at, created_at, updated_at 
+		query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at 
 		          FROM memories WHERE scope = ? AND scope_id = ? AND type = ? ORDER BY updated_at DESC LIMIT ?`
 		rows, err = d.db.Query(query, scope, scopeID, memType, limit)
 	} else {
-		query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, last_accessed_at, created_at, updated_at 
+		query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at 
 		          FROM memories WHERE scope = ? AND scope_id = ? ORDER BY updated_at DESC LIMIT ?`
 		rows, err = d.db.Query(query, scope, scopeID, limit)
 	}
@@ -1717,10 +1729,12 @@ func (d *DB) ListMemoriesByScope(scope, scopeID string, memType string, limit in
 		var embBytes []byte
 		var metaStr string
 		var lastAcc sql.NullTime
+		var isProm int
 
-		if err := rows.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &isProm, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
+		m.IsPromoted = (isProm == 1)
 		m.Embedding = BytesToFloat32Slice(embBytes)
 		if metaStr != "" {
 			_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
@@ -1774,7 +1788,7 @@ func (d *DB) SearchMemoriesFTS5(scope, scopeID, query string, limit int) ([]Memo
 
 	sqlQuery := `
 		SELECT m.id, m.type, m.scope, m.scope_id, m.session_id, m.key, m.content, m.category,
-		       m.embedding, m.metadata, m.access_count, m.last_accessed_at, m.created_at, m.updated_at,
+		       m.embedding, m.metadata, m.is_promoted, m.access_count, m.last_accessed_at, m.created_at, m.updated_at,
 		       fts.rank
 		FROM memories_fts fts
 		JOIN memories m ON m.rowid = fts.rowid
@@ -1788,7 +1802,7 @@ func (d *DB) SearchMemoriesFTS5(scope, scopeID, query string, limit int) ([]Memo
 		// Fallback to LIKE if FTS expression has syntax error
 		pattern := "%" + strings.TrimSpace(query) + "%"
 		fallbackQuery := `
-			SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, last_accessed_at, created_at, updated_at, 0.0 as rank
+			SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at, 0.0 as rank
 			FROM memories
 			WHERE scope = ? AND scope_id = ? AND (key LIKE ? OR content LIKE ? OR category LIKE ?)
 			ORDER BY updated_at DESC LIMIT ?
@@ -1807,11 +1821,13 @@ func (d *DB) SearchMemoriesFTS5(scope, scopeID, query string, limit int) ([]Memo
 		var embBytes []byte
 		var metaStr string
 		var lastAcc sql.NullTime
+		var isProm int
 		var rank float64
 
-		if err := rows.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt, &rank); err != nil {
+		if err := rows.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &isProm, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt, &rank); err != nil {
 			return nil, err
 		}
+		m.IsPromoted = (isProm == 1)
 		m.Embedding = BytesToFloat32Slice(embBytes)
 		if metaStr != "" {
 			_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
@@ -1820,7 +1836,6 @@ func (d *DB) SearchMemoriesFTS5(scope, scopeID, query string, limit int) ([]Memo
 			m.LastAccessedAt = &lastAcc.Time
 		}
 		// Convert BM25 negative rank to normalized 0..1 score (higher is better)
-		// BM25 rank in SQLite is negative where more negative = better match
 		if rank < 0 {
 			m.Score = float32(1.0 / (1.0 + math.Abs(rank)*0.1))
 		} else {
@@ -1831,8 +1846,8 @@ func (d *DB) SearchMemoriesFTS5(scope, scopeID, query string, limit int) ([]Memo
 	return list, nil
 }
 
-// ListCandidateMemoriesForScopes loads all memories for given scopes (e.g. global, channel, user)
-func (d *DB) ListCandidateMemoriesForScopes(scopeFilter []struct{ Scope, ScopeID string }) ([]MemoryItemRecord, error) {
+// ListCandidateMemoriesForScopes loads all memories for given scopes, respecting retention expiration
+func (d *DB) ListCandidateMemoriesForScopes(scopeFilter []struct{ Scope, ScopeID string }, retentionDays int) ([]MemoryItemRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -1847,12 +1862,24 @@ func (d *DB) ListCandidateMemoriesForScopes(scopeFilter []struct{ Scope, ScopeID
 		args = append(args, sf.Scope, sf.ScopeID)
 	}
 
-	query := fmt.Sprintf(`
-		SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, access_count, last_accessed_at, created_at, updated_at
-		FROM memories
-		WHERE %s
-		ORDER BY updated_at DESC
-	`, strings.Join(clauses, " OR "))
+	whereScopes := fmt.Sprintf("(%s)", strings.Join(clauses, " OR "))
+	var query string
+	if retentionDays > 0 {
+		query = fmt.Sprintf(`
+			SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at
+			FROM memories
+			WHERE %s AND (is_promoted = 1 OR COALESCE(last_accessed_at, updated_at, created_at) >= datetime('now', '-' || ? || ' days'))
+			ORDER BY updated_at DESC
+		`, whereScopes)
+		args = append(args, retentionDays)
+	} else {
+		query = fmt.Sprintf(`
+			SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at
+			FROM memories
+			WHERE %s
+			ORDER BY updated_at DESC
+		`, whereScopes)
+	}
 
 	rows, err := d.db.Query(query, args...)
 	if err != nil {
@@ -1866,10 +1893,12 @@ func (d *DB) ListCandidateMemoriesForScopes(scopeFilter []struct{ Scope, ScopeID
 		var embBytes []byte
 		var metaStr string
 		var lastAcc sql.NullTime
+		var isProm int
 
-		if err := rows.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &isProm, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
+		m.IsPromoted = (isProm == 1)
 		m.Embedding = BytesToFloat32Slice(embBytes)
 		if metaStr != "" {
 			_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
@@ -1906,12 +1935,67 @@ func (d *DB) ClearMemoriesByScope(scope, scopeID string) error {
 	return err
 }
 
-// IncrementMemoryAccess increments access count and updates last_accessed_at timestamp
-func (d *DB) IncrementMemoryAccess(id string) error {
+// IncrementMemoryAccess increments access count and auto-promotes to permanent if threshold reached
+func (d *DB) IncrementMemoryAccess(id string, promotionThreshold int) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_, err := d.db.Exec("UPDATE memories SET access_count = access_count + 1, last_accessed_at = CURRENT_TIMESTAMP WHERE id = ?", id)
+	if promotionThreshold <= 0 {
+		promotionThreshold = 3
+	}
+	query := `
+		UPDATE memories 
+		SET access_count = access_count + 1, 
+		    last_accessed_at = CURRENT_TIMESTAMP,
+		    is_promoted = CASE WHEN (access_count + 1) >= ? THEN 1 ELSE is_promoted END
+		WHERE id = ?
+	`
+	_, err := d.db.Exec(query, promotionThreshold, id)
 	return err
+}
+
+// PromoteMemory marks a memory item as permanent (immune to retention expiration)
+func (d *DB) PromoteMemory(id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("UPDATE memories SET is_promoted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", id)
+	return err
+}
+
+// PruneExpiredMemories removes non-promoted memories that haven't been accessed within retentionDays
+func (d *DB) PruneExpiredMemories(retentionDays int) (int64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if retentionDays <= 0 {
+		return 0, nil
+	}
+	query := `
+		DELETE FROM memories 
+		WHERE is_promoted = 0 
+		  AND COALESCE(last_accessed_at, updated_at, created_at) < datetime('now', '-' || ? || ' days')
+	`
+	res, err := d.db.Exec(query, retentionDays)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// OptimizeMemoryStorage optimizes the SQLite FTS5 index and optimizes database
+func (d *DB) OptimizeMemoryStorage() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, _ = d.db.Exec("INSERT INTO memories_fts(memories_fts) VALUES('optimize')")
+	_, _ = d.db.Exec("PRAGMA optimize")
+	return nil
+}
+
+// CountMemories returns the count of active memories for a given scope and scope_id
+func (d *DB) CountMemories(scope, scopeID string) (int, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	var count int
+	err := d.db.QueryRow("SELECT COUNT(*) FROM memories WHERE scope = ? AND scope_id = ?", scope, scopeID).Scan(&count)
+	return count, err
 }
 
 // --- Legacy Memory Items Compatibility ---

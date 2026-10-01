@@ -125,20 +125,39 @@ omniroute:
   use_upstream_search: false         # Diputus: Web search kini mandiri via Tavily / Firecrawl multiprovider
   use_upstream_memory: false         # Diputus: Sistem memory sekarang 100% mandiri di dalam GoAssistant
 
-# GoAssistant Standalone Memory Engine (SQLite + FTS5 + Hybrid/Vector)
+# GoAssistant Standalone Memory Engine (SQLite + FTS5 + Hybrid/Vector + Auto-Compaction)
 memory:
   enabled: true
   auto_extract: true                 # Ekstraksi otomatis fakta & memori dari dialog
-  retrieval_strategy: "hybrid"       # hybrid (FTS5 BM25 + Vektor), semantic, exact
-  max_context_items: 10              # Maksimal memori relevan yang diinjeksikan ke system prompt
+  
+  # Strategi pencarian memori (OmniRoute standard: recent, semantic, hybrid)
+  strategy: "hybrid"                 # "hybrid" (FTS5 BM25 + Vektor + Recency), "recent" (kronologis), "semantic" (vektor murni)
+  
+  # Batas anggaran token yang dialokasikan untuk injeksi memori ke system prompt
+  max_tokens: 2000                   # Maksimal anggaran token (default 2000)
+  max_context_items: 20              # Batas cadangan jumlah memori maksimal
+  
+  # Jendela waktu penyimpanan memori sebelum kedaluwarsa (1-365 hari)
+  # Memori yang diakses berulang kali (>= promotion_threshold) otomatis dipromosikan (kebal kedaluwarsa)
+  retention_days: 30                 # Masa simpan memori sebelum kedaluwarsa (default 30 hari)
+  promotion_threshold: 3             # Ambang batas pemakaian untuk promosi otomatis ke memori permanen
+  
+  # Auto-Compaction: Merampingkan & memadatkan memori secara berkala
+  auto_compaction: true              # Aktifkan auto-compaction (deduplikasi, pruning kedaluwarsa & FTS vacuum)
+  compaction_interval_hours: 24      # Interval jadwal auto-compaction berjalan (default: 24 jam)
+  compaction_threshold: 100          # Jumlah memori per user/scope sebelum kompresi dipicu otomatis
+  
   similarity_threshold: 0.60         # Minimum cosine similarity score untuk semantic search
   seed_csv_path: "D:/Users/Grapari_Infomedia/Downloads/AyuGram Desktop/memories_export.csv"
-  embedding:
+  
+  # Remote embedding source untuk model yang mendukung vector embeddings
+  embedding_source:
     enabled: false                   # Aktifkan true jika ingin menggunakan semantic vector embedding
     provider: "openai"               # openai, gemini, custom, ollama
     model: "text-embedding-3-small"  # Model embedding (misal: text-embedding-3-small, text-embedding-004)
-    base_url: ""                     # Base URL custom jika menggunakan endpoint pihak ketiga / lokal
+    base_url: ""                     # Base URL custom jika menggunakan endpoint pihak ketiga / lokal (misal http://localhost:11434/v1)
     api_key: ""                      # API Key opsional (jika kosong, menggunakan API Key provider default)
     dimensions: 1536                 # Dimensi vektor embedding
+
 
 

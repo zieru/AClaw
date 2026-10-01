@@ -100,8 +100,11 @@ func main() {
 	log.Printf("🔍 Web Search Engine aktif (Provider: %s, Fallback: %t)", cfg.Search.Provider, cfg.Search.FallbackEnabled)
 	toolReg := tools.GetRegistry()
 	provMgr := provider.GetManager()
-	embedder := memory.NewEmbedder(cfg.Memory.Embedding)
+	embedder := memory.NewEmbedder(cfg.Memory.GetEmbeddingConfig())
 	memMgr := memory.NewManager(db, cfg.Memory, embedder, provMgr)
+	memMgr.StartAutoCompactor(context.Background())
+	log.Printf("🧠 Memory Engine Standalone aktif (Strategi: %s, MaxTokens: %d, Retensi: %d hari, Auto-Compaction: %t)",
+		memMgr.GetStrategy(), memMgr.GetMaxTokens(), memMgr.GetRetentionDays(), cfg.Memory.AutoCompaction)
 	toolReg.Register(tools.NewUserMemoryTool(memMgr))
 	sessMgr := memory.NewSessionManager(db)
 	mdLoader := agent.NewMDLoader(cfg.Server.MDDir)

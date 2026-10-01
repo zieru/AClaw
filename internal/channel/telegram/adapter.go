@@ -77,6 +77,7 @@ func (a *BotAdapter) Start(ctx context.Context) error {
 		{Text: "new", Description: "Mulai sesi percakapan baru (reset konteks)"},
 		{Text: "reset", Description: "Reset riwayat percakapan"},
 		{Text: "stop", Description: "Hentikan respon AI yang sedang diproses"},
+		{Text: "memory", Description: "Pengaturan & status memory engine AI"},
 		{Text: "setsudo", Description: "Atur password sudo di memori aman (5 menit)"},
 		{Text: "clearsudo", Description: "Hapus sesi password sudo dari memori"},
 		{Text: "status", Description: "Cek status bot & sesi percakapan"},
@@ -118,6 +119,10 @@ func (a *BotAdapter) registerHandlers() {
 	a.bot.Handle("/stop", a.handleStop)
 	a.bot.Handle("/cancel", a.handleStop)
 
+	// Memory Engine Command
+	a.bot.Handle("/memory", a.handleMemory)
+	a.bot.Handle("/memories", a.handleMemory)
+
 	// Topic Management Commands
 	a.bot.Handle("/topic", a.handleTopic)
 	a.bot.Handle("/topics", a.handleTopic)
@@ -132,6 +137,9 @@ func (a *BotAdapter) registerHandlers() {
 			return nil
 		}
 		data := strings.TrimPrefix(c.Callback().Data, "\f")
+		if strings.HasPrefix(data, "mem_") {
+			return a.handleMemoryCallback(c, data)
+		}
 		if strings.HasPrefix(data, "top_") {
 			return a.handleTopicCallback(c, data)
 		}
@@ -918,6 +926,251 @@ func (a *BotAdapter) handleTopicCallback(c tele.Context, data string) error {
 		}
 		_ = c.Respond(&tele.CallbackResponse{Text: "🗑️ Topik dihapus." + activeInfo})
 		return a.handleTopic(c)
+	}
+
+	return nil
+}
+
+func (a *BotAdapter) handleMemory(c tele.Context) error {
+	if a.orchestrator == nil || a.orchestrator.MemoryManager() == nil {
+		return c.Send("⚠️ <b>Engine Memory GoAssistant belum aktif.</b>\nPastikan <code>memory.enabled: true</code> di konfigurasi.", tele.ModeHTML)
+	}
+	memMgr := a.orchestrator.MemoryManager()
+	payload := ""
+	if c.Message() != nil {
+		payload = strings.TrimSpace(c.Message().Payload)
+	}
+
+	parts := strings.Fields(payload)
+	if len(parts) == 0 || parts[0] == "status" {
+		text, menu := a.renderMemoryDashboard(strconv.FormatInt(c.Sender().ID, 10))
+		return c.Send(text, menu, tele.ModeHTML)
+	}
+
+	subCmd := strings.ToLower(parts[0])
+	switch subCmd {
+	case "strategy", "strat":
+		if len(parts) < 2 {
+			return c.Send(fmt.Sprintf("ℹ️ <b>Strategi Memory Saat Ini:</b> <code>%s</code>\n\nPilihan: <code>recent</code>, <code>semantic</code>, <code>hybrid</code>\nUbah dengan: <code>/memory strategy &lt;pilihan&gt;</code>", memMgr.GetStrategy()), tele.ModeHTML)
+		}
+		newStrat := strings.ToLower(parts[1])
+		if newStrat != "recent" && newStrat != "semantic" && newStrat != "hybrid" {
+			return c.Send("⚠️ Pilihan strategi tidak valid. Gunakan salah satu:\n• <code>recent</code> (kronologis waktu)\n• <code>semantic</code> (vektor makna)\n• <code>hybrid</code> (BM25 + Vektor + Recency)", tele.ModeHTML)
+		}
+		memMgr.SetStrategy(newStrat)
+		return c.Send(fmt.Sprintf("✅ <b>Strategi memory engine berhasil diubah ke:</b> <code>%s</code>", newStrat), tele.ModeHTML)
+
+	case "tokens", "maxtokens", "token":
+		if len(parts) < 2 {
+			return c.Send(fmt.Sprintf("ℹ️ <b>Anggaran Token Saat Ini:</b> <code>%d tokens</code>\n\nUbah dengan: <code>/memory tokens &lt;jumlah&gt;</code> (contoh: <code>/memory tokens 2000</code>)", memMgr.GetMaxTokens()), tele.ModeHTML)
+		}
+		val, err := strconv.Atoi(parts[1])
+		if err != nil || val < 100 || val > 32000 {
+			return c.Send("⚠️ Nilai token harus berupa angka antara 100 dan 32000.", tele.ModeHTML)
+		}
+		memMgr.SetMaxTokens(val)
+		return c.Send(fmt.Sprintf("✅ <b>Anggaran token injeksi memori berhasil diatur ke:</b> <code>%d tokens</code>", val), tele.ModeHTML)
+
+	case "retention", "retention_days", "days":
+		if len(parts) < 2 {
+			return c.Send(fmt.Sprintf("ℹ️ <b>Masa Retensi Saat Ini:</b> <code>%d hari</code>\n\nUbah dengan: <code>/memory retention &lt;hari&gt;</code> (contoh: <code>/memory retention 30</code>)", memMgr.GetRetentionDays()), tele.ModeHTML)
+		}
+		val, err := strconv.Atoi(parts[1])
+		if err != nil || val < 1 || val > 365 {
+			return c.Send("⚠️ Nilai retensi harus antara 1 sampai 365 hari.", tele.ModeHTML)
+		}
+		memMgr.SetRetentionDays(val)
+		return c.Send(fmt.Sprintf("✅ <b>Masa retensi memori berhasil diatur ke:</b> <code>%d hari</code>", val), tele.ModeHTML)
+
+	case "compact", "prune":
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		rep, err := memMgr.Compact(context.Background(), "user", userID)
+		if err != nil {
+			return c.Send(fmt.Sprintf("❌ Gagal menjalankan compaction: %v", err), tele.ModeHTML)
+		}
+		msg := fmt.Sprintf("🧹 <b>HASIL AUTO-COMPACTION MEMORI</b>\n\n"+
+			"• <b>Memori Usang Dihapus:</b> <code>%d catatan</code>\n"+
+			"• <b>Indeks SQLite FTS5:</b> <code>Dioptimalkan (OK)</code>\n"+
+			"• <b>Total Memori Aktif Anda:</b> <code>%d catatan</code>\n\n"+
+			"Database memori Anda kini bersih dan optimal!", rep.PrunedExpired, rep.TotalActive)
+		return c.Send(msg, tele.ModeHTML)
+
+	case "list":
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		items, err := a.db.ListMemoriesByScope("user", userID, "", 15)
+		if err != nil || len(items) == 0 {
+			return c.Send("📭 <i>Belum ada catatan memori yang tersimpan untuk akun Anda.</i>", tele.ModeHTML)
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("📋 <b>DAFTAR MEMORI ANDA (%d item terbaru):</b>\n\n", len(items)))
+		for i, it := range items {
+			promTag := ""
+			if it.IsPromoted {
+				promTag = " ⭐️[PERMANEN]"
+			}
+			contentExcerpt := it.Content
+			if len([]rune(contentExcerpt)) > 70 {
+				contentExcerpt = string([]rune(contentExcerpt)[:70]) + "..."
+			}
+			sb.WriteString(fmt.Sprintf("<b>%d.</b> <code>[%s]</code>%s\n   %s\n\n",
+				i+1, html.EscapeString(it.Key), promTag, html.EscapeString(contentExcerpt)))
+		}
+		return c.Send(sb.String(), tele.ModeHTML)
+
+	case "search":
+		if len(parts) < 2 {
+			return c.Send("Gunakan format: <code>/memory search &lt;kata_kunci&gt;</code>", tele.ModeHTML)
+		}
+		query := strings.Join(parts[1:], " ")
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		results, err := memMgr.SearchMemoriesAdvanced("user", userID, query, "", 5)
+		if err != nil || len(results) == 0 {
+			return c.Send(fmt.Sprintf("🔍 <i>Tidak ditemukan memori yang cocok dengan: %s</i>", html.EscapeString(query)), tele.ModeHTML)
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("🔍 <b>HASIL PENCARIAN MEMORI (%d ditemukan):</b>\n\n", len(results)))
+		for i, it := range results {
+			sb.WriteString(fmt.Sprintf("<b>%d.</b> <code>[%s]</code> (Score: <code>%.2f</code>)\n   %s\n\n",
+				i+1, html.EscapeString(it.Key), it.Score, html.EscapeString(it.Content)))
+		}
+		return c.Send(sb.String(), tele.ModeHTML)
+
+	case "clear":
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		if err := memMgr.ClearUserMemory(userID); err != nil {
+			return c.Send(fmt.Sprintf("❌ Gagal menghapus memori: %v", err), tele.ModeHTML)
+		}
+		return c.Send("🗑️ <b>Semua catatan memori pribadi Anda berhasil dihapus.</b>", tele.ModeHTML)
+
+	default:
+		return c.Send("Perintah tidak dikenal. Ketik <code>/memory</code> untuk membuka dashboard.", tele.ModeHTML)
+	}
+}
+
+func (a *BotAdapter) renderMemoryDashboard(userID string) (string, *tele.ReplyMarkup) {
+	memMgr := a.orchestrator.MemoryManager()
+	cfg := memMgr.GetConfig()
+	activeStrategy := memMgr.GetStrategy()
+	maxTokens := memMgr.GetMaxTokens()
+	retentionDays := memMgr.GetRetentionDays()
+	promotionThreshold := memMgr.GetPromotionThreshold()
+
+	activeCount, _ := a.db.CountMemories("user", userID)
+
+	embCfg := cfg.GetEmbeddingConfig()
+	embStatus := "Nonaktif (BM25 FTS5 Cepat)"
+	if embCfg.Enabled && embCfg.Model != "" {
+		embStatus = fmt.Sprintf("Aktif (%s - %s)", embCfg.Provider, embCfg.Model)
+	}
+
+	stratDesc := "Hybrid (BM25 + Vektor + Recency)"
+	if activeStrategy == "recent" {
+		stratDesc = "Recent (Kronologis Waktu Terbaru)"
+	} else if activeStrategy == "semantic" {
+		stratDesc = "Semantic (Vektor Kemiripan Makna)"
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🧠 <b>DASHBOARD MEMORY ENGINE (OmniRoute Standard)</b>\n\n")
+	sb.WriteString(fmt.Sprintf("• <b>Strategi Aktif:</b> <code>%s</code> (%s)\n", activeStrategy, stratDesc))
+	sb.WriteString(fmt.Sprintf("• <b>Anggaran Token Prompt:</b> <code>%d tokens</code>\n", maxTokens))
+	sb.WriteString(fmt.Sprintf("• <b>Masa Retensi:</b> <code>%d hari</code> (Auto-promosi &ge; <code>%dx</code> pakai)\n", retentionDays, promotionThreshold))
+	sb.WriteString(fmt.Sprintf("• <b>Memori Aktif Anda:</b> <code>%d catatan</code>\n", activeCount))
+	sb.WriteString(fmt.Sprintf("• <b>Auto-Compaction:</b> <code>Aktif</code> (Tiap %d jam)\n", cfg.CompactionIntervalHours))
+	sb.WriteString(fmt.Sprintf("• <b>Remote Embedding:</b> <code>%s</code>\n\n", embStatus))
+	sb.WriteString("💡 <i>Pilih strategi di bawah atau jalankan pemadatan:</i>")
+
+	menu := &tele.ReplyMarkup{}
+
+	btnHybrid := menu.Data("🔘 Hybrid", "mem_strat_hybrid")
+	if activeStrategy == "hybrid" {
+		btnHybrid = menu.Data("✅ Hybrid", "mem_strat_hybrid")
+	}
+	btnRecent := menu.Data("⚡ Recent", "mem_strat_recent")
+	if activeStrategy == "recent" {
+		btnRecent = menu.Data("✅ Recent", "mem_strat_recent")
+	}
+	btnSemantic := menu.Data("🧠 Semantic", "mem_strat_semantic")
+	if activeStrategy == "semantic" {
+		btnSemantic = menu.Data("✅ Semantic", "mem_strat_semantic")
+	}
+
+	btnCompact := menu.Data("🧹 Compact & Prune", "mem_compact_now")
+	btnList := menu.Data("📋 List Memori", "mem_list_now")
+	btnRefresh := menu.Data("🔄 Refresh", "mem_refresh")
+
+	menu.Inline(
+		menu.Row(btnHybrid, btnRecent, btnSemantic),
+		menu.Row(btnCompact, btnList),
+		menu.Row(btnRefresh),
+	)
+
+	return sb.String(), menu
+}
+
+func (a *BotAdapter) handleMemoryCallback(c tele.Context, data string) error {
+	if a.orchestrator == nil || a.orchestrator.MemoryManager() == nil {
+		_ = c.Respond(&tele.CallbackResponse{Text: "Memory manager belum siap"})
+		return nil
+	}
+	memMgr := a.orchestrator.MemoryManager()
+	userID := strconv.FormatInt(c.Sender().ID, 10)
+
+	switch data {
+	case "mem_refresh":
+		_ = c.Respond(&tele.CallbackResponse{Text: "🔄 Memperbarui dashboard..."})
+		text, menu := a.renderMemoryDashboard(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_strat_hybrid":
+		memMgr.SetStrategy("hybrid")
+		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Strategi diubah ke Hybrid"})
+		text, menu := a.renderMemoryDashboard(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_strat_recent":
+		memMgr.SetStrategy("recent")
+		_ = c.Respond(&tele.CallbackResponse{Text: "⚡ Strategi diubah ke Recent"})
+		text, menu := a.renderMemoryDashboard(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_strat_semantic":
+		memMgr.SetStrategy("semantic")
+		_ = c.Respond(&tele.CallbackResponse{Text: "🧠 Strategi diubah ke Semantic"})
+		text, menu := a.renderMemoryDashboard(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_compact_now":
+		rep, err := memMgr.Compact(context.Background(), "user", userID)
+		if err != nil {
+			_ = c.Respond(&tele.CallbackResponse{Text: "❌ Gagal compaction"})
+			return nil
+		}
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🧹 Dihapus: %d memori usang", rep.PrunedExpired)})
+		text, menu := a.renderMemoryDashboard(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_list_now":
+		_ = c.Respond(&tele.CallbackResponse{})
+		items, err := a.db.ListMemoriesByScope("user", userID, "", 15)
+		if err != nil || len(items) == 0 {
+			return c.Send("📭 <i>Belum ada catatan memori yang tersimpan untuk akun Anda.</i>", tele.ModeHTML)
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("📋 <b>DAFTAR MEMORI ANDA (%d item):</b>\n\n", len(items)))
+		for i, it := range items {
+			promTag := ""
+			if it.IsPromoted {
+				promTag = " ⭐️[PERMANEN]"
+			}
+			contentExcerpt := it.Content
+			if len([]rune(contentExcerpt)) > 70 {
+				contentExcerpt = string([]rune(contentExcerpt)[:70]) + "..."
+			}
+			sb.WriteString(fmt.Sprintf("<b>%d.</b> <code>[%s]</code>%s\n   %s\n\n",
+				i+1, html.EscapeString(it.Key), promTag, html.EscapeString(contentExcerpt)))
+		}
+		return c.Send(sb.String(), tele.ModeHTML)
 	}
 
 	return nil

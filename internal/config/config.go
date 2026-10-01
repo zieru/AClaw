@@ -108,13 +108,76 @@ type AppConfig struct {
 
 // MemoryConfig defines configuration for GoAssistant's standalone memory engine
 type MemoryConfig struct {
-	Enabled             bool            `yaml:"enabled"`
-	AutoExtract         bool            `yaml:"auto_extract"`
-	RetrievalStrategy   string          `yaml:"retrieval_strategy"` // "hybrid", "semantic", "exact"
-	MaxContextItems     int             `yaml:"max_context_items"`
-	SimilarityThreshold float64         `yaml:"similarity_threshold"`
-	SeedCSVPath         string          `yaml:"seed_csv_path"`
-	Embedding           EmbeddingConfig `yaml:"embedding"`
+	Enabled                 bool            `yaml:"enabled"`
+	AutoExtract             bool            `yaml:"auto_extract"`
+	Strategy                string          `yaml:"strategy"`                  // "hybrid", "recent", "semantic"
+	RetrievalStrategy       string          `yaml:"retrieval_strategy"`        // legacy alias
+	MemoryStrategy          string          `yaml:"memory_strategy"`           // OmniRoute alias
+	MaxTokens               int             `yaml:"max_tokens"`                // Prompt injection token budget (default 2000)
+	MemoryMaxTokens         int             `yaml:"memory_max_tokens"`         // OmniRoute alias
+	MaxContextItems         int             `yaml:"max_context_items"`         // Fallback item count limit
+	RetentionDays           int             `yaml:"retention_days"`            // Memory retention window (default 30 days)
+	MemoryRetentionDays     int             `yaml:"memory_retention_days"`     // OmniRoute alias
+	PromotionThreshold      int             `yaml:"promotion_threshold"`       // Access count threshold to promote to permanent memory (default 3)
+	AutoCompaction          bool            `yaml:"auto_compaction"`           // Auto deduplication, pruning & FTS vacuum (default true)
+	CompactionIntervalHours int             `yaml:"compaction_interval_hours"` // Compaction interval (default 24h)
+	CompactionThreshold     int             `yaml:"compaction_threshold"`      // Memory count threshold to trigger compaction (default 100)
+	SimilarityThreshold     float64         `yaml:"similarity_threshold"`
+	SeedCSVPath             string          `yaml:"seed_csv_path"`
+	Embedding               EmbeddingConfig `yaml:"embedding"`
+	EmbeddingSource         EmbeddingConfig `yaml:"embedding_source"`          // OmniRoute alias
+}
+
+// GetStrategy returns the active memory retrieval strategy ("hybrid", "recent", "semantic")
+func (m *MemoryConfig) GetStrategy() string {
+	if m.Strategy != "" {
+		return m.Strategy
+	}
+	if m.MemoryStrategy != "" {
+		return m.MemoryStrategy
+	}
+	if m.RetrievalStrategy != "" {
+		return m.RetrievalStrategy
+	}
+	return "hybrid"
+}
+
+// GetMaxTokens returns the max token budget for prompt memory injection
+func (m *MemoryConfig) GetMaxTokens() int {
+	if m.MaxTokens > 0 {
+		return m.MaxTokens
+	}
+	if m.MemoryMaxTokens > 0 {
+		return m.MemoryMaxTokens
+	}
+	return 2000
+}
+
+// GetRetentionDays returns the retention days (1-365, default 30)
+func (m *MemoryConfig) GetRetentionDays() int {
+	if m.RetentionDays > 0 {
+		return m.RetentionDays
+	}
+	if m.MemoryRetentionDays > 0 {
+		return m.MemoryRetentionDays
+	}
+	return 30
+}
+
+// GetPromotionThreshold returns the access count threshold to promote memory
+func (m *MemoryConfig) GetPromotionThreshold() int {
+	if m.PromotionThreshold > 0 {
+		return m.PromotionThreshold
+	}
+	return 3
+}
+
+// GetEmbeddingConfig returns the configured embedding configuration
+func (m *MemoryConfig) GetEmbeddingConfig() EmbeddingConfig {
+	if m.EmbeddingSource.Enabled || m.EmbeddingSource.Model != "" {
+		return m.EmbeddingSource
+	}
+	return m.Embedding
 }
 
 // EmbeddingConfig defines configuration for generating vector embeddings
@@ -257,8 +320,15 @@ func Load(configPath string) (*AppConfig, error) {
 
 		cfg.Memory.Enabled = true
 		cfg.Memory.AutoExtract = true
+		cfg.Memory.Strategy = "hybrid"
 		cfg.Memory.RetrievalStrategy = "hybrid"
-		cfg.Memory.MaxContextItems = 10
+		cfg.Memory.MaxTokens = 2000
+		cfg.Memory.MaxContextItems = 20
+		cfg.Memory.RetentionDays = 30
+		cfg.Memory.PromotionThreshold = 3
+		cfg.Memory.AutoCompaction = true
+		cfg.Memory.CompactionIntervalHours = 24
+		cfg.Memory.CompactionThreshold = 100
 		cfg.Memory.SimilarityThreshold = 0.60
 		cfg.Memory.SeedCSVPath = "D:/Users/Grapari_Infomedia/Downloads/AyuGram Desktop/memories_export.csv"
 		cfg.Memory.Embedding.Enabled = false

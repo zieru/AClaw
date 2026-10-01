@@ -59,6 +59,14 @@ func (o *Orchestrator) ProviderManager() *provider.Manager {
 	return o.providerManager
 }
 
+// MemoryManager returns the standalone memory manager instance
+func (o *Orchestrator) MemoryManager() *memory.Manager {
+	if o == nil {
+		return nil
+	}
+	return o.memoryManager
+}
+
 type UserRequest struct {
 	ChannelType    string
 	ChannelID      string

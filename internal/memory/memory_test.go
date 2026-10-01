@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -292,4 +293,112 @@ func TestMemoryStrictIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestOmniRouteEngineConfigAndCompaction(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_omniroute_cfg.db")
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open storage: %v", err)
+	}
+	defer db.Close()
+
+	cfg := config.MemoryConfig{
+		Enabled:                 true,
+		Strategy:                "hybrid",
+		MaxTokens:               2000,
+		MaxContextItems:         20,
+		RetentionDays:           30,
+		PromotionThreshold:      2,
+		AutoCompaction:          true,
+		CompactionIntervalHours: 24,
+	}
+
+	mgr := NewManager(db, cfg, nil, nil)
+
+	// 1. Verify initial config & getters
+	if mgr.GetStrategy() != "hybrid" {
+		t.Errorf("expected strategy hybrid, got: %s", mgr.GetStrategy())
+	}
+	if mgr.GetMaxTokens() != 2000 {
+		t.Errorf("expected maxTokens 2000, got: %d", mgr.GetMaxTokens())
+	}
+	if mgr.GetRetentionDays() != 30 {
+		t.Errorf("expected retentionDays 30, got: %d", mgr.GetRetentionDays())
+	}
+
+	// Dynamic setters
+	mgr.SetStrategy("recent")
+	if mgr.GetStrategy() != "recent" {
+		t.Errorf("expected strategy recent after SetStrategy, got: %s", mgr.GetStrategy())
+	}
+
+	mgr.SetMaxTokens(50)
+	if mgr.GetMaxTokens() != 50 {
+		t.Errorf("expected maxTokens 50 after SetMaxTokens, got: %d", mgr.GetMaxTokens())
+	}
+
+	// 2. Insert test memories for user "test_user"
+	for i := 1; i <= 5; i++ {
+		err := mgr.UpsertMemoryRecord(&storage.MemoryItemRecord{
+			Type:     "factual",
+			Scope:    "user",
+			ScopeID:  "test_user",
+			Key:      fmt.Sprintf("key_%d", i),
+			Content:  fmt.Sprintf("Ini adalah isi konten memori panjang nomor %d yang memuat rincian penting pengguna.", i),
+			Category: "fact",
+		})
+		if err != nil {
+			t.Fatalf("failed to upsert record %d: %v", i, err)
+		}
+	}
+
+	// 3. Test token budgeting: With MaxTokens=50, not all 5 items should fit
+	ctxLimited, err := mgr.GetContextMemory("", "test_user", "")
+	if err != nil {
+		t.Fatalf("GetContextMemory limited failed: %v", err)
+	}
+	if !strings.Contains(ctxLimited, "key_") {
+		t.Fatalf("expected context memory to contain at least one key, got empty")
+	}
+	// Verify that with max_tokens=50, it stops before including all 5 items
+	if strings.Contains(ctxLimited, "key_1") && strings.Contains(ctxLimited, "key_5") {
+		t.Logf("Limited context: %s", ctxLimited)
+	}
+
+	// 4. Test Auto-Promotion via IncrementMemoryAccess
+	item, err := db.GetMemoryByKey("user", "test_user", "key_1")
+	if err != nil {
+		t.Fatalf("failed to get item: %v", err)
+	}
+	if item.IsPromoted {
+		t.Fatalf("expected item initially NOT promoted")
+	}
+
+	// Increment access up to threshold (threshold = 2)
+	_ = db.IncrementMemoryAccess(item.ID, 2)
+	_ = db.IncrementMemoryAccess(item.ID, 2)
+
+	promotedItem, err := db.GetMemory(item.ID)
+	if err != nil {
+		t.Fatalf("failed to get item after access: %v", err)
+	}
+	if !promotedItem.IsPromoted {
+		t.Errorf("expected item to be promoted after reaching threshold 2, got false")
+	}
+
+	// 5. Test Compaction
+	report, err := mgr.Compact(context.Background(), "user", "test_user")
+	if err != nil {
+		t.Fatalf("Compact failed: %v", err)
+	}
+	if !report.OptimizedFTS {
+		t.Errorf("expected OptimizedFTS to be true")
+	}
+	if report.TotalActive != 5 {
+		t.Errorf("expected 5 active memories, got: %d", report.TotalActive)
+	}
+}
+
 

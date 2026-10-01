@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS memories (
     category TEXT NOT NULL DEFAULT 'fact',     -- preference, profile, fact, work, decision, sop
     embedding BLOB,                            -- IEEE 754 float32 byte array
     metadata TEXT NOT NULL DEFAULT '{}',       -- JSON string
+    is_promoted INTEGER NOT NULL DEFAULT 0,    -- 1 if promoted to permanent long-term memory
     access_count INTEGER NOT NULL DEFAULT 0,
     last_accessed_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
