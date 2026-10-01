@@ -401,4 +401,99 @@ func TestOmniRouteEngineConfigAndCompaction(t *testing.T) {
 	}
 }
 
+func TestMemoryConfigPersistenceAndSetters(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_persistence.db")
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open storage: %v", err)
+	}
+	defer db.Close()
+
+	initialCfg := config.MemoryConfig{
+		Enabled:                 true,
+		AutoExtract:             true,
+		Strategy:                "hybrid",
+		MaxTokens:               2000,
+		MaxContextItems:         20,
+		RetentionDays:           30,
+		PromotionThreshold:      3,
+		AutoCompaction:          true,
+		CompactionIntervalHours: 24,
+		CompactionThreshold:     100,
+		SimilarityThreshold:     0.60,
+	}
+
+	mgr1 := NewManager(db, initialCfg, nil, nil)
+
+	// Apply various setters
+	mgr1.SetEnabled(false)
+	mgr1.SetAutoExtract(false)
+	mgr1.SetStrategy("semantic")
+	mgr1.SetMaxTokens(3500)
+	mgr1.SetMaxContextItems(45)
+	mgr1.SetRetentionDays(90)
+	mgr1.SetPromotionThreshold(5)
+	mgr1.SetAutoCompaction(false)
+	mgr1.SetCompactionIntervalHours(12)
+	mgr1.SetCompactionThreshold(250)
+	mgr1.SetSimilarityThreshold(0.75)
+	mgr1.SetEmbeddingProvider("gemini")
+	mgr1.SetEmbeddingModel("text-embedding-004")
+	mgr1.SetEmbeddingDimensions(768)
+
+	// Verify setting saved to db
+	rawSetting, err := db.GetSetting("memory_config", "")
+	if err != nil || rawSetting == "" {
+		t.Fatalf("expected memory_config in system_settings, got err: %v, raw: %s", err, rawSetting)
+	}
+
+	// Create brand-new NewManager with blank config
+	var blankCfg config.MemoryConfig
+	mgr2 := NewManager(db, blankCfg, nil, nil)
+
+	if mgr2.IsEnabled() != false {
+		t.Errorf("expected Enabled=false restored, got %v", mgr2.IsEnabled())
+	}
+	if mgr2.GetConfig().AutoExtract != false {
+		t.Errorf("expected AutoExtract=false restored, got %v", mgr2.GetConfig().AutoExtract)
+	}
+	if mgr2.GetStrategy() != "semantic" {
+		t.Errorf("expected Strategy=semantic restored, got %s", mgr2.GetStrategy())
+	}
+	if mgr2.GetMaxTokens() != 3500 {
+		t.Errorf("expected MaxTokens=3500 restored, got %d", mgr2.GetMaxTokens())
+	}
+	if mgr2.GetMaxContextItems() != 45 {
+		t.Errorf("expected MaxContextItems=45 restored, got %d", mgr2.GetMaxContextItems())
+	}
+	if mgr2.GetRetentionDays() != 90 {
+		t.Errorf("expected RetentionDays=90 restored, got %d", mgr2.GetRetentionDays())
+	}
+	if mgr2.GetPromotionThreshold() != 5 {
+		t.Errorf("expected PromotionThreshold=5 restored, got %d", mgr2.GetPromotionThreshold())
+	}
+	if mgr2.GetSimilarityThreshold() != 0.75 {
+		t.Errorf("expected SimilarityThreshold=0.75 restored, got %f", mgr2.GetSimilarityThreshold())
+	}
+	embCfg := mgr2.GetConfig().GetEmbeddingConfig()
+	if embCfg.Provider != "gemini" || embCfg.Model != "text-embedding-004" || embCfg.Dimensions != 768 {
+		t.Errorf("expected embedding config restored, got %+v", embCfg)
+	}
+
+	// Test ResetToDefaults
+	mgr2.ResetToDefaults()
+	if mgr2.IsEnabled() != true {
+		t.Errorf("expected Enabled=true after reset, got %v", mgr2.IsEnabled())
+	}
+	if mgr2.GetStrategy() != "hybrid" {
+		t.Errorf("expected Strategy=hybrid after reset, got %s", mgr2.GetStrategy())
+	}
+	if mgr2.GetMaxTokens() != 2000 {
+		t.Errorf("expected MaxTokens=2000 after reset, got %d", mgr2.GetMaxTokens())
+	}
+}
+
+
 

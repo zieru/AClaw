@@ -942,13 +942,40 @@ func (a *BotAdapter) handleMemory(c tele.Context) error {
 	}
 
 	parts := strings.Fields(payload)
-	if len(parts) == 0 || parts[0] == "status" {
+	if len(parts) == 0 || parts[0] == "status" || parts[0] == "dashboard" {
 		text, menu := a.renderMemoryDashboard(strconv.FormatInt(c.Sender().ID, 10))
 		return c.Send(text, menu, tele.ModeHTML)
 	}
 
 	subCmd := strings.ToLower(parts[0])
 	switch subCmd {
+	case "enable", "on":
+		memMgr.SetEnabled(true)
+		return c.Send("✅ <b>Engine Memory GoAssistant diaktifkan.</b>", tele.ModeHTML)
+
+	case "disable", "off":
+		memMgr.SetEnabled(false)
+		return c.Send("🛑 <b>Engine Memory GoAssistant dinonaktifkan.</b>", tele.ModeHTML)
+
+	case "autoextract", "extract":
+		if len(parts) < 2 {
+			cfg := memMgr.GetConfig()
+			st := "Nonaktif"
+			if cfg.AutoExtract {
+				st = "Aktif"
+			}
+			return c.Send(fmt.Sprintf("ℹ️ <b>Auto-Extract Percakapan:</b> <code>%s</code>\n\nGunakan: <code>/memory autoextract on</code> atau <code>/memory autoextract off</code>", st), tele.ModeHTML)
+		}
+		arg := strings.ToLower(parts[1])
+		if arg == "on" || arg == "true" || arg == "1" {
+			memMgr.SetAutoExtract(true)
+			return c.Send("✅ <b>Auto-Extract percakapan diaktifkan.</b> Bot akan secara otomatis mengekstrak fakta penting dari percakapan.", tele.ModeHTML)
+		} else if arg == "off" || arg == "false" || arg == "0" {
+			memMgr.SetAutoExtract(false)
+			return c.Send("🛑 <b>Auto-Extract percakapan dinonaktifkan.</b>", tele.ModeHTML)
+		}
+		return c.Send("⚠️ Gunakan <code>/memory autoextract on</code> atau <code>/memory autoextract off</code>", tele.ModeHTML)
+
 	case "strategy", "strat":
 		if len(parts) < 2 {
 			return c.Send(fmt.Sprintf("ℹ️ <b>Strategi Memory Saat Ini:</b> <code>%s</code>\n\nPilihan: <code>recent</code>, <code>semantic</code>, <code>hybrid</code>\nUbah dengan: <code>/memory strategy &lt;pilihan&gt;</code>", memMgr.GetStrategy()), tele.ModeHTML)
@@ -1036,6 +1063,29 @@ func (a *BotAdapter) handleMemory(c tele.Context) error {
 		memMgr.SetEmbeddingAPIKey(newKey)
 		return c.Send("✅ <b>API Key untuk embedding berhasil diperbarui.</b>", tele.ModeHTML)
 
+	case "dimensions", "dims":
+		if len(parts) < 2 {
+			cfg := memMgr.GetConfig()
+			return c.Send(fmt.Sprintf("ℹ️ <b>Dimensi Vektor Saat Ini:</b> <code>%d</code>\n\nUbah dengan: <code>/memory dimensions &lt;jumlah&gt;</code> (contoh: <code>/memory dimensions 1536</code>)", cfg.Embedding.Dimensions), tele.ModeHTML)
+		}
+		val, err := strconv.Atoi(parts[1])
+		if err != nil || val < 64 || val > 16384 {
+			return c.Send("⚠️ Nilai dimensi vektor harus antara 64 sampai 16384.", tele.ModeHTML)
+		}
+		memMgr.SetEmbeddingDimensions(val)
+		return c.Send(fmt.Sprintf("✅ <b>Dimensi vektor embedding berhasil diatur ke:</b> <code>%d</code>", val), tele.ModeHTML)
+
+	case "similarity", "threshold", "sim":
+		if len(parts) < 2 {
+			return c.Send(fmt.Sprintf("ℹ️ <b>Ambang Batas Similarity Saat Ini:</b> <code>%.2f</code>\n\nUbah dengan: <code>/memory similarity &lt;0.10 - 1.00&gt;</code> (contoh: <code>/memory similarity 0.60</code>)", memMgr.GetSimilarityThreshold()), tele.ModeHTML)
+		}
+		val, err := strconv.ParseFloat(parts[1], 64)
+		if err != nil || val <= 0.0 || val > 1.0 {
+			return c.Send("⚠️ Nilai similarity threshold harus berupa desimal antara 0.01 sampai 1.00 (misal: 0.60).", tele.ModeHTML)
+		}
+		memMgr.SetSimilarityThreshold(val)
+		return c.Send(fmt.Sprintf("✅ <b>Similarity threshold berhasil diatur ke:</b> <code>%.2f</code>", val), tele.ModeHTML)
+
 	case "tokens", "maxtokens", "token":
 		if len(parts) < 2 {
 			return c.Send(fmt.Sprintf("ℹ️ <b>Anggaran Token Saat Ini:</b> <code>%d tokens</code>\n\nUbah dengan: <code>/memory tokens &lt;jumlah&gt;</code> (contoh: <code>/memory tokens 2000</code>)", memMgr.GetMaxTokens()), tele.ModeHTML)
@@ -1047,6 +1097,17 @@ func (a *BotAdapter) handleMemory(c tele.Context) error {
 		memMgr.SetMaxTokens(val)
 		return c.Send(fmt.Sprintf("✅ <b>Anggaran token injeksi memori berhasil diatur ke:</b> <code>%d tokens</code>", val), tele.ModeHTML)
 
+	case "maxitems", "items":
+		if len(parts) < 2 {
+			return c.Send(fmt.Sprintf("ℹ️ <b>Batas Maksimal Item Memori Saat Ini:</b> <code>%d item</code>\n\nUbah dengan: <code>/memory maxitems &lt;jumlah&gt;</code> (contoh: <code>/memory maxitems 20</code>)", memMgr.GetMaxContextItems()), tele.ModeHTML)
+		}
+		val, err := strconv.Atoi(parts[1])
+		if err != nil || val < 1 || val > 100 {
+			return c.Send("⚠️ Nilai max items harus antara 1 sampai 100.", tele.ModeHTML)
+		}
+		memMgr.SetMaxContextItems(val)
+		return c.Send(fmt.Sprintf("✅ <b>Batas item memori injeksi prompt berhasil diatur ke:</b> <code>%d item</code>", val), tele.ModeHTML)
+
 	case "retention", "retention_days", "days":
 		if len(parts) < 2 {
 			return c.Send(fmt.Sprintf("ℹ️ <b>Masa Retensi Saat Ini:</b> <code>%d hari</code>\n\nUbah dengan: <code>/memory retention &lt;hari&gt;</code> (contoh: <code>/memory retention 30</code>)", memMgr.GetRetentionDays()), tele.ModeHTML)
@@ -1057,6 +1118,60 @@ func (a *BotAdapter) handleMemory(c tele.Context) error {
 		}
 		memMgr.SetRetentionDays(val)
 		return c.Send(fmt.Sprintf("✅ <b>Masa retensi memori berhasil diatur ke:</b> <code>%d hari</code>", val), tele.ModeHTML)
+
+	case "promotion", "promo", "promotion_threshold":
+		if len(parts) < 2 {
+			return c.Send(fmt.Sprintf("ℹ️ <b>Ambang Promosi Saat Ini:</b> <code>≥ %dx akses</code>\n\nUbah dengan: <code>/memory promotion &lt;kali&gt;</code> (contoh: <code>/memory promotion 3</code>)", memMgr.GetPromotionThreshold()), tele.ModeHTML)
+		}
+		val, err := strconv.Atoi(parts[1])
+		if err != nil || val < 1 || val > 50 {
+			return c.Send("⚠️ Nilai ambang promosi harus antara 1 sampai 50.", tele.ModeHTML)
+		}
+		memMgr.SetPromotionThreshold(val)
+		return c.Send(fmt.Sprintf("✅ <b>Ambang promosi memori berhasil diatur ke:</b> <code>≥ %dx akses</code>", val), tele.ModeHTML)
+
+	case "compaction", "autocompact":
+		if len(parts) < 2 {
+			cfg := memMgr.GetConfig()
+			st := "Nonaktif"
+			if cfg.AutoCompaction {
+				st = "Aktif"
+			}
+			return c.Send(fmt.Sprintf("ℹ️ <b>Auto-Compaction:</b> <code>%s</code>\n\nGunakan: <code>/memory compaction on</code> atau <code>/memory compaction off</code>", st), tele.ModeHTML)
+		}
+		arg := strings.ToLower(parts[1])
+		if arg == "on" || arg == "true" || arg == "1" {
+			memMgr.SetAutoCompaction(true)
+			return c.Send("✅ <b>Auto-Compaction diaktifkan.</b>", tele.ModeHTML)
+		} else if arg == "off" || arg == "false" || arg == "0" {
+			memMgr.SetAutoCompaction(false)
+			return c.Send("🛑 <b>Auto-Compaction dinonaktifkan.</b>", tele.ModeHTML)
+		}
+		return c.Send("⚠️ Gunakan <code>/memory compaction on</code> atau <code>/memory compaction off</code>", tele.ModeHTML)
+
+	case "compactinterval", "interval":
+		if len(parts) < 2 {
+			cfg := memMgr.GetConfig()
+			return c.Send(fmt.Sprintf("ℹ️ <b>Interval Compaction Saat Ini:</b> <code>%d jam</code>\n\nUbah dengan: <code>/memory compactinterval &lt;jam&gt;</code> (contoh: <code>/memory compactinterval 24</code>)", cfg.CompactionIntervalHours), tele.ModeHTML)
+		}
+		val, err := strconv.Atoi(parts[1])
+		if err != nil || val < 1 || val > 720 {
+			return c.Send("⚠️ Nilai interval harus antara 1 sampai 720 jam.", tele.ModeHTML)
+		}
+		memMgr.SetCompactionIntervalHours(val)
+		return c.Send(fmt.Sprintf("✅ <b>Interval auto-compaction berhasil diatur ke:</b> <code>%d jam</code>", val), tele.ModeHTML)
+
+	case "compactthreshold", "cthreshold":
+		if len(parts) < 2 {
+			cfg := memMgr.GetConfig()
+			return c.Send(fmt.Sprintf("ℹ️ <b>Ambang Pemicu Compaction Saat Ini:</b> <code>%d item</code>\n\nUbah dengan: <code>/memory compactthreshold &lt;jumlah&gt;</code> (contoh: <code>/memory compactthreshold 100</code>)", cfg.CompactionThreshold), tele.ModeHTML)
+		}
+		val, err := strconv.Atoi(parts[1])
+		if err != nil || val < 10 || val > 10000 {
+			return c.Send("⚠️ Nilai ambang pemicu harus antara 10 sampai 10000 item.", tele.ModeHTML)
+		}
+		memMgr.SetCompactionThreshold(val)
+		return c.Send(fmt.Sprintf("✅ <b>Ambang pemicu auto-compaction berhasil diatur ke:</b> <code>%d item</code>", val), tele.ModeHTML)
 
 	case "compact", "prune":
 		userID := strconv.FormatInt(c.Sender().ID, 10)
@@ -1118,20 +1233,51 @@ func (a *BotAdapter) handleMemory(c tele.Context) error {
 		}
 		return c.Send("🗑️ <b>Semua catatan memori pribadi Anda berhasil dihapus.</b>", tele.ModeHTML)
 
+	case "seed", "import":
+		csvPath := ""
+		if len(parts) > 1 {
+			csvPath = strings.Join(parts[1:], " ")
+		}
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		res, err := memMgr.ImportSeedCSV(context.Background(), csvPath, userID)
+		if err != nil {
+			return c.Send(fmt.Sprintf("❌ <b>Gagal mengimpor seed CSV:</b> %v", err), tele.ModeHTML)
+		}
+		return c.Send(fmt.Sprintf("📥 <b>HASIL IMPOR SEED CSV MEMORY</b>\n\n"+
+			"• <b>Total Diproses:</b> <code>%d item</code>\n"+
+			"• <b>Berhasil Diimpor:</b> <code>%d item</code>\n"+
+			"• <b>Error / Dilewati:</b> <code>%d</code>\n\n"+
+			"Catatan memori kini telah siap digunakan dalam pencarian!",
+			res.TotalProcessed, res.Inserted, len(res.Errors)), tele.ModeHTML)
+
+	case "reset":
+		memMgr.ResetToDefaults()
+		return c.Send("🔄 <b>Seluruh pengaturan memory engine telah di-reset ke nilai default pabrik.</b>", tele.ModeHTML)
+
 	default:
-		return c.Send("Perintah tidak dikenal. Ketik <code>/memory</code> untuk membuka dashboard.", tele.ModeHTML)
+		return c.Send("Perintah tidak dikenal. Ketik <code>/memory</code> untuk membuka dashboard lengkap.", tele.ModeHTML)
 	}
 }
 
+// renderMemoryDashboard renders the top-level Hub dashboard
 func (a *BotAdapter) renderMemoryDashboard(userID string) (string, *tele.ReplyMarkup) {
 	memMgr := a.orchestrator.MemoryManager()
 	cfg := memMgr.GetConfig()
 	activeStrategy := memMgr.GetStrategy()
 	maxTokens := memMgr.GetMaxTokens()
+	maxItems := memMgr.GetMaxContextItems()
 	retentionDays := memMgr.GetRetentionDays()
 	promotionThreshold := memMgr.GetPromotionThreshold()
-
 	activeCount, _ := a.db.CountMemories("user", userID)
+
+	engineStatus := "🟢 Aktif"
+	if !cfg.Enabled {
+		engineStatus = "🔴 Nonaktif"
+	}
+	extractStatus := "🟢 Aktif"
+	if !cfg.AutoExtract {
+		extractStatus = "🔴 Nonaktif"
+	}
 
 	embCfg := cfg.GetEmbeddingConfig()
 	embStatus := "🔴 Nonaktif (BM25 FTS5 Cepat)"
@@ -1147,63 +1293,314 @@ func (a *BotAdapter) renderMemoryDashboard(userID string) (string, *tele.ReplyMa
 	}
 
 	var sb strings.Builder
-	sb.WriteString("🧠 <b>DASHBOARD MEMORY ENGINE (OmniRoute Standard)</b>\n\n")
+	sb.WriteString("🧠 <b>PUSAT KONTROL & PENGATURAN MEMORY ENGINE</b>\n\n")
+	sb.WriteString(fmt.Sprintf("• <b>Status Engine:</b> %s | <b>Auto-Extract:</b> %s\n", engineStatus, extractStatus))
 	sb.WriteString(fmt.Sprintf("• <b>Strategi Aktif:</b> <code>%s</code> (%s)\n", activeStrategy, stratDesc))
-	sb.WriteString(fmt.Sprintf("• <b>Anggaran Token Prompt:</b> <code>%d tokens</code>\n", maxTokens))
+	sb.WriteString(fmt.Sprintf("• <b>Anggaran Token Prompt:</b> <code>%d tokens</code> (Maks: <code>%d item</code>)\n", maxTokens, maxItems))
 	sb.WriteString(fmt.Sprintf("• <b>Masa Retensi:</b> <code>%d hari</code> (Auto-promosi &ge; <code>%dx</code> pakai)\n", retentionDays, promotionThreshold))
-	sb.WriteString(fmt.Sprintf("• <b>Memori Aktif Anda:</b> <code>%d catatan</code>\n", activeCount))
-	sb.WriteString(fmt.Sprintf("• <b>Auto-Compaction:</b> <code>Aktif</code> (Tiap %d jam)\n", cfg.CompactionIntervalHours))
-	sb.WriteString(fmt.Sprintf("• <b>Remote Embedding:</b> %s\n\n", embStatus))
-	sb.WriteString("💡 <i>Pilih strategi atau kelola model embedding:</i>")
+	sb.WriteString(fmt.Sprintf("• <b>Auto-Compaction:</b> <code>Aktif</code> (Tiap %d jam, ambang: %d)\n", cfg.CompactionIntervalHours, cfg.CompactionThreshold))
+	sb.WriteString(fmt.Sprintf("• <b>Similarity Threshold:</b> <code>%.2f</code>\n", cfg.SimilarityThreshold))
+	sb.WriteString(fmt.Sprintf("• <b>Remote Embedding:</b> %s\n", embStatus))
+	sb.WriteString(fmt.Sprintf("• <b>Memori Pribadi Anda:</b> <code>%d catatan</code>\n\n", activeCount))
+	sb.WriteString("⚙️ <i>Pilih sub-menu di bawah untuk mengatur parameter secara detail:</i>")
 
 	menu := &tele.ReplyMarkup{}
-
-	btnHybrid := menu.Data("🔘 Hybrid", "mem_strat_hybrid")
-	if activeStrategy == "hybrid" {
-		btnHybrid = menu.Data("✅ Hybrid", "mem_strat_hybrid")
-	}
-	btnRecent := menu.Data("⚡ Recent", "mem_strat_recent")
-	if activeStrategy == "recent" {
-		btnRecent = menu.Data("✅ Recent", "mem_strat_recent")
-	}
-	btnSemantic := menu.Data("🧠 Semantic", "mem_strat_semantic")
-	if activeStrategy == "semantic" {
-		btnSemantic = menu.Data("✅ Semantic", "mem_strat_semantic")
-	}
-
-	btnToggleEmbed := menu.Data("🔌 Toggle Embed", "mem_toggle_embed")
-	btnModels := menu.Data("🤖 Pilih Model", "mem_menu_models")
-	btnCompact := menu.Data("🧹 Compact & Prune", "mem_compact_now")
-	btnList := menu.Data("📋 List Memori", "mem_list_now")
-	btnRefresh := menu.Data("🔄 Refresh", "mem_refresh")
+	btnGeneral := menu.Data("⚙️ Umum & Ekstrak", "mem_menu_general")
+	btnStrategy := menu.Data("🎯 Strategi & Token", "mem_menu_strategy")
+	btnRetention := menu.Data("⏳ Retensi & Promosi", "mem_menu_retention")
+	btnCompaction := menu.Data("🧹 Auto-Compaction", "mem_menu_compaction")
+	btnEmbedding := menu.Data("🔌 Remote Embedding", "mem_menu_embedding")
+	btnData := menu.Data("📋 Kelola Catatan", "mem_menu_data")
+	btnRefresh := menu.Data("🔄 Segarkan Dashboard", "mem_refresh")
 
 	menu.Inline(
-		menu.Row(btnHybrid, btnRecent, btnSemantic),
-		menu.Row(btnToggleEmbed, btnModels),
-		menu.Row(btnCompact, btnList),
+		menu.Row(btnGeneral, btnStrategy),
+		menu.Row(btnRetention, btnCompaction),
+		menu.Row(btnEmbedding, btnData),
 		menu.Row(btnRefresh),
 	)
 
 	return sb.String(), menu
 }
 
+// renderMemoryGeneralMenu renders General & Auto-Extract sub-menu
+func (a *BotAdapter) renderMemoryGeneralMenu(userID string) (string, *tele.ReplyMarkup) {
+	memMgr := a.orchestrator.MemoryManager()
+	cfg := memMgr.GetConfig()
+
+	engTag := "🟢 Engine: AKTIF"
+	if !cfg.Enabled {
+		engTag = "🔴 Engine: NONAKTIF"
+	}
+	extTag := "🟢 Auto-Extract: AKTIF"
+	if !cfg.AutoExtract {
+		extTag = "🔴 Auto-Extract: NONAKTIF"
+	}
+
+	text := "⚙️ <b>PENGATURAN UMUM & EKSTRAKSI MEMORY</b>\n\n" +
+		"• <b>Master Engine:</b> " + engTag + "\n" +
+		"  <i>Mengaktifkan penyimpanan & injeksi konteks memori ke sistem prompt.</i>\n\n" +
+		"• <b>Auto-Extract:</b> " + extTag + "\n" +
+		"  <i>Mengekstrak otomatis fakta profil, SOP, dan konsep dari chat secara background.</i>\n\n" +
+		"• <b>Seed CSV Path:</b> <code>" + html.EscapeString(cfg.SeedCSVPath) + "</code>\n\n" +
+		"<i>Klik tombol di bawah untuk toggle atau reset:</i>"
+
+	menu := &tele.ReplyMarkup{}
+	btnToggleEng := menu.Data(engTag, "mem_toggle_engine")
+	btnToggleExt := menu.Data(extTag, "mem_toggle_autoextract")
+	btnReset := menu.Data("🔄 Reset ke Default", "mem_reset_defaults")
+	btnBack := menu.Data("🔙 Kembali ke Dashboard", "mem_refresh")
+
+	menu.Inline(
+		menu.Row(btnToggleEng),
+		menu.Row(btnToggleExt),
+		menu.Row(btnReset),
+		menu.Row(btnBack),
+	)
+
+	return text, menu
+}
+
+// renderMemoryStrategyMenu renders Retrieval Strategy & Token Budget sub-menu
+func (a *BotAdapter) renderMemoryStrategyMenu(userID string) (string, *tele.ReplyMarkup) {
+	memMgr := a.orchestrator.MemoryManager()
+	activeStrat := memMgr.GetStrategy()
+	maxTokens := memMgr.GetMaxTokens()
+	maxItems := memMgr.GetMaxContextItems()
+
+	text := fmt.Sprintf("🎯 <b>PENGATURAN STRATEGI & BUDGET TOKEN</b>\n\n"+
+		"• <b>Strategi Saat Ini:</b> <code>%s</code>\n"+
+		"  - <b>Hybrid:</b> FTS5 BM25 + Semantic Vector + Recency weighting (Direkomendasikan)\n"+
+		"  - <b>Recent:</b> Urutkan berdasarkan waktu pembaruan terbaru\n"+
+		"  - <b>Semantic:</b> Berdasarkan kemiripan vektor makna (Cosine Similarity)\n\n"+
+		"• <b>Anggaran Token Prompt:</b> <code>%d tokens</code>\n"+
+		"• <b>Batas Maksimal Item:</b> <code>%d item</code>\n\n"+
+		"<i>Pilih strategi atau preset anggaran token / batas item:</i>",
+		activeStrat, maxTokens, maxItems)
+
+	menu := &tele.ReplyMarkup{}
+	btnHybrid := menu.Data("🔘 Hybrid", "mem_strat_hybrid")
+	if activeStrat == "hybrid" {
+		btnHybrid = menu.Data("✅ Hybrid", "mem_strat_hybrid")
+	}
+	btnRecent := menu.Data("⚡ Recent", "mem_strat_recent")
+	if activeStrat == "recent" {
+		btnRecent = menu.Data("✅ Recent", "mem_strat_recent")
+	}
+	btnSemantic := menu.Data("🧠 Semantic", "mem_strat_semantic")
+	if activeStrat == "semantic" {
+		btnSemantic = menu.Data("✅ Semantic", "mem_strat_semantic")
+	}
+
+	btnTok500 := menu.Data(fmt.Sprintf("%s 500 Tok", checkmark(maxTokens == 500)), "mem_tok_500")
+	btnTok1000 := menu.Data(fmt.Sprintf("%s 1000 Tok", checkmark(maxTokens == 1000)), "mem_tok_1000")
+	btnTok2000 := menu.Data(fmt.Sprintf("%s 2000 Tok", checkmark(maxTokens == 2000)), "mem_tok_2000")
+	btnTok4000 := menu.Data(fmt.Sprintf("%s 4000 Tok", checkmark(maxTokens == 4000)), "mem_tok_4000")
+
+	btnItem10 := menu.Data(fmt.Sprintf("%s 10 Item", checkmark(maxItems == 10)), "mem_item_10")
+	btnItem20 := menu.Data(fmt.Sprintf("%s 20 Item", checkmark(maxItems == 20)), "mem_item_20")
+	btnItem50 := menu.Data(fmt.Sprintf("%s 50 Item", checkmark(maxItems == 50)), "mem_item_50")
+
+	btnBack := menu.Data("🔙 Kembali ke Dashboard", "mem_refresh")
+
+	menu.Inline(
+		menu.Row(btnHybrid, btnRecent, btnSemantic),
+		menu.Row(btnTok500, btnTok1000, btnTok2000, btnTok4000),
+		menu.Row(btnItem10, btnItem20, btnItem50),
+		menu.Row(btnBack),
+	)
+
+	return text, menu
+}
+
+// renderMemoryRetentionMenu renders Retention & Promotion Threshold sub-menu
+func (a *BotAdapter) renderMemoryRetentionMenu(userID string) (string, *tele.ReplyMarkup) {
+	memMgr := a.orchestrator.MemoryManager()
+	retDays := memMgr.GetRetentionDays()
+	promThresh := memMgr.GetPromotionThreshold()
+
+	text := fmt.Sprintf("⏳ <b>PENGATURAN RETENSI & PROMOSI MEMORI</b>\n\n"+
+		"• <b>Masa Retensi:</b> <code>%d hari</code>\n"+
+		"  <i>Batas usia memori sebelum kedaluwarsa jika tidak digunakan kembali.</i>\n\n"+
+		"• <b>Ambang Promosi Permanen:</b> <code>&ge; %dx akses</code>\n"+
+		"  <i>Memori yang sering diakses (&ge; ambang) otomatis dipromosikan menjadi permanen (long-term).</i>\n\n"+
+		"<i>Pilih preset masa retensi atau ambang promosi:</i>",
+		retDays, promThresh)
+
+	menu := &tele.ReplyMarkup{}
+	btnRet7 := menu.Data(fmt.Sprintf("%s 7h", checkmark(retDays == 7)), "mem_ret_7")
+	btnRet14 := menu.Data(fmt.Sprintf("%s 14h", checkmark(retDays == 14)), "mem_ret_14")
+	btnRet30 := menu.Data(fmt.Sprintf("%s 30h", checkmark(retDays == 30)), "mem_ret_30")
+	btnRet60 := menu.Data(fmt.Sprintf("%s 60h", checkmark(retDays == 60)), "mem_ret_60")
+	btnRet365 := menu.Data(fmt.Sprintf("%s 365h", checkmark(retDays == 365)), "mem_ret_365")
+
+	btnProm1 := menu.Data(fmt.Sprintf("%s 1x", checkmark(promThresh == 1)), "mem_prom_1")
+	btnProm2 := menu.Data(fmt.Sprintf("%s 2x", checkmark(promThresh == 2)), "mem_prom_2")
+	btnProm3 := menu.Data(fmt.Sprintf("%s 3x", checkmark(promThresh == 3)), "mem_prom_3")
+	btnProm5 := menu.Data(fmt.Sprintf("%s 5x", checkmark(promThresh == 5)), "mem_prom_5")
+
+	btnBack := menu.Data("🔙 Kembali ke Dashboard", "mem_refresh")
+
+	menu.Inline(
+		menu.Row(btnRet7, btnRet14, btnRet30, btnRet60, btnRet365),
+		menu.Row(btnProm1, btnProm2, btnProm3, btnProm5),
+		menu.Row(btnBack),
+	)
+
+	return text, menu
+}
+
+// renderMemoryCompactionMenu renders Auto-Compaction sub-menu
+func (a *BotAdapter) renderMemoryCompactionMenu(userID string) (string, *tele.ReplyMarkup) {
+	memMgr := a.orchestrator.MemoryManager()
+	cfg := memMgr.GetConfig()
+
+	compTag := "🟢 Auto-Compaction: AKTIF"
+	if !cfg.AutoCompaction {
+		compTag = "🔴 Auto-Compaction: NONAKTIF"
+	}
+
+	text := fmt.Sprintf("🧹 <b>PENGATURAN AUTO-COMPACTION & PEMBERSIHAN</b>\n\n"+
+		"• <b>Status:</b> %s\n"+
+		"• <b>Interval Eksekusi:</b> <code>Tiap %d jam</code>\n"+
+		"• <b>Ambang Batas Jumlah:</b> <code>%d item</code> (Pemicu kompresi)\n\n"+
+		"<i>Compaction merampingkan memori, menghapus catatan usang/expired, dan mengoptimalkan indeks SQLite FTS5.</i>",
+		compTag, cfg.CompactionIntervalHours, cfg.CompactionThreshold)
+
+	menu := &tele.ReplyMarkup{}
+	btnToggleComp := menu.Data(compTag, "mem_toggle_compaction")
+
+	btnCint6 := menu.Data(fmt.Sprintf("%s 6 Jam", checkmark(cfg.CompactionIntervalHours == 6)), "mem_cint_6")
+	btnCint12 := menu.Data(fmt.Sprintf("%s 12 Jam", checkmark(cfg.CompactionIntervalHours == 12)), "mem_cint_12")
+	btnCint24 := menu.Data(fmt.Sprintf("%s 24 Jam", checkmark(cfg.CompactionIntervalHours == 24)), "mem_cint_24")
+	btnCint48 := menu.Data(fmt.Sprintf("%s 48 Jam", checkmark(cfg.CompactionIntervalHours == 48)), "mem_cint_48")
+
+	btnCthr50 := menu.Data(fmt.Sprintf("%s 50 Item", checkmark(cfg.CompactionThreshold == 50)), "mem_cthr_50")
+	btnCthr100 := menu.Data(fmt.Sprintf("%s 100 Item", checkmark(cfg.CompactionThreshold == 100)), "mem_cthr_100")
+	btnCthr200 := menu.Data(fmt.Sprintf("%s 200 Item", checkmark(cfg.CompactionThreshold == 200)), "mem_cthr_200")
+
+	btnPruneNow := menu.Data("🧹 Bersihkan & Prune Sekarang", "mem_compact_now")
+	btnBack := menu.Data("🔙 Kembali ke Dashboard", "mem_refresh")
+
+	menu.Inline(
+		menu.Row(btnToggleComp),
+		menu.Row(btnCint6, btnCint12, btnCint24, btnCint48),
+		menu.Row(btnCthr50, btnCthr100, btnCthr200),
+		menu.Row(btnPruneNow),
+		menu.Row(btnBack),
+	)
+
+	return text, menu
+}
+
+// renderMemoryEmbeddingMenu renders Remote Vector Embedding sub-menu
+func (a *BotAdapter) renderMemoryEmbeddingMenu(userID string) (string, *tele.ReplyMarkup) {
+	memMgr := a.orchestrator.MemoryManager()
+	cfg := memMgr.GetConfig()
+	emb := cfg.GetEmbeddingConfig()
+
+	embTag := "🟢 Vector Embedding: AKTIF"
+	if !emb.Enabled {
+		embTag = "🔴 Vector Embedding: NONAKTIF"
+	}
+
+	modelStr := emb.Model
+	if modelStr == "" {
+		modelStr = "(belum ditentukan)"
+	}
+	baseStr := emb.BaseURL
+	if baseStr == "" {
+		baseStr = "(default endpoint)"
+	}
+
+	text := fmt.Sprintf("🔌 <b>PENGATURAN REMOTE VECTOR EMBEDDING</b>\n\n"+
+		"• <b>Status:</b> %s\n"+
+		"• <b>Provider:</b> <code>%s</code>\n"+
+		"• <b>Model:</b> <code>%s</code>\n"+
+		"• <b>Dimensi Vektor:</b> <code>%d dims</code>\n"+
+		"• <b>Similarity Threshold:</b> <code>%.2f</code> (Cosine)\n"+
+		"• <b>Base URL:</b> <code>%s</code>\n\n"+
+		"<i>Vektor embedding digunakan untuk strategi pencarian Semantic dan Hybrid.</i>",
+		embTag, html.EscapeString(emb.Provider), html.EscapeString(modelStr),
+		emb.Dimensions, cfg.SimilarityThreshold, html.EscapeString(baseStr))
+
+	menu := &tele.ReplyMarkup{}
+	btnToggle := menu.Data(embTag, "mem_toggle_embed")
+	btnPickModel := menu.Data("🤖 Pilih Model Preset", "mem_menu_models")
+
+	btnOAI := menu.Data(fmt.Sprintf("%s OpenAI", checkmark(emb.Provider == "openai")), "mem_prov_openai")
+	btnGem := menu.Data(fmt.Sprintf("%s Gemini", checkmark(emb.Provider == "gemini")), "mem_prov_gemini")
+	btnOll := menu.Data(fmt.Sprintf("%s Ollama", checkmark(emb.Provider == "ollama")), "mem_prov_ollama")
+	btnCust := menu.Data(fmt.Sprintf("%s Custom", checkmark(emb.Provider == "custom")), "mem_prov_custom")
+
+	btnDim768 := menu.Data(fmt.Sprintf("%s 768 Dims", checkmark(emb.Dimensions == 768)), "mem_dims_768")
+	btnDim1536 := menu.Data(fmt.Sprintf("%s 1536 Dims", checkmark(emb.Dimensions == 1536)), "mem_dims_1536")
+	btnDim3072 := menu.Data(fmt.Sprintf("%s 3072 Dims", checkmark(emb.Dimensions == 3072)), "mem_dims_3072")
+
+	btnSim50 := menu.Data(fmt.Sprintf("%s 0.50", checkmark(cfg.SimilarityThreshold == 0.50)), "mem_sim_50")
+	btnSim60 := menu.Data(fmt.Sprintf("%s 0.60", checkmark(cfg.SimilarityThreshold == 0.60)), "mem_sim_60")
+	btnSim70 := menu.Data(fmt.Sprintf("%s 0.70", checkmark(cfg.SimilarityThreshold == 0.70)), "mem_sim_70")
+	btnSim80 := menu.Data(fmt.Sprintf("%s 0.80", checkmark(cfg.SimilarityThreshold == 0.80)), "mem_sim_80")
+
+	btnBack := menu.Data("🔙 Kembali ke Dashboard", "mem_refresh")
+
+	menu.Inline(
+		menu.Row(btnToggle, btnPickModel),
+		menu.Row(btnOAI, btnGem, btnOll, btnCust),
+		menu.Row(btnDim768, btnDim1536, btnDim3072),
+		menu.Row(btnSim50, btnSim60, btnSim70, btnSim80),
+		menu.Row(btnBack),
+	)
+
+	return text, menu
+}
+
+// renderMemoryDataMenu renders Data management sub-menu
+func (a *BotAdapter) renderMemoryDataMenu(userID string) (string, *tele.ReplyMarkup) {
+	memMgr := a.orchestrator.MemoryManager()
+	cfg := memMgr.GetConfig()
+	activeCount, _ := a.db.CountMemories("user", userID)
+
+	text := fmt.Sprintf("📋 <b>KELOLA DATA & CATATAN MEMORI</b>\n\n"+
+		"• <b>Total Catatan Memori Anda:</b> <code>%d item</code>\n"+
+		"• <b>Lokasi File Seed CSV:</b>\n  <code>%s</code>\n\n"+
+		"<i>Pilih tindakan di bawah untuk melihat, mengimpor, atau menghapus catatan:</i>",
+		activeCount, html.EscapeString(cfg.SeedCSVPath))
+
+	menu := &tele.ReplyMarkup{}
+	btnList := menu.Data("📋 Lihat 15 Memori Terbaru", "mem_list_now")
+	btnImport := menu.Data("📥 Impor Seed CSV OmniRoute", "mem_import_seed")
+	btnClear := menu.Data("🗑️ Hapus Semua Memori Saya", "mem_clear_confirm")
+	btnBack := menu.Data("🔙 Kembali ke Dashboard", "mem_refresh")
+
+	menu.Inline(
+		menu.Row(btnList),
+		menu.Row(btnImport),
+		menu.Row(btnClear),
+		menu.Row(btnBack),
+	)
+
+	return text, menu
+}
+
 func (a *BotAdapter) renderModelPicker() (string, *tele.ReplyMarkup) {
-	text := "🤖 <b>PILIH MODEL EMBEDDING REMOTE</b>\n\n" +
-		"Pilih salah satu model embedding yang didukung untuk pencarian semantik vektor:\n\n" +
-		"1. <b>OpenAI text-embedding-3-small</b> (Cepat, akurat, hemat)\n" +
+	text := "🤖 <b>PILIH PRESET MODEL EMBEDDING REMOTE</b>\n\n" +
+		"Pilih salah satu model embedding yang didukung:\n\n" +
+		"1. <b>OpenAI text-embedding-3-small</b> (1536 dimensi, akurat & cepat)\n" +
 		"2. <b>Google Gemini text-embedding-004</b> (768 dimensi)\n" +
-		"3. <b>Ollama nomic-embed-text</b> (Lokal via :11434)\n" +
-		"4. <b>Ollama mxbai-embed-large</b> (Lokal via :11434)\n\n" +
-		"<i>Atau atur manual dengan perintah:</i>\n" +
+		"3. <b>Ollama nomic-embed-text</b> (768 dimensi, lokal :11434)\n" +
+		"4. <b>Ollama mxbai-embed-large</b> (1024 dimensi, lokal :11434)\n\n" +
+		"<i>Atau gunakan perintah teks:</i>\n" +
 		"<code>/memory model &lt;nama_model&gt;</code>\n" +
-		"<code>/memory provider &lt;provider&gt;</code>"
+		"<code>/memory provider &lt;provider&gt;</code>\n" +
+		"<code>/memory baseurl &lt;url&gt;</code>"
 
 	menu := &tele.ReplyMarkup{}
 	btnOAI := menu.Data("OpenAI text-embedding-3-small", "mem_set_model_openai_text-embedding-3-small")
 	btnGemini := menu.Data("Gemini text-embedding-004", "mem_set_model_gemini_text-embedding-004")
 	btnNomic := menu.Data("Ollama nomic-embed-text", "mem_set_model_ollama_nomic-embed-text")
 	btnMxbai := menu.Data("Ollama mxbai-embed-large", "mem_set_model_ollama_mxbai-embed-large")
-	btnBack := menu.Data("🔙 Kembali ke Dashboard", "mem_refresh")
+	btnBack := menu.Data("🔙 Kembali ke Menu Embedding", "mem_menu_embedding")
 
 	menu.Inline(
 		menu.Row(btnOAI),
@@ -1216,6 +1613,13 @@ func (a *BotAdapter) renderModelPicker() (string, *tele.ReplyMarkup) {
 	return text, menu
 }
 
+func checkmark(active bool) string {
+	if active {
+		return "✅"
+	}
+	return "🔘"
+}
+
 func (a *BotAdapter) handleMemoryCallback(c tele.Context, data string) error {
 	if a.orchestrator == nil || a.orchestrator.MemoryManager() == nil {
 		_ = c.Respond(&tele.CallbackResponse{Text: "Memory manager belum siap"})
@@ -1225,11 +1629,262 @@ func (a *BotAdapter) handleMemoryCallback(c tele.Context, data string) error {
 	userID := strconv.FormatInt(c.Sender().ID, 10)
 
 	switch data {
-	case "mem_refresh":
+	// Navigation Callbacks
+	case "mem_refresh", "mem_menu_dashboard":
 		_ = c.Respond(&tele.CallbackResponse{Text: "🔄 Memperbarui dashboard..."})
 		text, menu := a.renderMemoryDashboard(userID)
 		return c.Edit(text, menu, tele.ModeHTML)
 
+	case "mem_menu_general":
+		_ = c.Respond(&tele.CallbackResponse{})
+		text, menu := a.renderMemoryGeneralMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_menu_strategy":
+		_ = c.Respond(&tele.CallbackResponse{})
+		text, menu := a.renderMemoryStrategyMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_menu_retention":
+		_ = c.Respond(&tele.CallbackResponse{})
+		text, menu := a.renderMemoryRetentionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_menu_compaction":
+		_ = c.Respond(&tele.CallbackResponse{})
+		text, menu := a.renderMemoryCompactionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_menu_embedding":
+		_ = c.Respond(&tele.CallbackResponse{})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_menu_data":
+		_ = c.Respond(&tele.CallbackResponse{})
+		text, menu := a.renderMemoryDataMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_menu_models":
+		_ = c.Respond(&tele.CallbackResponse{})
+		text, menu := a.renderModelPicker()
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	// General & Auto-Extract Toggles
+	case "mem_toggle_engine":
+		newState := !memMgr.IsEnabled()
+		memMgr.SetEnabled(newState)
+		statusTxt := "dimatikan"
+		if newState {
+			statusTxt = "diaktifkan"
+		}
+		_ = c.Respond(&tele.CallbackResponse{Text: "⚙️ Master engine " + statusTxt})
+		text, menu := a.renderMemoryGeneralMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_toggle_autoextract":
+		cfg := memMgr.GetConfig()
+		newState := !cfg.AutoExtract
+		memMgr.SetAutoExtract(newState)
+		statusTxt := "dimatikan"
+		if newState {
+			statusTxt = "diaktifkan"
+		}
+		_ = c.Respond(&tele.CallbackResponse{Text: "🧠 Auto-extract " + statusTxt})
+		text, menu := a.renderMemoryGeneralMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_reset_defaults":
+		memMgr.ResetToDefaults()
+		_ = c.Respond(&tele.CallbackResponse{Text: "🔄 Pengaturan di-reset ke default pabrik"})
+		text, menu := a.renderMemoryGeneralMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	// Strategy Presets
+	case "mem_strat_hybrid":
+		memMgr.SetStrategy("hybrid")
+		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Strategi: Hybrid"})
+		text, menu := a.renderMemoryStrategyMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_strat_recent":
+		memMgr.SetStrategy("recent")
+		_ = c.Respond(&tele.CallbackResponse{Text: "⚡ Strategi: Recent"})
+		text, menu := a.renderMemoryStrategyMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_strat_semantic":
+		memMgr.SetStrategy("semantic")
+		_ = c.Respond(&tele.CallbackResponse{Text: "🧠 Strategi: Semantic"})
+		text, menu := a.renderMemoryStrategyMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	// Token Presets
+	case "mem_tok_500":
+		memMgr.SetMaxTokens(500)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Anggaran token: 500"})
+		text, menu := a.renderMemoryStrategyMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_tok_1000":
+		memMgr.SetMaxTokens(1000)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Anggaran token: 1000"})
+		text, menu := a.renderMemoryStrategyMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_tok_2000":
+		memMgr.SetMaxTokens(2000)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Anggaran token: 2000"})
+		text, menu := a.renderMemoryStrategyMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_tok_4000":
+		memMgr.SetMaxTokens(4000)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Anggaran token: 4000"})
+		text, menu := a.renderMemoryStrategyMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	// Max Items Presets
+	case "mem_item_10":
+		memMgr.SetMaxContextItems(10)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Max items: 10"})
+		text, menu := a.renderMemoryStrategyMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_item_20":
+		memMgr.SetMaxContextItems(20)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Max items: 20"})
+		text, menu := a.renderMemoryStrategyMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_item_50":
+		memMgr.SetMaxContextItems(50)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Max items: 50"})
+		text, menu := a.renderMemoryStrategyMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	// Retention Presets
+	case "mem_ret_7":
+		memMgr.SetRetentionDays(7)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Retensi: 7 hari"})
+		text, menu := a.renderMemoryRetentionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_ret_14":
+		memMgr.SetRetentionDays(14)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Retensi: 14 hari"})
+		text, menu := a.renderMemoryRetentionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_ret_30":
+		memMgr.SetRetentionDays(30)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Retensi: 30 hari"})
+		text, menu := a.renderMemoryRetentionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_ret_60":
+		memMgr.SetRetentionDays(60)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Retensi: 60 hari"})
+		text, menu := a.renderMemoryRetentionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_ret_365":
+		memMgr.SetRetentionDays(365)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Retensi: 365 hari"})
+		text, menu := a.renderMemoryRetentionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	// Promotion Threshold Presets
+	case "mem_prom_1":
+		memMgr.SetPromotionThreshold(1)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Promosi: ≥ 1x akses"})
+		text, menu := a.renderMemoryRetentionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_prom_2":
+		memMgr.SetPromotionThreshold(2)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Promosi: ≥ 2x akses"})
+		text, menu := a.renderMemoryRetentionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_prom_3":
+		memMgr.SetPromotionThreshold(3)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Promosi: ≥ 3x akses"})
+		text, menu := a.renderMemoryRetentionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_prom_5":
+		memMgr.SetPromotionThreshold(5)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Promosi: ≥ 5x akses"})
+		text, menu := a.renderMemoryRetentionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	// Compaction Presets & Toggles
+	case "mem_toggle_compaction":
+		cfg := memMgr.GetConfig()
+		newState := !cfg.AutoCompaction
+		memMgr.SetAutoCompaction(newState)
+		statusTxt := "dimatikan"
+		if newState {
+			statusTxt = "diaktifkan"
+		}
+		_ = c.Respond(&tele.CallbackResponse{Text: "🧹 Compaction " + statusTxt})
+		text, menu := a.renderMemoryCompactionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_cint_6":
+		memMgr.SetCompactionIntervalHours(6)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Interval: 6 jam"})
+		text, menu := a.renderMemoryCompactionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_cint_12":
+		memMgr.SetCompactionIntervalHours(12)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Interval: 12 jam"})
+		text, menu := a.renderMemoryCompactionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_cint_24":
+		memMgr.SetCompactionIntervalHours(24)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Interval: 24 jam"})
+		text, menu := a.renderMemoryCompactionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_cint_48":
+		memMgr.SetCompactionIntervalHours(48)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Interval: 48 jam"})
+		text, menu := a.renderMemoryCompactionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_cthr_50":
+		memMgr.SetCompactionThreshold(50)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Ambang batas: 50 item"})
+		text, menu := a.renderMemoryCompactionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_cthr_100":
+		memMgr.SetCompactionThreshold(100)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Ambang batas: 100 item"})
+		text, menu := a.renderMemoryCompactionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_cthr_200":
+		memMgr.SetCompactionThreshold(200)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Ambang batas: 200 item"})
+		text, menu := a.renderMemoryCompactionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_compact_now":
+		rep, err := memMgr.Compact(context.Background(), "user", userID)
+		if err != nil {
+			_ = c.Respond(&tele.CallbackResponse{Text: "❌ Gagal compaction"})
+			return nil
+		}
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🧹 Selesai: %d usang dihapus", rep.PrunedExpired)})
+		text, menu := a.renderMemoryCompactionMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	// Embedding Toggles, Providers & Settings
 	case "mem_toggle_embed":
 		cfg := memMgr.GetConfig()
 		emb := cfg.GetEmbeddingConfig()
@@ -1240,76 +1895,115 @@ func (a *BotAdapter) handleMemoryCallback(c tele.Context, data string) error {
 			statusTxt = "diaktifkan"
 		}
 		_ = c.Respond(&tele.CallbackResponse{Text: "🔌 Embedding " + statusTxt})
-		text, menu := a.renderMemoryDashboard(userID)
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
 		return c.Edit(text, menu, tele.ModeHTML)
 
-	case "mem_menu_models":
-		_ = c.Respond(&tele.CallbackResponse{})
-		text, menu := a.renderModelPicker()
+	case "mem_prov_openai":
+		memMgr.SetEmbeddingProvider("openai")
+		_ = c.Respond(&tele.CallbackResponse{Text: "Provider: OpenAI"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
 		return c.Edit(text, menu, tele.ModeHTML)
 
+	case "mem_prov_gemini":
+		memMgr.SetEmbeddingProvider("gemini")
+		_ = c.Respond(&tele.CallbackResponse{Text: "Provider: Gemini"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_prov_ollama":
+		memMgr.SetEmbeddingProvider("ollama")
+		_ = c.Respond(&tele.CallbackResponse{Text: "Provider: Ollama"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_prov_custom":
+		memMgr.SetEmbeddingProvider("custom")
+		_ = c.Respond(&tele.CallbackResponse{Text: "Provider: Custom"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_dims_768":
+		memMgr.SetEmbeddingDimensions(768)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Dimensi: 768"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_dims_1536":
+		memMgr.SetEmbeddingDimensions(1536)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Dimensi: 1536"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_dims_3072":
+		memMgr.SetEmbeddingDimensions(3072)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Dimensi: 3072"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_sim_50":
+		memMgr.SetSimilarityThreshold(0.50)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Threshold: 0.50"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_sim_60":
+		memMgr.SetSimilarityThreshold(0.60)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Threshold: 0.60"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_sim_70":
+		memMgr.SetSimilarityThreshold(0.70)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Threshold: 0.70"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_sim_80":
+		memMgr.SetSimilarityThreshold(0.80)
+		_ = c.Respond(&tele.CallbackResponse{Text: "Threshold: 0.80"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	// Preset Embedding Models
 	case "mem_set_model_openai_text-embedding-3-small":
 		memMgr.SetEmbeddingProvider("openai")
 		memMgr.SetEmbeddingModel("text-embedding-3-small")
+		memMgr.SetEmbeddingDimensions(1536)
 		memMgr.SetEmbeddingEnabled(true)
-		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Model diatur ke OpenAI text-embedding-3-small"})
-		text, menu := a.renderMemoryDashboard(userID)
+		_ = c.Respond(&tele.CallbackResponse{Text: "✅ OpenAI text-embedding-3-small"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
 		return c.Edit(text, menu, tele.ModeHTML)
 
 	case "mem_set_model_gemini_text-embedding-004":
 		memMgr.SetEmbeddingProvider("gemini")
 		memMgr.SetEmbeddingModel("text-embedding-004")
+		memMgr.SetEmbeddingDimensions(768)
 		memMgr.SetEmbeddingEnabled(true)
-		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Model diatur ke Gemini text-embedding-004"})
-		text, menu := a.renderMemoryDashboard(userID)
+		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Gemini text-embedding-004"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
 		return c.Edit(text, menu, tele.ModeHTML)
 
 	case "mem_set_model_ollama_nomic-embed-text":
 		memMgr.SetEmbeddingProvider("ollama")
 		memMgr.SetEmbeddingModel("nomic-embed-text")
+		memMgr.SetEmbeddingDimensions(768)
 		memMgr.SetEmbeddingBaseURL("http://localhost:11434/v1")
 		memMgr.SetEmbeddingEnabled(true)
-		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Model diatur ke Ollama nomic-embed-text"})
-		text, menu := a.renderMemoryDashboard(userID)
+		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Ollama nomic-embed-text"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
 		return c.Edit(text, menu, tele.ModeHTML)
 
 	case "mem_set_model_ollama_mxbai-embed-large":
 		memMgr.SetEmbeddingProvider("ollama")
 		memMgr.SetEmbeddingModel("mxbai-embed-large")
+		memMgr.SetEmbeddingDimensions(1024)
 		memMgr.SetEmbeddingBaseURL("http://localhost:11434/v1")
 		memMgr.SetEmbeddingEnabled(true)
-		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Model diatur ke Ollama mxbai-embed-large"})
-		text, menu := a.renderMemoryDashboard(userID)
+		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Ollama mxbai-embed-large"})
+		text, menu := a.renderMemoryEmbeddingMenu(userID)
 		return c.Edit(text, menu, tele.ModeHTML)
 
-	case "mem_strat_hybrid":
-		memMgr.SetStrategy("hybrid")
-		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Strategi diubah ke Hybrid"})
-		text, menu := a.renderMemoryDashboard(userID)
-		return c.Edit(text, menu, tele.ModeHTML)
-
-	case "mem_strat_recent":
-		memMgr.SetStrategy("recent")
-		_ = c.Respond(&tele.CallbackResponse{Text: "⚡ Strategi diubah ke Recent"})
-		text, menu := a.renderMemoryDashboard(userID)
-		return c.Edit(text, menu, tele.ModeHTML)
-
-	case "mem_strat_semantic":
-		memMgr.SetStrategy("semantic")
-		_ = c.Respond(&tele.CallbackResponse{Text: "🧠 Strategi diubah ke Semantic"})
-		text, menu := a.renderMemoryDashboard(userID)
-		return c.Edit(text, menu, tele.ModeHTML)
-
-	case "mem_compact_now":
-		rep, err := memMgr.Compact(context.Background(), "user", userID)
-		if err != nil {
-			_ = c.Respond(&tele.CallbackResponse{Text: "❌ Gagal compaction"})
-			return nil
-		}
-		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🧹 Dihapus: %d memori usang", rep.PrunedExpired)})
-		text, menu := a.renderMemoryDashboard(userID)
-		return c.Edit(text, menu, tele.ModeHTML)
-
+	// Data Management Callbacks
 	case "mem_list_now":
 		_ = c.Respond(&tele.CallbackResponse{})
 		items, err := a.db.ListMemoriesByScope("user", userID, "", 15)
@@ -1331,6 +2025,31 @@ func (a *BotAdapter) handleMemoryCallback(c tele.Context, data string) error {
 				i+1, html.EscapeString(it.Key), promTag, html.EscapeString(contentExcerpt)))
 		}
 		return c.Send(sb.String(), tele.ModeHTML)
+
+	case "mem_import_seed":
+		_ = c.Respond(&tele.CallbackResponse{Text: "📥 Mengimpor seed CSV..."})
+		res, err := memMgr.ImportSeedCSV(context.Background(), "", userID)
+		if err != nil {
+			return c.Send(fmt.Sprintf("❌ Gagal mengimpor seed CSV: %v", err), tele.ModeHTML)
+		}
+		msg := fmt.Sprintf("📥 <b>HASIL IMPOR SEED CSV MEMORY</b>\n\n"+
+			"• <b>Total Diproses:</b> <code>%d item</code>\n"+
+			"• <b>Berhasil Diimpor:</b> <code>%d item</code>\n"+
+			"• <b>Error / Dilewati:</b> <code>%d</code>",
+			res.TotalProcessed, res.Inserted, len(res.Errors))
+		_ = c.Send(msg, tele.ModeHTML)
+		text, menu := a.renderMemoryDataMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_clear_confirm":
+		if err := memMgr.ClearUserMemory(userID); err != nil {
+			_ = c.Respond(&tele.CallbackResponse{Text: "❌ Gagal menghapus"})
+			return c.Send(fmt.Sprintf("❌ Gagal menghapus memori: %v", err), tele.ModeHTML)
+		}
+		_ = c.Respond(&tele.CallbackResponse{Text: "🗑️ Memori dibersihkan"})
+		_ = c.Send("🗑️ <b>Semua catatan memori pribadi Anda telah dihapus.</b>", tele.ModeHTML)
+		text, menu := a.renderMemoryDataMenu(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
 	}
 
 	return nil

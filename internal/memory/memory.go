@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sort"
@@ -26,9 +27,14 @@ type Manager struct {
 
 // NewManager creates a standalone memory manager backed by local SQLite and optional embedder
 func NewManager(db *storage.DB, cfg config.MemoryConfig, embedder Embedder, pm *provider.Manager) *Manager {
-	var ext *AutoExtractor
-	if db != nil && pm != nil {
-		ext = NewAutoExtractor(db, embedder, pm)
+	// Restore persisted runtime configuration from database if available
+	if db != nil {
+		if savedJSON, err := db.GetSetting("memory_config", ""); err == nil && strings.TrimSpace(savedJSON) != "" {
+			var savedCfg config.MemoryConfig
+			if err := json.Unmarshal([]byte(savedJSON), &savedCfg); err == nil {
+				cfg = savedCfg
+			}
+		}
 	}
 
 	if cfg.Strategy == "" {
@@ -48,6 +54,17 @@ func NewManager(db *storage.DB, cfg config.MemoryConfig, embedder Embedder, pm *
 	}
 	if cfg.SimilarityThreshold <= 0 {
 		cfg.SimilarityThreshold = 0.60
+	}
+
+	// Re-evaluate embedder if configuration specifies embedding
+	embCfg := cfg.GetEmbeddingConfig()
+	if embedder == nil || embCfg.Enabled {
+		embedder = NewEmbedder(embCfg)
+	}
+
+	var ext *AutoExtractor
+	if db != nil && pm != nil {
+		ext = NewAutoExtractor(db, embedder, pm)
 	}
 
 	return &Manager{
@@ -655,10 +672,49 @@ func (m *Manager) StartAutoCompactor(ctx context.Context) {
 
 // Runtime Configuration Getters and Setters
 
+// persistConfig serializes and writes current memory config to SQLite system_settings
+func (m *Manager) persistConfig() {
+	if m == nil || m.db == nil {
+		return
+	}
+	m.mu.RLock()
+	cfgCopy := m.cfg
+	m.mu.RUnlock()
+
+	data, err := json.Marshal(cfgCopy)
+	if err != nil {
+		log.Printf("⚠️ [Memory Manager] Failed to marshal memory_config: %v", err)
+		return
+	}
+	if err := m.db.SetSetting("memory_config", string(data)); err != nil {
+		log.Printf("⚠️ [Memory Manager] Failed to persist memory_config: %v", err)
+	}
+}
+
 func (m *Manager) GetConfig() config.MemoryConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cfg
+}
+
+func (m *Manager) IsEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.Enabled
+}
+
+func (m *Manager) SetEnabled(enabled bool) {
+	m.mu.Lock()
+	m.cfg.Enabled = enabled
+	m.mu.Unlock()
+	m.persistConfig()
+}
+
+func (m *Manager) SetAutoExtract(enabled bool) {
+	m.mu.Lock()
+	m.cfg.AutoExtract = enabled
+	m.mu.Unlock()
+	m.persistConfig()
 }
 
 func (m *Manager) GetStrategy() string {
@@ -669,10 +725,11 @@ func (m *Manager) GetStrategy() string {
 
 func (m *Manager) SetStrategy(strategy string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.cfg.Strategy = strings.ToLower(strategy)
 	m.cfg.RetrievalStrategy = m.cfg.Strategy
 	m.cfg.MemoryStrategy = m.cfg.Strategy
+	m.mu.Unlock()
+	m.persistConfig()
 }
 
 func (m *Manager) GetMaxTokens() int {
@@ -683,11 +740,30 @@ func (m *Manager) GetMaxTokens() int {
 
 func (m *Manager) SetMaxTokens(tokens int) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if tokens > 0 {
 		m.cfg.MaxTokens = tokens
 		m.cfg.MemoryMaxTokens = tokens
 	}
+	m.mu.Unlock()
+	m.persistConfig()
+}
+
+func (m *Manager) GetMaxContextItems() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.cfg.MaxContextItems <= 0 {
+		return 20
+	}
+	return m.cfg.MaxContextItems
+}
+
+func (m *Manager) SetMaxContextItems(items int) {
+	m.mu.Lock()
+	if items > 0 {
+		m.cfg.MaxContextItems = items
+	}
+	m.mu.Unlock()
+	m.persistConfig()
 }
 
 func (m *Manager) GetRetentionDays() int {
@@ -698,11 +774,12 @@ func (m *Manager) GetRetentionDays() int {
 
 func (m *Manager) SetRetentionDays(days int) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if days > 0 {
 		m.cfg.RetentionDays = days
 		m.cfg.MemoryRetentionDays = days
 	}
+	m.mu.Unlock()
+	m.persistConfig()
 }
 
 func (m *Manager) GetPromotionThreshold() int {
@@ -713,10 +790,67 @@ func (m *Manager) GetPromotionThreshold() int {
 
 func (m *Manager) SetPromotionThreshold(threshold int) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if threshold > 0 {
 		m.cfg.PromotionThreshold = threshold
 	}
+	m.mu.Unlock()
+	m.persistConfig()
+}
+
+func (m *Manager) SetAutoCompaction(enabled bool) {
+	m.mu.Lock()
+	m.cfg.AutoCompaction = enabled
+	m.mu.Unlock()
+	m.persistConfig()
+}
+
+func (m *Manager) SetCompactionIntervalHours(hours int) {
+	m.mu.Lock()
+	if hours > 0 {
+		m.cfg.CompactionIntervalHours = hours
+	}
+	m.mu.Unlock()
+	m.persistConfig()
+}
+
+func (m *Manager) SetCompactionThreshold(threshold int) {
+	m.mu.Lock()
+	if threshold > 0 {
+		m.cfg.CompactionThreshold = threshold
+	}
+	m.mu.Unlock()
+	m.persistConfig()
+}
+
+func (m *Manager) GetSimilarityThreshold() float64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.cfg.SimilarityThreshold <= 0 {
+		return 0.60
+	}
+	return m.cfg.SimilarityThreshold
+}
+
+func (m *Manager) SetSimilarityThreshold(thresh float64) {
+	m.mu.Lock()
+	if thresh > 0 && thresh <= 1.0 {
+		m.cfg.SimilarityThreshold = thresh
+	}
+	m.mu.Unlock()
+	m.persistConfig()
+}
+
+func (m *Manager) GetSeedCSVPath() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg.SeedCSVPath
+}
+
+func (m *Manager) SetSeedCSVPath(path string) {
+	m.mu.Lock()
+	m.cfg.SeedCSVPath = strings.TrimSpace(path)
+	m.mu.Unlock()
+	m.persistConfig()
 }
 
 func (m *Manager) CountMemories(scope, scopeID string) (int, error) {
@@ -726,10 +860,15 @@ func (m *Manager) CountMemories(scope, scopeID string) (int, error) {
 	return m.db.CountMemories(scope, scopeID)
 }
 
+func (m *Manager) GetEmbedder() Embedder {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.embedder
+}
+
 // SetEmbeddingModel updates embedding model name and activates embedding
 func (m *Manager) SetEmbeddingModel(model string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	cleanModel := strings.TrimSpace(model)
 	m.cfg.Embedding.Model = cleanModel
 	m.cfg.EmbeddingSource.Model = cleanModel
@@ -741,12 +880,13 @@ func (m *Manager) SetEmbeddingModel(model string) {
 	if m.extractor != nil {
 		m.extractor.SetEmbedder(m.embedder)
 	}
+	m.mu.Unlock()
+	m.persistConfig()
 }
 
 // SetEmbeddingProvider sets embedding provider (openai, gemini, ollama, custom)
 func (m *Manager) SetEmbeddingProvider(prov string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	cleanProv := strings.TrimSpace(strings.ToLower(prov))
 	m.cfg.Embedding.Provider = cleanProv
 	m.cfg.EmbeddingSource.Provider = cleanProv
@@ -754,12 +894,13 @@ func (m *Manager) SetEmbeddingProvider(prov string) {
 	if m.extractor != nil {
 		m.extractor.SetEmbedder(m.embedder)
 	}
+	m.mu.Unlock()
+	m.persistConfig()
 }
 
 // SetEmbeddingBaseURL sets custom endpoint URL for embeddings (e.g. Ollama or reverse proxy)
 func (m *Manager) SetEmbeddingBaseURL(baseURL string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	cleanURL := strings.TrimSpace(baseURL)
 	m.cfg.Embedding.BaseURL = cleanURL
 	m.cfg.EmbeddingSource.BaseURL = cleanURL
@@ -767,12 +908,13 @@ func (m *Manager) SetEmbeddingBaseURL(baseURL string) {
 	if m.extractor != nil {
 		m.extractor.SetEmbedder(m.embedder)
 	}
+	m.mu.Unlock()
+	m.persistConfig()
 }
 
 // SetEmbeddingAPIKey sets custom API key for embedding
 func (m *Manager) SetEmbeddingAPIKey(apiKey string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	cleanKey := strings.TrimSpace(apiKey)
 	m.cfg.Embedding.APIKey = cleanKey
 	m.cfg.EmbeddingSource.APIKey = cleanKey
@@ -780,16 +922,80 @@ func (m *Manager) SetEmbeddingAPIKey(apiKey string) {
 	if m.extractor != nil {
 		m.extractor.SetEmbedder(m.embedder)
 	}
+	m.mu.Unlock()
+	m.persistConfig()
+}
+
+// SetEmbeddingDimensions sets vector dimensions for embedding (e.g. 768, 1536)
+func (m *Manager) SetEmbeddingDimensions(dims int) {
+	m.mu.Lock()
+	if dims > 0 {
+		m.cfg.Embedding.Dimensions = dims
+		m.cfg.EmbeddingSource.Dimensions = dims
+	}
+	m.embedder = NewEmbedder(m.cfg.Embedding)
+	if m.extractor != nil {
+		m.extractor.SetEmbedder(m.embedder)
+	}
+	m.mu.Unlock()
+	m.persistConfig()
 }
 
 // SetEmbeddingEnabled toggles vector embedding on or off
 func (m *Manager) SetEmbeddingEnabled(enabled bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.cfg.Embedding.Enabled = enabled
 	m.cfg.EmbeddingSource.Enabled = enabled
 	m.embedder = NewEmbedder(m.cfg.Embedding)
 	if m.extractor != nil {
 		m.extractor.SetEmbedder(m.embedder)
 	}
+	m.mu.Unlock()
+	m.persistConfig()
+}
+
+// ResetToDefaults resets all memory configuration values back to default settings
+func (m *Manager) ResetToDefaults() {
+	m.mu.Lock()
+	m.cfg.Enabled = true
+	m.cfg.AutoExtract = true
+	m.cfg.Strategy = "hybrid"
+	m.cfg.RetrievalStrategy = "hybrid"
+	m.cfg.MemoryStrategy = "hybrid"
+	m.cfg.MaxTokens = 2000
+	m.cfg.MemoryMaxTokens = 2000
+	m.cfg.MaxContextItems = 20
+	m.cfg.RetentionDays = 30
+	m.cfg.MemoryRetentionDays = 30
+	m.cfg.PromotionThreshold = 3
+	m.cfg.AutoCompaction = true
+	m.cfg.CompactionIntervalHours = 24
+	m.cfg.CompactionThreshold = 100
+	m.cfg.SimilarityThreshold = 0.60
+	m.cfg.Embedding.Enabled = false
+	m.cfg.Embedding.Provider = "openai"
+	m.cfg.Embedding.Model = "text-embedding-3-small"
+	m.cfg.Embedding.BaseURL = ""
+	m.cfg.Embedding.APIKey = ""
+	m.cfg.Embedding.Dimensions = 1536
+	m.cfg.EmbeddingSource = m.cfg.Embedding
+	m.embedder = NewEmbedder(m.cfg.Embedding)
+	if m.extractor != nil {
+		m.extractor.SetEmbedder(m.embedder)
+	}
+	m.mu.Unlock()
+	m.persistConfig()
+}
+
+// ImportSeedCSV imports memories from an export CSV file for a scope/user
+func (m *Manager) ImportSeedCSV(ctx context.Context, csvPath, userID string) (*SeedResult, error) {
+	if m.db == nil {
+		return nil, fmt.Errorf("database memory belum terhubung")
+	}
+	if strings.TrimSpace(csvPath) == "" {
+		m.mu.RLock()
+		csvPath = m.cfg.SeedCSVPath
+		m.mu.RUnlock()
+	}
+	return SeedFromCSV(ctx, m.db, csvPath, userID, m.embedder)
 }

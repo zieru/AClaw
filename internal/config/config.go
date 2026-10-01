@@ -108,28 +108,28 @@ type AppConfig struct {
 
 // MemoryConfig defines configuration for GoAssistant's standalone memory engine
 type MemoryConfig struct {
-	Enabled                 bool            `yaml:"enabled"`
-	AutoExtract             bool            `yaml:"auto_extract"`
-	Strategy                string          `yaml:"strategy"`                  // "hybrid", "recent", "semantic"
-	RetrievalStrategy       string          `yaml:"retrieval_strategy"`        // legacy alias
-	MemoryStrategy          string          `yaml:"memory_strategy"`           // OmniRoute alias
-	MaxTokens               int             `yaml:"max_tokens"`                // Prompt injection token budget (default 2000)
-	MemoryMaxTokens         int             `yaml:"memory_max_tokens"`         // OmniRoute alias
-	MaxContextItems         int             `yaml:"max_context_items"`         // Fallback item count limit
-	RetentionDays           int             `yaml:"retention_days"`            // Memory retention window (default 30 days)
-	MemoryRetentionDays     int             `yaml:"memory_retention_days"`     // OmniRoute alias
-	PromotionThreshold      int             `yaml:"promotion_threshold"`       // Access count threshold to promote to permanent memory (default 3)
-	AutoCompaction          bool            `yaml:"auto_compaction"`           // Auto deduplication, pruning & FTS vacuum (default true)
-	CompactionIntervalHours int             `yaml:"compaction_interval_hours"` // Compaction interval (default 24h)
-	CompactionThreshold     int             `yaml:"compaction_threshold"`      // Memory count threshold to trigger compaction (default 100)
-	SimilarityThreshold     float64         `yaml:"similarity_threshold"`
-	SeedCSVPath             string          `yaml:"seed_csv_path"`
-	Embedding               EmbeddingConfig `yaml:"embedding"`
-	EmbeddingSource         EmbeddingConfig `yaml:"embedding_source"`          // OmniRoute alias
+	Enabled                 bool            `yaml:"enabled" json:"enabled"`
+	AutoExtract             bool            `yaml:"auto_extract" json:"auto_extract"`
+	Strategy                string          `yaml:"strategy" json:"strategy"`                                  // "hybrid", "recent", "semantic"
+	RetrievalStrategy       string          `yaml:"retrieval_strategy" json:"retrieval_strategy,omitempty"`    // legacy alias
+	MemoryStrategy          string          `yaml:"memory_strategy" json:"memory_strategy,omitempty"`         // OmniRoute alias
+	MaxTokens               int             `yaml:"max_tokens" json:"max_tokens"`                              // Prompt injection token budget (default 2000)
+	MemoryMaxTokens         int             `yaml:"memory_max_tokens" json:"memory_max_tokens,omitempty"`     // OmniRoute alias
+	MaxContextItems         int             `yaml:"max_context_items" json:"max_context_items"`               // Fallback item count limit
+	RetentionDays           int             `yaml:"retention_days" json:"retention_days"`                      // Memory retention window (default 30 days)
+	MemoryRetentionDays     int             `yaml:"memory_retention_days" json:"memory_retention_days,omitempty"` // OmniRoute alias
+	PromotionThreshold      int             `yaml:"promotion_threshold" json:"promotion_threshold"`           // Access count threshold to promote to permanent memory (default 3)
+	AutoCompaction          bool            `yaml:"auto_compaction" json:"auto_compaction"`                     // Auto deduplication, pruning & FTS vacuum (default true)
+	CompactionIntervalHours int             `yaml:"compaction_interval_hours" json:"compaction_interval_hours"` // Compaction interval (default 24h)
+	CompactionThreshold     int             `yaml:"compaction_threshold" json:"compaction_threshold"`          // Memory count threshold to trigger compaction (default 100)
+	SimilarityThreshold     float64         `yaml:"similarity_threshold" json:"similarity_threshold"`
+	SeedCSVPath             string          `yaml:"seed_csv_path" json:"seed_csv_path"`
+	Embedding               EmbeddingConfig `yaml:"embedding" json:"embedding"`
+	EmbeddingSource         EmbeddingConfig `yaml:"embedding_source" json:"embedding_source,omitempty"`       // OmniRoute alias
 }
 
 // GetStrategy returns the active memory retrieval strategy ("hybrid", "recent", "semantic")
-func (m *MemoryConfig) GetStrategy() string {
+func (m MemoryConfig) GetStrategy() string {
 	if m.Strategy != "" {
 		return m.Strategy
 	}
@@ -143,7 +143,7 @@ func (m *MemoryConfig) GetStrategy() string {
 }
 
 // GetMaxTokens returns the max token budget for prompt memory injection
-func (m *MemoryConfig) GetMaxTokens() int {
+func (m MemoryConfig) GetMaxTokens() int {
 	if m.MaxTokens > 0 {
 		return m.MaxTokens
 	}
@@ -154,7 +154,7 @@ func (m *MemoryConfig) GetMaxTokens() int {
 }
 
 // GetRetentionDays returns the retention days (1-365, default 30)
-func (m *MemoryConfig) GetRetentionDays() int {
+func (m MemoryConfig) GetRetentionDays() int {
 	if m.RetentionDays > 0 {
 		return m.RetentionDays
 	}
@@ -165,7 +165,7 @@ func (m *MemoryConfig) GetRetentionDays() int {
 }
 
 // GetPromotionThreshold returns the access count threshold to promote memory
-func (m *MemoryConfig) GetPromotionThreshold() int {
+func (m MemoryConfig) GetPromotionThreshold() int {
 	if m.PromotionThreshold > 0 {
 		return m.PromotionThreshold
 	}
@@ -173,7 +173,7 @@ func (m *MemoryConfig) GetPromotionThreshold() int {
 }
 
 // GetEmbeddingConfig returns the configured embedding configuration
-func (m *MemoryConfig) GetEmbeddingConfig() EmbeddingConfig {
+func (m MemoryConfig) GetEmbeddingConfig() EmbeddingConfig {
 	if m.EmbeddingSource.Enabled || m.EmbeddingSource.Model != "" {
 		return m.EmbeddingSource
 	}
@@ -182,12 +182,12 @@ func (m *MemoryConfig) GetEmbeddingConfig() EmbeddingConfig {
 
 // EmbeddingConfig defines configuration for generating vector embeddings
 type EmbeddingConfig struct {
-	Enabled    bool   `yaml:"enabled"`
-	Provider   string `yaml:"provider"` // "openai", "gemini", "custom", "ollama", "omniroute"
-	Model      string `yaml:"model"`
-	BaseURL    string `yaml:"base_url"`
-	APIKey     string `yaml:"api_key"`
-	Dimensions int    `yaml:"dimensions"`
+	Enabled    bool   `yaml:"enabled" json:"enabled"`
+	Provider   string `yaml:"provider" json:"provider"` // "openai", "gemini", "custom", "ollama", "omniroute"
+	Model      string `yaml:"model" json:"model"`
+	BaseURL    string `yaml:"base_url" json:"base_url"`
+	APIKey     string `yaml:"api_key" json:"api_key"`
+	Dimensions int    `yaml:"dimensions" json:"dimensions"`
 }
 
 // SearchConfig defines configuration for GoAssistant's multi-provider search engine
