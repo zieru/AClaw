@@ -403,6 +403,7 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 				if p, ok := tc.Arguments["provider"].(string); !ok || p == "" {
 					tc.Arguments["provider"] = preferredProv
 				}
+				BrowserSessionArg(subCtx, tc.Arguments)
 			}
 			toolOut, toolErr := s.toolRegistry.Execute(subCtx, tc.Name, tc.Arguments)
 			if toolErr != nil {

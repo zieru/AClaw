@@ -115,6 +115,22 @@ func GetActiveModelInfo(ctx context.Context) (prov, model string) {
 	return
 }
 
+// BrowserSessionArg menanamkan session_id (dari chat_id pada context) ke argumen tool browser
+// bila belum diisi oleh model. Ini menjaga sesi Camoufox persisten antar turn percakapan,
+// sehingga setelah bot menanyakan kredensial, panggilan browser berikutnya melanjutkan
+// sesi yang sama (resume browsing) alih-alih membuka browser baru dari nol.
+func BrowserSessionArg(ctx context.Context, args map[string]interface{}) {
+	if args == nil {
+		return
+	}
+	if _, ok := args["session_id"].(string); ok {
+		return
+	}
+	if chatID, ok := ctx.Value("chat_id").(string); ok && strings.TrimSpace(chatID) != "" {
+		args["session_id"] = chatID
+	}
+}
+
 type MediaAttachment struct {
 	FilePath string
 	Caption  string
@@ -732,6 +748,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				if p, ok := tc.Arguments["provider"].(string); !ok || p == "" {
 					tc.Arguments["provider"] = provToCall
 				}
+				BrowserSessionArg(toolCtx, tc.Arguments)
 			}
 			toolOut, toolErr := o.toolRegistry.Execute(toolCtx, tc.Name, tc.Arguments)
 			if toolErr != nil {
