@@ -6,15 +6,17 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"goassistant/internal/config"
 )
 
-// Engine coordinates multi-provider web search execution with intelligent failover
+// Engine coordinates multi-provider web search execution with intelligent failover and load balancing
 type Engine struct {
 	cfg       config.SearchConfig
 	providers map[string]Provider
+	rrCounter uint64
 	mu        sync.RWMutex
 }
 
@@ -28,6 +30,12 @@ func InitGlobalEngine(cfg config.SearchConfig) *Engine {
 	timeout := time.Duration(cfg.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 15 * time.Second
+	}
+	if cfg.Strategy == "" {
+		cfg.Strategy = "fallback"
+	}
+	if cfg.Provider == "" {
+		cfg.Provider = "auto"
 	}
 
 	eng := &Engine{
@@ -52,6 +60,7 @@ func GetGlobalEngine() *Engine {
 			cfg := config.SearchConfig{
 				Enabled:         true,
 				Provider:        "auto",
+				Strategy:        "fallback",
 				MaxResults:      5,
 				FallbackEnabled: true,
 				TimeoutSeconds:  15,
@@ -104,6 +113,80 @@ func (e *Engine) ActiveProvider() string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.cfg.Provider
+}
+
+// Strategy returns the current strategy: "fallback" or "roundrobin"
+func (e *Engine) Strategy() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.cfg.Strategy == "" {
+		return "fallback"
+	}
+	return e.cfg.Strategy
+}
+
+// SetStrategy updates the selection strategy dynamically
+func (e *Engine) SetStrategy(strategy string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	s := strings.ToLower(strings.TrimSpace(strategy))
+	if s == "roundrobin" || s == "round_robin" || s == "rr" {
+		e.cfg.Strategy = "roundrobin"
+	} else {
+		e.cfg.Strategy = "fallback"
+	}
+}
+
+// SetProvider updates active provider selection ("auto", "tavily", "firecrawl", "duckduckgo")
+func (e *Engine) SetProvider(provider string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cfg.Provider = strings.ToLower(strings.TrimSpace(provider))
+}
+
+// SetFallback updates fallback enabled status
+func (e *Engine) SetFallback(enabled bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cfg.FallbackEnabled = enabled
+}
+
+// SetTavilyKey updates Tavily API key and recreates the provider
+func (e *Engine) SetTavilyKey(key string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cfg.Tavily.APIKey = strings.TrimSpace(key)
+	timeout := time.Duration(e.cfg.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	e.providers["tavily"] = NewTavilyProvider(e.cfg.Tavily, timeout)
+}
+
+// SetFirecrawlKey updates Firecrawl API key and recreates the provider
+func (e *Engine) SetFirecrawlKey(key string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cfg.Firecrawl.APIKey = strings.TrimSpace(key)
+	timeout := time.Duration(e.cfg.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	e.providers["firecrawl"] = NewFirecrawlProvider(e.cfg.Firecrawl, timeout)
+}
+
+// UpdateConfig updates the full search configuration dynamically
+func (e *Engine) UpdateConfig(cfg config.SearchConfig) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cfg = cfg
+	timeout := time.Duration(cfg.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	e.providers["tavily"] = NewTavilyProvider(cfg.Tavily, timeout)
+	e.providers["firecrawl"] = NewFirecrawlProvider(cfg.Firecrawl, timeout)
+	e.providers["duckduckgo"] = NewDuckDuckGoProvider(timeout)
 }
 
 // Config returns a copy of current search configuration
@@ -195,7 +278,31 @@ func (e *Engine) buildProviderPlan() []Provider {
 	case "auto":
 		fallthrough
 	default:
-		// Auto prioritization: Tavily -> Firecrawl -> DuckDuckGo
+		// Check strategy: Round-Robin vs Fallback (priority)
+		if strings.ToLower(e.cfg.Strategy) == "roundrobin" {
+			// Find available primary providers
+			var availPrimaries []string
+			for _, name := range []string{"tavily", "firecrawl"} {
+				if p, ok := e.providers[name]; ok && p.IsAvailable() {
+					availPrimaries = append(availPrimaries, name)
+				}
+			}
+
+			if len(availPrimaries) > 1 {
+				// Rotate start index atomically
+				idx := int(atomic.AddUint64(&e.rrCounter, 1) % uint64(len(availPrimaries)))
+				for i := 0; i < len(availPrimaries); i++ {
+					currName := availPrimaries[(idx+i)%len(availPrimaries)]
+					addProvider(currName)
+				}
+				if e.cfg.FallbackEnabled {
+					addProvider("duckduckgo")
+				}
+				break
+			}
+		}
+
+		// Fallback strategy: Priority Tavily -> Firecrawl -> DuckDuckGo
 		addProvider("tavily")
 		addProvider("firecrawl")
 		addProvider("duckduckgo")

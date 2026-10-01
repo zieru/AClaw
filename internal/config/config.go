@@ -131,6 +131,7 @@ type EmbeddingConfig struct {
 type SearchConfig struct {
 	Enabled         bool            `yaml:"enabled"`
 	Provider        string          `yaml:"provider"` // "auto", "tavily", "firecrawl", "duckduckgo"
+	Strategy        string          `yaml:"strategy"` // "fallback", "roundrobin"
 	MaxResults      int             `yaml:"max_results"`
 	FallbackEnabled bool            `yaml:"fallback_enabled"`
 	TimeoutSeconds  int             `yaml:"timeout_seconds"`
@@ -239,6 +240,7 @@ func Load(configPath string) (*AppConfig, error) {
  
 		cfg.Search.Enabled = true
 		cfg.Search.Provider = "auto"
+		cfg.Search.Strategy = "fallback"
 		cfg.Search.MaxResults = 5
 		cfg.Search.FallbackEnabled = true
 		cfg.Search.TimeoutSeconds = 15
@@ -291,6 +293,9 @@ func Load(configPath string) (*AppConfig, error) {
 		}
 		if envSearchProv := os.Getenv("SEARCH_PROVIDER"); envSearchProv != "" {
 			cfg.Search.Provider = envSearchProv
+		}
+		if envSearchStrategy := os.Getenv("SEARCH_STRATEGY"); envSearchStrategy != "" {
+			cfg.Search.Strategy = envSearchStrategy
 		}
 		if envWebAdminKey := os.Getenv("WEBADMIN_API_KEY"); envWebAdminKey != "" {
 			cfg.WebAdmin.APIKey = envWebAdminKey

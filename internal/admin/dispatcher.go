@@ -83,6 +83,13 @@ func (a *AdminBot) handleTextMessage(c tele.Context) error {
 		}
 	}
 
+	// 8e. Check Web Search Key & Query dialog
+	if a.searchUI != nil {
+		if handled, err := a.searchUI.HandleTextMessage(c); handled {
+			return err
+		}
+	}
+
 	// 9. Direct Chat with Assistant from Admin PM
 	msg := c.Message().Text
 	if msg == "" || msg[0] == '/' {

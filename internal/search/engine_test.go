@@ -141,3 +141,96 @@ func TestEngine_DisabledConfig(t *testing.T) {
 		t.Fatal("expected error when search is disabled")
 	}
 }
+
+func TestEngine_RoundRobin(t *testing.T) {
+	cfg := config.SearchConfig{
+		Enabled:         true,
+		Provider:        "auto",
+		Strategy:        "roundrobin",
+		MaxResults:      5,
+		FallbackEnabled: true,
+	}
+
+	eng := &Engine{
+		cfg:       cfg,
+		providers: make(map[string]Provider),
+	}
+
+	tavilyMock := &mockProvider{
+		name:      "tavily",
+		available: true,
+		res: &Response{
+			Query:    "golang",
+			Provider: "tavily",
+			Results:  []SearchItem{{Title: "Tavily Hit", URL: "https://go.dev"}},
+		},
+	}
+	firecrawlMock := &mockProvider{
+		name:      "firecrawl",
+		available: true,
+		res: &Response{
+			Query:    "golang",
+			Provider: "firecrawl",
+			Results:  []SearchItem{{Title: "Firecrawl Hit", URL: "https://go.dev"}},
+		},
+	}
+
+	eng.RegisterProvider(tavilyMock)
+	eng.RegisterProvider(firecrawlMock)
+
+	// Call 1
+	res1, err := eng.Search(context.Background(), "golang")
+	if err != nil {
+		t.Fatalf("call 1 failed: %v", err)
+	}
+
+	// Call 2
+	res2, err := eng.Search(context.Background(), "golang")
+	if err != nil {
+		t.Fatalf("call 2 failed: %v", err)
+	}
+
+	// Providers between call 1 and call 2 should alternate (one is tavily, the other is firecrawl)
+	if res1.Provider == res2.Provider {
+		t.Errorf("expected different providers in round-robin, got %s and %s", res1.Provider, res2.Provider)
+	}
+}
+
+func TestEngine_DynamicSetters(t *testing.T) {
+	eng := InitGlobalEngine(config.SearchConfig{
+		Enabled:  true,
+		Provider: "auto",
+		Strategy: "fallback",
+	})
+
+	eng.SetStrategy("roundrobin")
+	if eng.Strategy() != "roundrobin" {
+		t.Errorf("expected roundrobin, got %s", eng.Strategy())
+	}
+
+	eng.SetStrategy("fallback")
+	if eng.Strategy() != "fallback" {
+		t.Errorf("expected fallback, got %s", eng.Strategy())
+	}
+
+	eng.SetProvider("firecrawl")
+	if eng.ActiveProvider() != "firecrawl" {
+		t.Errorf("expected firecrawl, got %s", eng.ActiveProvider())
+	}
+
+	eng.SetFallback(false)
+	if eng.Config().FallbackEnabled {
+		t.Error("expected fallback disabled")
+	}
+
+	eng.SetTavilyKey("tvly-dynamic-key")
+	if eng.Config().Tavily.APIKey != "tvly-dynamic-key" {
+		t.Errorf("unexpected tavily key: %s", eng.Config().Tavily.APIKey)
+	}
+
+	eng.SetFirecrawlKey("fc-dynamic-key")
+	if eng.Config().Firecrawl.APIKey != "fc-dynamic-key" {
+		t.Errorf("unexpected firecrawl key: %s", eng.Config().Firecrawl.APIKey)
+	}
+}
+

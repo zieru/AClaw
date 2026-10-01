@@ -72,6 +72,26 @@ func (a *AdminBot) registerRoutes() {
 		return c.Send("⚠️ Layanan Web Admin belum diaktifkan.", tele.ModeHTML)
 	})
 
+	// Web Search Multi-Provider Commands
+	a.bot.Handle("/search", func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleSearchDashboard(c)
+		}
+		return c.Send("⚠️ Layanan Web Search belum diaktifkan.", tele.ModeHTML)
+	})
+	a.bot.Handle("/setsearchprovider", func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleSetProviderCommand(c)
+		}
+		return nil
+	})
+	a.bot.Handle("/setsearchstrategy", func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleSetStrategyCommand(c)
+		}
+		return nil
+	})
+
 	// Topic / Multi-Chat Commands
 	a.bot.Handle("/topic", a.topicUI.HandleTopicDashboard)
 	a.bot.Handle("/topics", a.topicUI.HandleTopicDashboard)
@@ -138,6 +158,66 @@ func (a *AdminBot) registerRoutes() {
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_tokensaver"}, func(c tele.Context) error {
 		return a.tokenSaverUI.HandleTokenSaverStatus(c)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "menu_search"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleSearchDashboard(c)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_prov_auto"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleSwitchProviderCallback(c, "auto")
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_prov_tavily"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleSwitchProviderCallback(c, "tavily")
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_prov_firecrawl"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleSwitchProviderCallback(c, "firecrawl")
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_prov_duckduckgo"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleSwitchProviderCallback(c, "duckduckgo")
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_toggle_strategy"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleToggleStrategyCallback(c)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_toggle_fallback"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleToggleFallbackCallback(c)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_set_tavily"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandlePromptTavilyKey(c)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_set_firecrawl"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandlePromptFirecrawlKey(c)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_test_prompt"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandlePromptTestQuery(c)
+		}
+		return nil
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_limits"}, func(c tele.Context) error {
 		return c.EditOrSend(a.limitsUI.RenderLimitsSummary(), a.limitsUI.LimitsKeyboard(), tele.ModeHTML)
@@ -886,8 +966,9 @@ func (a *AdminBot) registerCommands() {
 		{Text: "channels", Description: "Kelola bot Telegram & WhatsApp"},
 		{Text: "checkin", Description: "Auto check-in harian & saldo kuota HCNSEC"},
 		{Text: "cron", Description: "Jadwal otomatisasi & trigger cron"},
+		{Text: "search", Description: "Kelola Web Search engine (Tavily/Firecrawl/DDG)"},
 		{Text: "memory", Description: "Lihat memori profil & SOP bot"},
-		{Text: "clearmemory", Description: "Hapus memori user di OmniRoute"},
+		{Text: "clearmemory", Description: "Hapus memori SQLite profil pengguna"},
 		{Text: "stats", Description: "Statistik token & estimasi biaya"},
 		{Text: "logs", Description: "Lihat log aktivitas request & payload"},
 		{Text: "backup", Description: "Unduh file backup SQLite & Markdown"},

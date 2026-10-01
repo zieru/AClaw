@@ -55,6 +55,7 @@ type AdminBot struct {
 	checkinUI    *CheckinUI
 	topicUI      *TopicUI
 	webAdminUI   *WebAdminUI
+	searchUI     *SearchUIHandler
 	promptManager *tgprompt.PromptManager
 }
 
@@ -122,6 +123,7 @@ func NewAdminBot(
 		updateUI:     NewUpdateUI(cfg, bot),
 		checkinUI:    NewCheckinUI(db, checkinSvc),
 		topicUI:      NewTopicUI(db, sm, bot),
+		searchUI:     NewSearchUIHandler(cfg),
 		promptManager: tgprompt.NewPromptManager(bot),
 	}
 
