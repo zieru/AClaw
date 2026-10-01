@@ -725,3 +725,71 @@ func (m *Manager) CountMemories(scope, scopeID string) (int, error) {
 	}
 	return m.db.CountMemories(scope, scopeID)
 }
+
+// SetEmbeddingModel updates embedding model name and activates embedding
+func (m *Manager) SetEmbeddingModel(model string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cleanModel := strings.TrimSpace(model)
+	m.cfg.Embedding.Model = cleanModel
+	m.cfg.EmbeddingSource.Model = cleanModel
+	if cleanModel != "" {
+		m.cfg.Embedding.Enabled = true
+		m.cfg.EmbeddingSource.Enabled = true
+	}
+	m.embedder = NewEmbedder(m.cfg.Embedding)
+	if m.extractor != nil {
+		m.extractor.SetEmbedder(m.embedder)
+	}
+}
+
+// SetEmbeddingProvider sets embedding provider (openai, gemini, ollama, custom)
+func (m *Manager) SetEmbeddingProvider(prov string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cleanProv := strings.TrimSpace(strings.ToLower(prov))
+	m.cfg.Embedding.Provider = cleanProv
+	m.cfg.EmbeddingSource.Provider = cleanProv
+	m.embedder = NewEmbedder(m.cfg.Embedding)
+	if m.extractor != nil {
+		m.extractor.SetEmbedder(m.embedder)
+	}
+}
+
+// SetEmbeddingBaseURL sets custom endpoint URL for embeddings (e.g. Ollama or reverse proxy)
+func (m *Manager) SetEmbeddingBaseURL(baseURL string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cleanURL := strings.TrimSpace(baseURL)
+	m.cfg.Embedding.BaseURL = cleanURL
+	m.cfg.EmbeddingSource.BaseURL = cleanURL
+	m.embedder = NewEmbedder(m.cfg.Embedding)
+	if m.extractor != nil {
+		m.extractor.SetEmbedder(m.embedder)
+	}
+}
+
+// SetEmbeddingAPIKey sets custom API key for embedding
+func (m *Manager) SetEmbeddingAPIKey(apiKey string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cleanKey := strings.TrimSpace(apiKey)
+	m.cfg.Embedding.APIKey = cleanKey
+	m.cfg.EmbeddingSource.APIKey = cleanKey
+	m.embedder = NewEmbedder(m.cfg.Embedding)
+	if m.extractor != nil {
+		m.extractor.SetEmbedder(m.embedder)
+	}
+}
+
+// SetEmbeddingEnabled toggles vector embedding on or off
+func (m *Manager) SetEmbeddingEnabled(enabled bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cfg.Embedding.Enabled = enabled
+	m.cfg.EmbeddingSource.Enabled = enabled
+	m.embedder = NewEmbedder(m.cfg.Embedding)
+	if m.extractor != nil {
+		m.extractor.SetEmbedder(m.embedder)
+	}
+}

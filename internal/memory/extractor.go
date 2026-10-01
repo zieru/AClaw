@@ -66,6 +66,13 @@ func NewAutoExtractor(db *storage.DB, embedder Embedder, pm *provider.Manager) *
 	}
 }
 
+// SetEmbedder updates the embedder instance
+func (e *AutoExtractor) SetEmbedder(embedder Embedder) {
+	if e != nil {
+		e.embedder = embedder
+	}
+}
+
 // ExtractFromConversation analyzes a turn and saves extracted memories into local SQLite
 func (e *AutoExtractor) ExtractFromConversation(ctx context.Context, channelID, userID, userPrompt, assistantResponse string, activeModel, activeProvider string) error {
 	if e == nil || e.db == nil || e.provManager == nil {

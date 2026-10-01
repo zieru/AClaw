@@ -960,6 +960,82 @@ func (a *BotAdapter) handleMemory(c tele.Context) error {
 		memMgr.SetStrategy(newStrat)
 		return c.Send(fmt.Sprintf("✅ <b>Strategi memory engine berhasil diubah ke:</b> <code>%s</code>", newStrat), tele.ModeHTML)
 
+	case "model", "embedding_model", "setmodel":
+		if len(parts) < 2 {
+			cfg := memMgr.GetConfig()
+			emb := cfg.GetEmbeddingConfig()
+			currModel := emb.Model
+			if currModel == "" {
+				currModel = "(belum disetel)"
+			}
+			return c.Send(fmt.Sprintf("ℹ️ <b>Model Embedding Saat Ini:</b> <code>%s</code> (Provider: <code>%s</code>)\n\n"+
+				"Ubah dengan: <code>/memory model &lt;nama_model&gt;</code>\n\n"+
+				"Contoh populer:\n"+
+				"• <code>/memory model text-embedding-3-small</code> (OpenAI)\n"+
+				"• <code>/memory model text-embedding-004</code> (Gemini)\n"+
+				"• <code>/memory model nomic-embed-text</code> (Ollama)\n"+
+				"• <code>/memory model mxbai-embed-large</code> (Ollama)",
+				html.EscapeString(currModel), html.EscapeString(emb.Provider)), tele.ModeHTML)
+		}
+		newModel := strings.TrimSpace(parts[1])
+		memMgr.SetEmbeddingModel(newModel)
+		return c.Send(fmt.Sprintf("✅ <b>Model embedding berhasil diubah ke:</b> <code>%s</code>\nStatus Remote Embedding kini <b>Aktif</b>.", html.EscapeString(newModel)), tele.ModeHTML)
+
+	case "provider", "prov":
+		if len(parts) < 2 {
+			cfg := memMgr.GetConfig()
+			emb := cfg.GetEmbeddingConfig()
+			return c.Send(fmt.Sprintf("ℹ️ <b>Provider Embedding Saat Ini:</b> <code>%s</code>\n\nPilihan: <code>openai</code>, <code>gemini</code>, <code>ollama</code>, <code>custom</code>\nUbah dengan: <code>/memory provider &lt;nama_provider&gt;</code>", html.EscapeString(emb.Provider)), tele.ModeHTML)
+		}
+		newProv := strings.ToLower(strings.TrimSpace(parts[1]))
+		if newProv != "openai" && newProv != "gemini" && newProv != "ollama" && newProv != "custom" {
+			return c.Send("⚠️ Provider tidak valid. Gunakan: <code>openai</code>, <code>gemini</code>, <code>ollama</code>, atau <code>custom</code>.", tele.ModeHTML)
+		}
+		memMgr.SetEmbeddingProvider(newProv)
+		return c.Send(fmt.Sprintf("✅ <b>Provider embedding berhasil diubah ke:</b> <code>%s</code>", html.EscapeString(newProv)), tele.ModeHTML)
+
+	case "embed", "embedding":
+		if len(parts) < 2 {
+			cfg := memMgr.GetConfig()
+			emb := cfg.GetEmbeddingConfig()
+			st := "Nonaktif"
+			if emb.Enabled {
+				st = "Aktif"
+			}
+			return c.Send(fmt.Sprintf("ℹ️ <b>Status Vector Embedding:</b> <code>%s</code>\n\nGunakan: <code>/memory embed on</code> atau <code>/memory embed off</code>", st), tele.ModeHTML)
+		}
+		toggle := strings.ToLower(parts[1])
+		if toggle == "on" || toggle == "enable" || toggle == "1" || toggle == "true" {
+			memMgr.SetEmbeddingEnabled(true)
+			return c.Send("✅ <b>Vector Embedding berhasil diaktifkan.</b>", tele.ModeHTML)
+		} else if toggle == "off" || toggle == "disable" || toggle == "0" || toggle == "false" {
+			memMgr.SetEmbeddingEnabled(false)
+			return c.Send("✅ <b>Vector Embedding dinonaktifkan</b> (Fallback ke FTS5 BM25).", tele.ModeHTML)
+		} else {
+			return c.Send("⚠️ Gunakan <code>/memory embed on</code> atau <code>/memory embed off</code>", tele.ModeHTML)
+		}
+
+	case "baseurl", "url":
+		if len(parts) < 2 {
+			cfg := memMgr.GetConfig()
+			emb := cfg.GetEmbeddingConfig()
+			return c.Send(fmt.Sprintf("ℹ️ <b>Embedding Base URL Saat Ini:</b> <code>%s</code>\n\nUbah dengan: <code>/memory baseurl &lt;url&gt;</code>\nContoh untuk Ollama: <code>/memory baseurl http://localhost:11434/v1</code>", html.EscapeString(emb.BaseURL)), tele.ModeHTML)
+		}
+		newURL := strings.TrimSpace(parts[1])
+		if newURL == "default" || newURL == "none" || newURL == "-" {
+			newURL = ""
+		}
+		memMgr.SetEmbeddingBaseURL(newURL)
+		return c.Send(fmt.Sprintf("✅ <b>Base URL embedding berhasil diatur ke:</b> <code>%s</code>", html.EscapeString(newURL)), tele.ModeHTML)
+
+	case "key", "apikey":
+		if len(parts) < 2 {
+			return c.Send("Ubah API key embedding dengan: <code>/memory key &lt;api_key&gt;</code>", tele.ModeHTML)
+		}
+		newKey := strings.TrimSpace(parts[1])
+		memMgr.SetEmbeddingAPIKey(newKey)
+		return c.Send("✅ <b>API Key untuk embedding berhasil diperbarui.</b>", tele.ModeHTML)
+
 	case "tokens", "maxtokens", "token":
 		if len(parts) < 2 {
 			return c.Send(fmt.Sprintf("ℹ️ <b>Anggaran Token Saat Ini:</b> <code>%d tokens</code>\n\nUbah dengan: <code>/memory tokens &lt;jumlah&gt;</code> (contoh: <code>/memory tokens 2000</code>)", memMgr.GetMaxTokens()), tele.ModeHTML)
@@ -1058,9 +1134,9 @@ func (a *BotAdapter) renderMemoryDashboard(userID string) (string, *tele.ReplyMa
 	activeCount, _ := a.db.CountMemories("user", userID)
 
 	embCfg := cfg.GetEmbeddingConfig()
-	embStatus := "Nonaktif (BM25 FTS5 Cepat)"
+	embStatus := "🔴 Nonaktif (BM25 FTS5 Cepat)"
 	if embCfg.Enabled && embCfg.Model != "" {
-		embStatus = fmt.Sprintf("Aktif (%s - %s)", embCfg.Provider, embCfg.Model)
+		embStatus = fmt.Sprintf("🟢 Aktif (<code>%s</code> - <code>%s</code>)", html.EscapeString(embCfg.Provider), html.EscapeString(embCfg.Model))
 	}
 
 	stratDesc := "Hybrid (BM25 + Vektor + Recency)"
@@ -1077,8 +1153,8 @@ func (a *BotAdapter) renderMemoryDashboard(userID string) (string, *tele.ReplyMa
 	sb.WriteString(fmt.Sprintf("• <b>Masa Retensi:</b> <code>%d hari</code> (Auto-promosi &ge; <code>%dx</code> pakai)\n", retentionDays, promotionThreshold))
 	sb.WriteString(fmt.Sprintf("• <b>Memori Aktif Anda:</b> <code>%d catatan</code>\n", activeCount))
 	sb.WriteString(fmt.Sprintf("• <b>Auto-Compaction:</b> <code>Aktif</code> (Tiap %d jam)\n", cfg.CompactionIntervalHours))
-	sb.WriteString(fmt.Sprintf("• <b>Remote Embedding:</b> <code>%s</code>\n\n", embStatus))
-	sb.WriteString("💡 <i>Pilih strategi di bawah atau jalankan pemadatan:</i>")
+	sb.WriteString(fmt.Sprintf("• <b>Remote Embedding:</b> %s\n\n", embStatus))
+	sb.WriteString("💡 <i>Pilih strategi atau kelola model embedding:</i>")
 
 	menu := &tele.ReplyMarkup{}
 
@@ -1095,17 +1171,49 @@ func (a *BotAdapter) renderMemoryDashboard(userID string) (string, *tele.ReplyMa
 		btnSemantic = menu.Data("✅ Semantic", "mem_strat_semantic")
 	}
 
+	btnToggleEmbed := menu.Data("🔌 Toggle Embed", "mem_toggle_embed")
+	btnModels := menu.Data("🤖 Pilih Model", "mem_menu_models")
 	btnCompact := menu.Data("🧹 Compact & Prune", "mem_compact_now")
 	btnList := menu.Data("📋 List Memori", "mem_list_now")
 	btnRefresh := menu.Data("🔄 Refresh", "mem_refresh")
 
 	menu.Inline(
 		menu.Row(btnHybrid, btnRecent, btnSemantic),
+		menu.Row(btnToggleEmbed, btnModels),
 		menu.Row(btnCompact, btnList),
 		menu.Row(btnRefresh),
 	)
 
 	return sb.String(), menu
+}
+
+func (a *BotAdapter) renderModelPicker() (string, *tele.ReplyMarkup) {
+	text := "🤖 <b>PILIH MODEL EMBEDDING REMOTE</b>\n\n" +
+		"Pilih salah satu model embedding yang didukung untuk pencarian semantik vektor:\n\n" +
+		"1. <b>OpenAI text-embedding-3-small</b> (Cepat, akurat, hemat)\n" +
+		"2. <b>Google Gemini text-embedding-004</b> (768 dimensi)\n" +
+		"3. <b>Ollama nomic-embed-text</b> (Lokal via :11434)\n" +
+		"4. <b>Ollama mxbai-embed-large</b> (Lokal via :11434)\n\n" +
+		"<i>Atau atur manual dengan perintah:</i>\n" +
+		"<code>/memory model &lt;nama_model&gt;</code>\n" +
+		"<code>/memory provider &lt;provider&gt;</code>"
+
+	menu := &tele.ReplyMarkup{}
+	btnOAI := menu.Data("OpenAI text-embedding-3-small", "mem_set_model_openai_text-embedding-3-small")
+	btnGemini := menu.Data("Gemini text-embedding-004", "mem_set_model_gemini_text-embedding-004")
+	btnNomic := menu.Data("Ollama nomic-embed-text", "mem_set_model_ollama_nomic-embed-text")
+	btnMxbai := menu.Data("Ollama mxbai-embed-large", "mem_set_model_ollama_mxbai-embed-large")
+	btnBack := menu.Data("🔙 Kembali ke Dashboard", "mem_refresh")
+
+	menu.Inline(
+		menu.Row(btnOAI),
+		menu.Row(btnGemini),
+		menu.Row(btnNomic),
+		menu.Row(btnMxbai),
+		menu.Row(btnBack),
+	)
+
+	return text, menu
 }
 
 func (a *BotAdapter) handleMemoryCallback(c tele.Context, data string) error {
@@ -1119,6 +1227,58 @@ func (a *BotAdapter) handleMemoryCallback(c tele.Context, data string) error {
 	switch data {
 	case "mem_refresh":
 		_ = c.Respond(&tele.CallbackResponse{Text: "🔄 Memperbarui dashboard..."})
+		text, menu := a.renderMemoryDashboard(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_toggle_embed":
+		cfg := memMgr.GetConfig()
+		emb := cfg.GetEmbeddingConfig()
+		newState := !emb.Enabled
+		memMgr.SetEmbeddingEnabled(newState)
+		statusTxt := "dimatikan"
+		if newState {
+			statusTxt = "diaktifkan"
+		}
+		_ = c.Respond(&tele.CallbackResponse{Text: "🔌 Embedding " + statusTxt})
+		text, menu := a.renderMemoryDashboard(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_menu_models":
+		_ = c.Respond(&tele.CallbackResponse{})
+		text, menu := a.renderModelPicker()
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_set_model_openai_text-embedding-3-small":
+		memMgr.SetEmbeddingProvider("openai")
+		memMgr.SetEmbeddingModel("text-embedding-3-small")
+		memMgr.SetEmbeddingEnabled(true)
+		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Model diatur ke OpenAI text-embedding-3-small"})
+		text, menu := a.renderMemoryDashboard(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_set_model_gemini_text-embedding-004":
+		memMgr.SetEmbeddingProvider("gemini")
+		memMgr.SetEmbeddingModel("text-embedding-004")
+		memMgr.SetEmbeddingEnabled(true)
+		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Model diatur ke Gemini text-embedding-004"})
+		text, menu := a.renderMemoryDashboard(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_set_model_ollama_nomic-embed-text":
+		memMgr.SetEmbeddingProvider("ollama")
+		memMgr.SetEmbeddingModel("nomic-embed-text")
+		memMgr.SetEmbeddingBaseURL("http://localhost:11434/v1")
+		memMgr.SetEmbeddingEnabled(true)
+		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Model diatur ke Ollama nomic-embed-text"})
+		text, menu := a.renderMemoryDashboard(userID)
+		return c.Edit(text, menu, tele.ModeHTML)
+
+	case "mem_set_model_ollama_mxbai-embed-large":
+		memMgr.SetEmbeddingProvider("ollama")
+		memMgr.SetEmbeddingModel("mxbai-embed-large")
+		memMgr.SetEmbeddingBaseURL("http://localhost:11434/v1")
+		memMgr.SetEmbeddingEnabled(true)
+		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Model diatur ke Ollama mxbai-embed-large"})
 		text, menu := a.renderMemoryDashboard(userID)
 		return c.Edit(text, menu, tele.ModeHTML)
 
