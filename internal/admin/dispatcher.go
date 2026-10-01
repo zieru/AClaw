@@ -740,6 +740,11 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		return a.mdUI.PromptAppendContent(c, "global", fname)
 	}
 
+	// Memory Engine Callbacks
+	if strings.HasPrefix(data, "mem_") {
+		return a.memoryUI.HandleCallback(c, data)
+	}
+
 	return nil
 }
 

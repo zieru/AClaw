@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html"
 	"log"
+	"strconv"
 	"strings"
 
 	"goassistant/internal/tokensaver"
@@ -233,7 +234,8 @@ func (a *AdminBot) registerRoutes() {
 		if c.Sender() != nil {
 			senderID = c.Sender().ID
 		}
-		return c.EditOrSend(a.memoryUI.RenderMemorySummary(senderID), BackToMenuKeyboard(), tele.ModeHTML)
+		text, menu := a.memoryUI.RenderMemoryDashboard(strconv.FormatInt(senderID, 10))
+		return c.EditOrSend(text, menu, tele.ModeHTML)
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_stats"}, func(c tele.Context) error {
 		return c.EditOrSend(a.auditUI.RenderStatsSummary(), a.auditUI.StatsKeyboard(), tele.ModeHTML)
@@ -921,13 +923,8 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle("/delcron", a.cronUI.HandleDelCron)
 
 	// Memory Commands
-	a.bot.Handle("/memory", func(c tele.Context) error {
-		var senderID int64
-		if c.Sender() != nil {
-			senderID = c.Sender().ID
-		}
-		return c.Reply(a.memoryUI.RenderMemorySummary(senderID), tele.ModeHTML)
-	})
+	a.bot.Handle("/memory", a.memoryUI.HandleMemory)
+	a.bot.Handle("/memories", a.memoryUI.HandleMemory)
 	a.bot.Handle("/searchmemory", a.memoryUI.HandleSearchMemory)
 	a.bot.Handle("/savefact", a.memoryUI.HandleSaveFact)
 	a.bot.Handle("/clearmemory", a.memoryUI.HandleClearMemory)
