@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -91,19 +92,19 @@ func TestResolveAPIKey(t *testing.T) {
 		t.Errorf("expected official key from db provider, got %s (%s)", keyDB, srcDB)
 	}
 
-	// 4. Fallback to Environment variable
-	cfgNoKeyOpenAI := config.EmbeddingConfig{
+	// 4. Fallback to Environment variable (GEMINI_API_KEY)
+	cfgNoKeyGemini := config.EmbeddingConfig{
 		Enabled:  true,
-		Provider: "openai",
-		Model:    "text-embedding-3-small",
+		Provider: "gemini",
+		Model:    "gemini-embedding-001",
 		APIKey:   "",
 	}
-	os.Setenv("OPENAI_API_KEY", "sk-proj-env-openai-key-5678")
-	defer os.Unsetenv("OPENAI_API_KEY")
+	os.Setenv("GEMINI_API_KEY", "AIzaSyEnvKeyTest5678")
+	defer os.Unsetenv("GEMINI_API_KEY")
 
-	embEnv := NewEmbedder(cfgNoKeyOpenAI, db)
+	embEnv := NewEmbedder(cfgNoKeyGemini, nil)
 	keyEnv, srcEnv := embEnv.ResolveAPIKey()
-	if keyEnv != "sk-proj-env-openai-key-5678" || srcEnv != "Environment (OPENAI_API_KEY)" {
+	if keyEnv != "AIzaSyEnvKeyTest5678" || srcEnv != "Environment (GEMINI_API_KEY)" {
 		t.Errorf("expected key from env var, got %s (%s)", keyEnv, srcEnv)
 	}
 }
@@ -121,7 +122,7 @@ func TestGeminiNativeEmbedding(t *testing.T) {
 		receivedQueryKey = r.URL.Query().Get("key")
 		receivedHeaderKey = r.Header.Get("x-goog-api-key")
 
-		if r.URL.Path == "/v1beta/models/text-embedding-004:embedContent" {
+		if r.URL.Path == "/v1beta/models/gemini-embedding-001:embedContent" {
 			_ = json.NewDecoder(r.Body).Decode(&singleReq)
 			resp := geminiEmbedContentResponse{
 				Embedding: &struct {
@@ -135,7 +136,7 @@ func TestGeminiNativeEmbedding(t *testing.T) {
 			return
 		}
 
-		if r.URL.Path == "/v1beta/models/text-embedding-004:batchEmbedContents" {
+		if r.URL.Path == "/v1beta/models/gemini-embedding-001:batchEmbedContents" {
 			_ = json.NewDecoder(r.Body).Decode(&batchReq)
 			resp := geminiBatchEmbedContentsResponse{
 				Embeddings: []struct {
@@ -157,7 +158,7 @@ func TestGeminiNativeEmbedding(t *testing.T) {
 	cfg := config.EmbeddingConfig{
 		Enabled:    true,
 		Provider:   "gemini",
-		Model:      "text-embedding-004",
+		Model:      "gemini-embedding-001",
 		BaseURL:    server.URL,
 		APIKey:     "secret-gemini-test-key",
 		Dimensions: 4,
@@ -173,8 +174,11 @@ func TestGeminiNativeEmbedding(t *testing.T) {
 	if len(vec) != 4 || vec[0] != 0.1 || vec[3] != 0.4 {
 		t.Errorf("unexpected vector: %v", vec)
 	}
-	if receivedPath != "/v1beta/models/text-embedding-004:embedContent" {
+	if receivedPath != "/v1beta/models/gemini-embedding-001:embedContent" {
 		t.Errorf("unexpected path: %s", receivedPath)
+	}
+	if singleReq.OutputDimensionality != 4 {
+		t.Errorf("expected OutputDimensionality 4, got %d", singleReq.OutputDimensionality)
 	}
 	if receivedQueryKey != "secret-gemini-test-key" {
 		t.Errorf("unexpected query api key: %s", receivedQueryKey)
@@ -202,13 +206,34 @@ func TestGeminiNativeEmbedding(t *testing.T) {
 	}
 }
 
-func TestEmbedderTestConnection(t *testing.T) {
+func TestFetchAvailableEmbeddingModels(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := geminiEmbedContentResponse{
-			Embedding: &struct {
-				Values []float32 `json:"values"`
-			}{
-				Values: []float32{0.01, 0.02, 0.03},
+		if r.URL.Path != "/v1beta/models" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("x-goog-api-key") != "mock-api-key" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		resp := map[string]interface{}{
+			"models": []map[string]interface{}{
+				{
+					"name":                       "models/gemini-2.5-flash",
+					"displayName":                "Gemini 2.5 Flash",
+					"supportedGenerationMethods": []string{"generateContent", "countTokens"},
+				},
+				{
+					"name":                       "models/gemini-embedding-001",
+					"displayName":                "Gemini Embedding 001",
+					"supportedGenerationMethods": []string{"embedContent", "countTokens"},
+				},
+				{
+					"name":                       "models/text-embedding-005",
+					"displayName":                "Text Embedding 005 Preview",
+					"supportedGenerationMethods": []string{"embedContent"},
+				},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -217,9 +242,77 @@ func TestEmbedderTestConnection(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.EmbeddingConfig{
+		Enabled:  true,
+		Provider: "gemini",
+		Model:    "gemini-embedding-001",
+		BaseURL:  server.URL,
+		APIKey:   "mock-api-key",
+	}
+
+	emb := NewEmbedder(cfg, nil)
+	models, err := emb.FetchAvailableEmbeddingModels(context.Background())
+	if err != nil {
+		t.Fatalf("FetchAvailableEmbeddingModels failed: %v", err)
+	}
+
+	if len(models) != 2 {
+		t.Fatalf("expected 2 embedding models, got %d", len(models))
+	}
+	if models[0].Name != "models/gemini-embedding-001" {
+		t.Errorf("expected first model models/gemini-embedding-001, got %s", models[0].Name)
+	}
+	if models[1].Name != "models/text-embedding-005" {
+		t.Errorf("expected second model models/text-embedding-005, got %s", models[1].Name)
+	}
+
+	// Verify Caching
+	modelsCached, err := emb.FetchAvailableEmbeddingModels(context.Background())
+	if err != nil {
+		t.Fatalf("FetchAvailableEmbeddingModels from cache failed: %v", err)
+	}
+	if len(modelsCached) != 2 {
+		t.Errorf("expected 2 cached models, got %d", len(modelsCached))
+	}
+}
+
+func TestEmbedderTestConnection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1beta/models" {
+			resp := map[string]interface{}{
+				"models": []map[string]interface{}{
+					{
+						"name":                       "models/gemini-embedding-001",
+						"displayName":                "Gemini Embedding 001",
+						"supportedGenerationMethods": []string{"embedContent"},
+					},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		if strings.Contains(r.URL.Path, "embedContent") {
+			resp := geminiEmbedContentResponse{
+				Embedding: &struct {
+					Values []float32 `json:"values"`
+				}{
+					Values: []float32{0.01, 0.02, 0.03},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	cfg := config.EmbeddingConfig{
 		Enabled:    true,
 		Provider:   "gemini",
-		Model:      "text-embedding-004",
+		Model:      "text-embedding-004", // Should auto-switch away from old text-embedding-004
 		BaseURL:    server.URL,
 		APIKey:     "test-key",
 		Dimensions: 3,
@@ -239,4 +332,73 @@ func TestEmbedderTestConnection(t *testing.T) {
 	if res.StatusCode != 200 {
 		t.Errorf("expected 200 status code, got %d", res.StatusCode)
 	}
+	if len(res.AvailableModels) != 1 {
+		t.Errorf("expected 1 available model, got %d", len(res.AvailableModels))
+	}
+	if res.Model != "gemini-embedding-001" {
+		t.Errorf("expected active model gemini-embedding-001, got %s", res.Model)
+	}
 }
+
+func TestLiveFetchGoogleModels(t *testing.T) {
+	db, err := storage.Open("../../data/goassistant.db")
+	if err != nil {
+		t.Skip("local db not available")
+	}
+	defer db.Close()
+
+	provs, err := db.ListProviders()
+	if err != nil {
+		t.Skip("cannot list providers")
+	}
+	t.Logf("Total providers in db: %d", len(provs))
+	for _, p := range provs {
+		t.Logf("Provider: Name=%q, Type=%q, Active=%v, HasKey=%v", p.Name, p.Type, p.IsActive, p.APIKey != "" || len(p.APIKeys) > 0)
+	}
+
+	apiKey := ""
+	for _, p := range provs {
+		if strings.Contains(strings.ToLower(p.Name), "gemini") && !strings.Contains(strings.ToLower(p.Name), "web") {
+			if len(p.APIKeys) > 0 && p.APIKeys[0] != "" {
+				apiKey = p.APIKeys[0]
+			} else if p.APIKey != "" {
+				apiKey = p.APIKey
+			}
+			break
+		}
+	}
+	if apiKey == "" {
+		apiKey = os.Getenv("GEMINI_API_KEY")
+	}
+	if apiKey == "" {
+		t.Skip("no gemini api key found in db or env")
+	}
+
+	reqURL := "https://generativelanguage.googleapis.com/v1beta/models?key=" + apiKey
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		t.Fatalf("get models: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var lm struct {
+		Models []struct {
+			Name                       string   `json:"name"`
+			DisplayName                string   `json:"displayName"`
+			SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
+		} `json:"models"`
+	}
+	_ = json.Unmarshal(body, &lm)
+
+	t.Logf("=== MODELS FROM GOOGLE API (Status %d) ===", resp.StatusCode)
+	for _, m := range lm.Models {
+		for _, method := range m.SupportedGenerationMethods {
+			if method == "embedContent" {
+				t.Logf("Found embedding model: %s (%s)", m.Name, m.DisplayName)
+				break
+			}
+		}
+	}
+}
+

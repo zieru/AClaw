@@ -150,14 +150,14 @@ memory:
   similarity_threshold: 0.60         # Minimum cosine similarity score untuk semantic search
   seed_csv_path: "D:/Users/Grapari_Infomedia/Downloads/AyuGram Desktop/memories_export.csv"
   
-  # Remote embedding source untuk model yang mendukung vector embeddings
+  # Remote embedding source khusus Google Gemini (Auto-detect model via Google API)
   embedding_source:
     enabled: false                   # Aktifkan true jika ingin menggunakan semantic vector embedding
-    provider: "openai"               # openai, gemini, custom, ollama
-    model: "text-embedding-3-small"  # Model embedding (misal: text-embedding-3-small, text-embedding-004)
-    base_url: ""                     # Base URL custom jika menggunakan endpoint pihak ketiga / lokal (misal http://localhost:11434/v1)
-    api_key: ""                      # API Key opsional (jika kosong, menggunakan API Key provider default)
-    dimensions: 1536                 # Dimensi vektor embedding
+    provider: "gemini"               # Google Gemini eksklusif untuk memory embedding
+    model: "gemini-embedding-001"    # Model embedding Gemini resmi (auto-detect via Google AI Studio)
+    base_url: ""                     # Default: https://generativelanguage.googleapis.com
+    api_key: ""                      # Google AI Studio API Key (AIzaSy...) atau setel via /memory key <key>
+    dimensions: 768                  # Dimensi vektor embedding (default: 768)
 
 
 

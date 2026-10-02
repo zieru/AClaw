@@ -58,6 +58,20 @@ func NewManager(db *storage.DB, cfg config.MemoryConfig, embedder Embedder, pm *
 
 	// Re-evaluate embedder if configuration specifies embedding
 	embCfg := cfg.GetEmbeddingConfig()
+	embCfg.Provider = "gemini"
+	cfg.Embedding.Provider = "gemini"
+	cfg.EmbeddingSource.Provider = "gemini"
+
+	if embCfg.Model == "" || embCfg.Model == "text-embedding-004" || embCfg.Model == "models/text-embedding-004" {
+		embCfg.Model = "gemini-embedding-001"
+		cfg.Embedding.Model = "gemini-embedding-001"
+		cfg.EmbeddingSource.Model = "gemini-embedding-001"
+	}
+	if embCfg.Dimensions <= 0 {
+		embCfg.Dimensions = 768
+		cfg.Embedding.Dimensions = 768
+		cfg.EmbeddingSource.Dimensions = 768
+	}
 	if embedder == nil || embCfg.Enabled {
 		embedder = NewEmbedder(embCfg, db)
 	}
@@ -870,6 +884,9 @@ func (m *Manager) GetEmbedder() Embedder {
 func (m *Manager) SetEmbeddingModel(model string) {
 	m.mu.Lock()
 	cleanModel := strings.TrimSpace(model)
+	if cleanModel == "text-embedding-004" || cleanModel == "models/text-embedding-004" {
+		cleanModel = "gemini-embedding-001"
+	}
 	m.cfg.Embedding.Model = cleanModel
 	m.cfg.EmbeddingSource.Model = cleanModel
 	if cleanModel != "" {
@@ -884,12 +901,11 @@ func (m *Manager) SetEmbeddingModel(model string) {
 	m.persistConfig()
 }
 
-// SetEmbeddingProvider sets embedding provider (openai, gemini, ollama, custom)
+// SetEmbeddingProvider sets embedding provider (always locked to gemini)
 func (m *Manager) SetEmbeddingProvider(prov string) {
 	m.mu.Lock()
-	cleanProv := strings.TrimSpace(strings.ToLower(prov))
-	m.cfg.Embedding.Provider = cleanProv
-	m.cfg.EmbeddingSource.Provider = cleanProv
+	m.cfg.Embedding.Provider = "gemini"
+	m.cfg.EmbeddingSource.Provider = "gemini"
 	m.embedder = NewEmbedder(m.cfg.Embedding, m.db)
 	if m.extractor != nil {
 		m.extractor.SetEmbedder(m.embedder)
@@ -898,7 +914,7 @@ func (m *Manager) SetEmbeddingProvider(prov string) {
 	m.persistConfig()
 }
 
-// SetEmbeddingBaseURL sets custom endpoint URL for embeddings (e.g. Ollama or reverse proxy)
+// SetEmbeddingBaseURL sets custom endpoint URL for embeddings (e.g. reverse proxy)
 func (m *Manager) SetEmbeddingBaseURL(baseURL string) {
 	m.mu.Lock()
 	cleanURL := strings.TrimSpace(baseURL)
@@ -973,11 +989,11 @@ func (m *Manager) ResetToDefaults() {
 	m.cfg.CompactionThreshold = 100
 	m.cfg.SimilarityThreshold = 0.60
 	m.cfg.Embedding.Enabled = false
-	m.cfg.Embedding.Provider = "openai"
-	m.cfg.Embedding.Model = "text-embedding-3-small"
+	m.cfg.Embedding.Provider = "gemini"
+	m.cfg.Embedding.Model = "gemini-embedding-001"
 	m.cfg.Embedding.BaseURL = ""
 	m.cfg.Embedding.APIKey = ""
-	m.cfg.Embedding.Dimensions = 1536
+	m.cfg.Embedding.Dimensions = 768
 	m.cfg.EmbeddingSource = m.cfg.Embedding
 	m.embedder = NewEmbedder(m.cfg.Embedding, m.db)
 	if m.extractor != nil {
@@ -985,6 +1001,21 @@ func (m *Manager) ResetToDefaults() {
 	}
 	m.mu.Unlock()
 	m.persistConfig()
+}
+
+// FetchAvailableEmbeddingModels retrieves detected Gemini embedding models from Google API
+func (m *Manager) FetchAvailableEmbeddingModels(ctx context.Context) ([]GeminiModelDetails, error) {
+	if m == nil {
+		return nil, fmt.Errorf("memory manager is nil")
+	}
+	m.mu.RLock()
+	emb := m.embedder
+	m.mu.RUnlock()
+
+	if emb == nil {
+		return nil, fmt.Errorf("embedder belum diinisialisasi")
+	}
+	return emb.FetchAvailableEmbeddingModels(ctx)
 }
 
 // TestEmbedding runs a diagnostic test to verify embedding provider connectivity

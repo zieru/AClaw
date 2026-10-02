@@ -50,6 +50,16 @@ func (m *mockEmbedder) ResolveAPIKey() (string, string) {
 	return "mock-key", "mock"
 }
 
+func (m *mockEmbedder) FetchAvailableEmbeddingModels(ctx context.Context) ([]GeminiModelDetails, error) {
+	return []GeminiModelDetails{
+		{
+			Name:                       "models/gemini-embedding-001",
+			DisplayName:                "Gemini Embedding 001",
+			SupportedGenerationMethods: []string{"embedContent"},
+		},
+	}, nil
+}
+
 func TestEmbedderCosineSimilarity(t *testing.T) {
 	v1 := []float32{1.0, 0.0, 0.0}
 	v2 := []float32{1.0, 0.0, 0.0}
@@ -486,7 +496,7 @@ func TestMemoryConfigPersistenceAndSetters(t *testing.T) {
 		t.Errorf("expected SimilarityThreshold=0.75 restored, got %f", mgr2.GetSimilarityThreshold())
 	}
 	embCfg := mgr2.GetConfig().GetEmbeddingConfig()
-	if embCfg.Provider != "gemini" || embCfg.Model != "text-embedding-004" || embCfg.Dimensions != 768 {
+	if embCfg.Provider != "gemini" || embCfg.Model != "gemini-embedding-001" || embCfg.Dimensions != 768 {
 		t.Errorf("expected embedding config restored, got %+v", embCfg)
 	}
 

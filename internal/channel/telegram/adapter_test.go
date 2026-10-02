@@ -163,10 +163,10 @@ func TestTelegramMemorySubmenus(t *testing.T) {
 
 	// 8. Model Picker
 	pickerTxt, pickerMarkup := adapter.renderModelPicker()
-	if !strings.Contains(pickerTxt, "PILIH PRESET MODEL EMBEDDING REMOTE") {
+	if !strings.Contains(pickerTxt, "DETEKSI MODEL EMBEDDING GOOGLE RESMI") {
 		t.Fatalf("unexpected model picker text: %s", pickerTxt)
 	}
-	if pickerMarkup == nil || len(pickerMarkup.InlineKeyboard) < 4 {
-		t.Fatalf("expected at least 4 rows in model picker markup")
+	if pickerMarkup == nil || len(pickerMarkup.InlineKeyboard) < 1 {
+		t.Fatalf("expected at least 1 row in model picker markup")
 	}
 }

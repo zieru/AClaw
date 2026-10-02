@@ -92,7 +92,7 @@ func (ui *MemoryUI) HandleMemory(c tele.Context) error {
 				"Ubah dengan: <code>/memory model &lt;nama_model&gt;</code>\n\n"+
 				"Contoh populer:\n"+
 				"• <code>/memory model text-embedding-3-small</code> (OpenAI)\n"+
-				"• <code>/memory model text-embedding-004</code> (Gemini)\n"+
+				"• <code>/memory model gemini-embedding-001</code> (Gemini)\n"+
 				"• <code>/memory model nomic-embed-text</code> (Ollama)\n"+
 				"• <code>/memory model mxbai-embed-large</code> (Ollama)",
 				html.EscapeString(currModel), html.EscapeString(emb.Provider)), tele.ModeHTML)
@@ -618,24 +618,19 @@ func (ui *MemoryUI) RenderMemoryEmbeddingMenu(userID string) (string, *tele.Repl
 
 	text := fmt.Sprintf("🔌 <b>PENGATURAN REMOTE VECTOR EMBEDDING</b>\n\n"+
 		"• <b>Status:</b> %s\n"+
-		"• <b>Provider:</b> <code>%s</code>\n"+
-		"• <b>Model:</b> <code>%s</code>\n"+
+		"• <b>Provider:</b> <code>Google Gemini</code> (Eksklusif)\n"+
+		"• <b>Model Aktif:</b> <code>%s</code>\n"+
 		"• <b>Dimensi Vektor:</b> <code>%d dims</code>\n"+
 		"• <b>Similarity Threshold:</b> <code>%.2f</code> (Cosine)\n"+
 		"• <b>Base URL:</b> <code>%s</code>\n"+
 		"• <b>Sumber API Key:</b> %s\n\n"+
-		"<i>Vektor embedding digunakan untuk strategi pencarian Semantic dan Hybrid.</i>",
-		embTag, html.EscapeString(emb.Provider), html.EscapeString(modelStr),
+		"<i>Vektor embedding digunakan untuk pencarian memori berbasis makna (Semantic & Hybrid).</i>",
+		embTag, html.EscapeString(modelStr),
 		emb.Dimensions, cfg.SimilarityThreshold, html.EscapeString(baseStr), keyInfo)
 
 	menu := &tele.ReplyMarkup{}
 	btnToggle := menu.Data(embTag, "mem_toggle_embed")
-	btnPickModel := menu.Data("🤖 Pilih Model Preset", "mem_menu_models")
-
-	btnOAI := menu.Data(fmt.Sprintf("%s OpenAI", checkMemMark(emb.Provider == "openai")), "mem_prov_openai")
-	btnGem := menu.Data(fmt.Sprintf("%s Gemini", checkMemMark(emb.Provider == "gemini")), "mem_prov_gemini")
-	btnOll := menu.Data(fmt.Sprintf("%s Ollama", checkMemMark(emb.Provider == "ollama")), "mem_prov_ollama")
-	btnCust := menu.Data(fmt.Sprintf("%s Custom", checkMemMark(emb.Provider == "custom")), "mem_prov_custom")
+	btnPickModel := menu.Data("🤖 Deteksi & Pilih Model Google", "mem_menu_models")
 
 	btnDim768 := menu.Data(fmt.Sprintf("%s 768 Dims", checkMemMark(emb.Dimensions == 768)), "mem_dims_768")
 	btnDim1536 := menu.Data(fmt.Sprintf("%s 1536 Dims", checkMemMark(emb.Dimensions == 1536)), "mem_dims_1536")
@@ -646,12 +641,11 @@ func (ui *MemoryUI) RenderMemoryEmbeddingMenu(userID string) (string, *tele.Repl
 	btnSim70 := menu.Data(fmt.Sprintf("%s 0.70", checkMemMark(cfg.SimilarityThreshold == 0.70)), "mem_sim_70")
 	btnSim80 := menu.Data(fmt.Sprintf("%s 0.80", checkMemMark(cfg.SimilarityThreshold == 0.80)), "mem_sim_80")
 
-	btnTestEmbed := menu.Data("🧪 Uji Koneksi Embedding", "mem_test_embed")
+	btnTestEmbed := menu.Data("🧪 Uji Koneksi & Deteksi Model", "mem_test_embed")
 	btnBack := menu.Data("🔙 Kembali ke Dashboard", "mem_refresh")
 
 	menu.Inline(
 		menu.Row(btnToggle, btnPickModel),
-		menu.Row(btnOAI, btnGem, btnOll, btnCust),
 		menu.Row(btnDim768, btnDim1536, btnDim3072),
 		menu.Row(btnSim50, btnSim60, btnSim70, btnSim80),
 		menu.Row(btnTestEmbed),
@@ -689,33 +683,62 @@ func (ui *MemoryUI) RenderMemoryDataMenu(userID string) (string, *tele.ReplyMark
 }
 
 func (ui *MemoryUI) RenderModelPicker() (string, *tele.ReplyMarkup) {
-	text := "🤖 <b>PILIH PRESET MODEL EMBEDDING REMOTE</b>\n\n" +
-		"Pilih salah satu model embedding yang didukung:\n\n" +
-		"1. <b>OpenAI text-embedding-3-small</b> (1536 dimensi, akurat & cepat)\n" +
-		"2. <b>Google Gemini text-embedding-004</b> (768 dimensi)\n" +
-		"3. <b>Ollama nomic-embed-text</b> (768 dimensi, lokal :11434)\n" +
-		"4. <b>Ollama mxbai-embed-large</b> (1024 dimensi, lokal :11434)\n\n" +
-		"<i>Atau gunakan perintah teks:</i>\n" +
-		"<code>/memory model &lt;nama_model&gt;</code>\n" +
-		"<code>/memory provider &lt;provider&gt;</code>\n" +
-		"<code>/memory baseurl &lt;url&gt;</code>"
-
 	menu := &tele.ReplyMarkup{}
-	btnOAI := menu.Data("OpenAI text-embedding-3-small", "mem_set_model_openai_text-embedding-3-small")
-	btnGemini := menu.Data("Gemini text-embedding-004", "mem_set_model_gemini_text-embedding-004")
-	btnNomic := menu.Data("Ollama nomic-embed-text", "mem_set_model_ollama_nomic-embed-text")
-	btnMxbai := menu.Data("Ollama mxbai-embed-large", "mem_set_model_ollama_mxbai-embed-large")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	models, err := ui.memoryManager.FetchAvailableEmbeddingModels(ctx)
+
+	var sb strings.Builder
+	sb.WriteString("🤖 <b>DETEKSI MODEL EMBEDDING GOOGLE RESMI</b>\n\n")
+
+	if err != nil || len(models) == 0 {
+		errMsg := "Tidak dapat mendeteksi model live dari Google API"
+		if err != nil {
+			errMsg = err.Error()
+		}
+		sb.WriteString("⚠️ <i>Gagal mendeteksi model otomatis dari endpoint Google:</i>\n")
+		sb.WriteString(fmt.Sprintf("<code>%s</code>\n\n", html.EscapeString(errMsg)))
+		sb.WriteString("💡 <b>Pilihan Model Standar:</b>\n")
+		sb.WriteString("• <b>gemini-embedding-001</b> (Rekomendasi resmi Google AI Studio)\n\n")
+		sb.WriteString("<i>Pastikan API Key Google AI Studio telah disetel via:</i>\n")
+		sb.WriteString("<code>/memory key &lt;AIzaSy...&gt;</code>")
+
+		btnDefault := menu.Data("Gemini gemini-embedding-001", "mem_set_model_gemini_gemini-embedding-001")
+		btnBack := menu.Data("🔙 Kembali ke Menu Embedding", "mem_menu_embedding")
+		menu.Inline(
+			menu.Row(btnDefault),
+			menu.Row(btnBack),
+		)
+		return sb.String(), menu
+	}
+
+	sb.WriteString(fmt.Sprintf("Ditemukan <b>%d model</b> dengan kapabilitas <code>embedContent</code> langsung dari endpoint Google:\n\n", len(models)))
+
+	var rows []tele.Row
+	for i, m := range models {
+		cleanName := strings.TrimPrefix(m.Name, "models/")
+		sb.WriteString(fmt.Sprintf("<b>%d.</b> <code>%s</code>\n   <i>%s</i>\n\n",
+			i+1, html.EscapeString(cleanName), html.EscapeString(m.DisplayName)))
+
+		btnLabel := cleanName
+		if m.DisplayName != "" && m.DisplayName != cleanName {
+			btnLabel = fmt.Sprintf("%s (%s)", m.DisplayName, cleanName)
+		}
+		if len(btnLabel) > 35 {
+			btnLabel = cleanName
+		}
+		btn := menu.Data(btnLabel, "mem_set_model_gemini_"+cleanName)
+		rows = append(rows, menu.Row(btn))
+	}
+
+	sb.WriteString("<i>Klik tombol model di bawah untuk mengaktifkannya:</i>")
 	btnBack := menu.Data("🔙 Kembali ke Menu Embedding", "mem_menu_embedding")
+	rows = append(rows, menu.Row(btnBack))
 
-	menu.Inline(
-		menu.Row(btnOAI),
-		menu.Row(btnGemini),
-		menu.Row(btnNomic),
-		menu.Row(btnMxbai),
-		menu.Row(btnBack),
-	)
-
-	return text, menu
+	menu.Inline(rows...)
+	return sb.String(), menu
 }
 
 func checkMemMark(active bool) string {
@@ -748,30 +771,33 @@ func formatAdminEmbeddingDiagnosticReport(res *memory.EmbedTestResult, err error
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("%s <b>HASIL DIAGNOSTIK KONEKSI EMBEDDING (%s):</b>\n\n", statusIcon, statusText))
-	sb.WriteString(fmt.Sprintf("• <b>Provider:</b> <code>%s</code>\n", html.EscapeString(res.Provider)))
-	sb.WriteString(fmt.Sprintf("• <b>Model:</b> <code>%s</code>\n", html.EscapeString(res.Model)))
+	sb.WriteString(fmt.Sprintf("• <b>Provider:</b> <code>%s</code> (Google AI Studio)\n", html.EscapeString(res.Provider)))
+	sb.WriteString(fmt.Sprintf("• <b>Model Aktif:</b> <code>%s</code>\n", html.EscapeString(res.Model)))
 	sb.WriteString(fmt.Sprintf("• <b>Sumber Key:</b> <code>%s</code>\n", html.EscapeString(res.KeySource)))
 	sb.WriteString(fmt.Sprintf("• <b>Endpoint:</b> <code>%s</code>\n", html.EscapeString(res.Endpoint)))
 	sb.WriteString(fmt.Sprintf("• <b>Status HTTP:</b> <code>%d</code>\n", res.StatusCode))
 	sb.WriteString(fmt.Sprintf("• <b>Latency:</b> <code>%s</code>\n", res.Latency.Round(time.Millisecond)))
+
+	if len(res.AvailableModels) > 0 {
+		sb.WriteString(fmt.Sprintf("\n🔍 <b>Model Embedding Terdeteksi Dari Google API (%d model):</b>\n", len(res.AvailableModels)))
+		for _, m := range res.AvailableModels {
+			cleanName := strings.TrimPrefix(m.Name, "models/")
+			sb.WriteString(fmt.Sprintf("  • <code>%s</code> (%s)\n", html.EscapeString(cleanName), html.EscapeString(m.DisplayName)))
+		}
+	}
+
+	sb.WriteString("\n")
 	if res.Success {
 		sb.WriteString(fmt.Sprintf("• <b>Dimensi Vektor Dihasilkan:</b> <code>%d dims</code>\n\n", res.Dimensions))
 		sb.WriteString(fmt.Sprintf("✅ <i>%s</i>", html.EscapeString(msgText)))
 	} else {
 		sb.WriteString(fmt.Sprintf("• <b>Detail Masalah:</b>\n  <code>%s</code>\n\n", html.EscapeString(msgText)))
 		sb.WriteString("💡 <b>Tips & Solusi:</b>\n")
-		if strings.EqualFold(res.Provider, "gemini") {
-			sb.WriteString("• Model Gemini (seperti <code>text-embedding-004</code>) membutuhkan Google AI Studio API Key resmi (diawali <code>AIzaSy...</code>).\n")
-			sb.WriteString("• <i>Catatan:</i> Provider <code>Gemini Web</code> adalah scraper obrolan berbasis cookie browser dan tidak mendukung REST embedding API.\n")
-			sb.WriteString("• Dapatkan API Key gratis di <a href=\"https://aistudio.google.com\">Google AI Studio</a> lalu setel ke bot:\n")
-			sb.WriteString("  <code>/memory key &lt;AIzaSy...&gt;</code>\n")
-		} else if strings.EqualFold(res.Provider, "openai") {
-			sb.WriteString("• Pastikan API Key OpenAI atau OmniRoute valid dan kuota mencukupi.\n")
-			sb.WriteString("  Setel via: <code>/memory key &lt;api_key&gt;</code>\n")
-		} else if strings.EqualFold(res.Provider, "ollama") {
-			sb.WriteString("• Pastikan daemon Ollama aktif di server (default <code>http://localhost:11434/v1</code>) dan model embedding sudah di-pull:\n")
-			sb.WriteString(fmt.Sprintf("  <code>ollama pull %s</code>\n", html.EscapeString(res.Model)))
-		}
+		sb.WriteString("• Model Gemini (seperti <code>gemini-embedding-001</code>) membutuhkan Google AI Studio API Key resmi (diawali <code>AIzaSy...</code>).\n")
+		sb.WriteString("• <i>Catatan:</i> Model lama <code>text-embedding-004</code> telah dihentikan (shut down) oleh Google pada 14 Januari 2026 dan otomatis dialihkan ke <code>gemini-embedding-001</code>.\n")
+		sb.WriteString("• <i>Catatan:</i> Provider <code>Gemini Web</code> adalah scraper obrolan berbasis cookie browser dan tidak mendukung REST embedding API.\n")
+		sb.WriteString("• Dapatkan API Key gratis di <a href=\"https://aistudio.google.com\">Google AI Studio</a> lalu setel ke bot:\n")
+		sb.WriteString("  <code>/memory key &lt;AIzaSy...&gt;</code>\n")
 	}
 
 	return sb.String()
@@ -784,6 +810,20 @@ func (ui *MemoryUI) HandleCallback(c tele.Context, data string) error {
 		return nil
 	}
 	userID := strconv.FormatInt(c.Sender().ID, 10)
+
+	// Dynamic Gemini Model Selection Callback
+	if strings.HasPrefix(data, "mem_set_model_gemini_") {
+		modelName := strings.TrimPrefix(data, "mem_set_model_gemini_")
+		if modelName == "text-embedding-004" {
+			modelName = "gemini-embedding-001"
+		}
+		ui.memoryManager.SetEmbeddingProvider("gemini")
+		ui.memoryManager.SetEmbeddingModel(modelName)
+		ui.memoryManager.SetEmbeddingEnabled(true)
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("✅ Model: %s", modelName)})
+		text, menu := ui.RenderMemoryEmbeddingMenu(userID)
+		return c.EditOrSend(text, menu, tele.ModeHTML)
+	}
 
 	switch data {
 	// Navigation Callbacks
@@ -1055,27 +1095,9 @@ func (ui *MemoryUI) HandleCallback(c tele.Context, data string) error {
 		text, menu := ui.RenderMemoryEmbeddingMenu(userID)
 		return c.EditOrSend(text, menu, tele.ModeHTML)
 
-	case "mem_prov_openai":
-		ui.memoryManager.SetEmbeddingProvider("openai")
-		_ = c.Respond(&tele.CallbackResponse{Text: "Provider: OpenAI"})
-		text, menu := ui.RenderMemoryEmbeddingMenu(userID)
-		return c.EditOrSend(text, menu, tele.ModeHTML)
-
-	case "mem_prov_gemini":
+	case "mem_prov_gemini", "mem_prov_openai", "mem_prov_ollama", "mem_prov_custom":
 		ui.memoryManager.SetEmbeddingProvider("gemini")
-		_ = c.Respond(&tele.CallbackResponse{Text: "Provider: Gemini"})
-		text, menu := ui.RenderMemoryEmbeddingMenu(userID)
-		return c.EditOrSend(text, menu, tele.ModeHTML)
-
-	case "mem_prov_ollama":
-		ui.memoryManager.SetEmbeddingProvider("ollama")
-		_ = c.Respond(&tele.CallbackResponse{Text: "Provider: Ollama"})
-		text, menu := ui.RenderMemoryEmbeddingMenu(userID)
-		return c.EditOrSend(text, menu, tele.ModeHTML)
-
-	case "mem_prov_custom":
-		ui.memoryManager.SetEmbeddingProvider("custom")
-		_ = c.Respond(&tele.CallbackResponse{Text: "Provider: Custom"})
+		_ = c.Respond(&tele.CallbackResponse{Text: "Provider eksklusif Google Gemini"})
 		text, menu := ui.RenderMemoryEmbeddingMenu(userID)
 		return c.EditOrSend(text, menu, tele.ModeHTML)
 
@@ -1121,47 +1143,8 @@ func (ui *MemoryUI) HandleCallback(c tele.Context, data string) error {
 		text, menu := ui.RenderMemoryEmbeddingMenu(userID)
 		return c.EditOrSend(text, menu, tele.ModeHTML)
 
-	// Preset Embedding Models
-	case "mem_set_model_openai_text-embedding-3-small":
-		ui.memoryManager.SetEmbeddingProvider("openai")
-		ui.memoryManager.SetEmbeddingModel("text-embedding-3-small")
-		ui.memoryManager.SetEmbeddingDimensions(1536)
-		ui.memoryManager.SetEmbeddingEnabled(true)
-		_ = c.Respond(&tele.CallbackResponse{Text: "✅ OpenAI text-embedding-3-small"})
-		text, menu := ui.RenderMemoryEmbeddingMenu(userID)
-		return c.EditOrSend(text, menu, tele.ModeHTML)
-
-	case "mem_set_model_gemini_text-embedding-004":
-		ui.memoryManager.SetEmbeddingProvider("gemini")
-		ui.memoryManager.SetEmbeddingModel("text-embedding-004")
-		ui.memoryManager.SetEmbeddingDimensions(768)
-		ui.memoryManager.SetEmbeddingEnabled(true)
-		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Gemini text-embedding-004"})
-		text, menu := ui.RenderMemoryEmbeddingMenu(userID)
-		return c.EditOrSend(text, menu, tele.ModeHTML)
-
-	case "mem_set_model_ollama_nomic-embed-text":
-		ui.memoryManager.SetEmbeddingProvider("ollama")
-		ui.memoryManager.SetEmbeddingModel("nomic-embed-text")
-		ui.memoryManager.SetEmbeddingDimensions(768)
-		ui.memoryManager.SetEmbeddingBaseURL("http://localhost:11434/v1")
-		ui.memoryManager.SetEmbeddingEnabled(true)
-		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Ollama nomic-embed-text"})
-		text, menu := ui.RenderMemoryEmbeddingMenu(userID)
-		return c.EditOrSend(text, menu, tele.ModeHTML)
-
-	case "mem_set_model_ollama_mxbai-embed-large":
-		ui.memoryManager.SetEmbeddingProvider("ollama")
-		ui.memoryManager.SetEmbeddingModel("mxbai-embed-large")
-		ui.memoryManager.SetEmbeddingDimensions(1024)
-		ui.memoryManager.SetEmbeddingBaseURL("http://localhost:11434/v1")
-		ui.memoryManager.SetEmbeddingEnabled(true)
-		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Ollama mxbai-embed-large"})
-		text, menu := ui.RenderMemoryEmbeddingMenu(userID)
-		return c.EditOrSend(text, menu, tele.ModeHTML)
-
 	case "mem_test_embed":
-		_ = c.Respond(&tele.CallbackResponse{Text: "🧪 Menguji koneksi embedding..."})
+		_ = c.Respond(&tele.CallbackResponse{Text: "🧪 Menguji koneksi & deteksi model..."})
 		res, err := ui.memoryManager.TestEmbedding(context.Background())
 		return c.Send(formatAdminEmbeddingDiagnosticReport(res, err), tele.ModeHTML)
 
