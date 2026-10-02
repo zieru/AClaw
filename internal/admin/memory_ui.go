@@ -346,32 +346,7 @@ func (ui *MemoryUI) HandleMemory(c tele.Context) error {
 	case "test", "testembed", "checkembed":
 		_ = c.Send("🧪 <i>Menguji koneksi vektor embedding ke provider... Mohon tunggu.</i>", tele.ModeHTML)
 		res, err := ui.memoryManager.TestEmbedding(context.Background())
-		if err != nil {
-			return c.Send(fmt.Sprintf("❌ <b>Uji Koneksi Gagal!</b>\n\n<b>Error:</b> <code>%v</code>", html.EscapeString(err.Error())), tele.ModeHTML)
-		}
-		statusIcon := "🟢"
-		if !res.Success {
-			statusIcon = "🔴"
-		}
-		msg := fmt.Sprintf("%s <b>HASIL DIAGNOSTIK KONEKSI EMBEDDING:</b>\n\n"+
-			"• <b>Provider:</b> <code>%s</code>\n"+
-			"• <b>Model:</b> <code>%s</code>\n"+
-			"• <b>Sumber Key:</b> <code>%s</code>\n"+
-			"• <b>Endpoint:</b> <code>%s</code>\n"+
-			"• <b>Status HTTP:</b> <code>%d</code>\n"+
-			"• <b>Latency:</b> <code>%s</code>\n"+
-			"• <b>Dimensi Vektor Dihasilkan:</b> <code>%d dims</code>\n"+
-			"• <b>Pesan:</b> %s",
-			statusIcon,
-			html.EscapeString(res.Provider),
-			html.EscapeString(res.Model),
-			html.EscapeString(res.KeySource),
-			html.EscapeString(res.Endpoint),
-			res.StatusCode,
-			res.Latency.Round(time.Millisecond),
-			res.Dimensions,
-			html.EscapeString(res.Message))
-		return c.Send(msg, tele.ModeHTML)
+		return c.Send(formatAdminEmbeddingDiagnosticReport(res, err), tele.ModeHTML)
 
 	case "reset":
 		ui.memoryManager.ResetToDefaults()
@@ -748,6 +723,58 @@ func checkMemMark(active bool) string {
 		return "✅"
 	}
 	return "🔘"
+}
+
+func formatAdminEmbeddingDiagnosticReport(res *memory.EmbedTestResult, err error) string {
+	if res == nil {
+		errStr := "Terjadi kesalahan internal"
+		if err != nil {
+			errStr = err.Error()
+		}
+		return fmt.Sprintf("❌ <b>Uji Koneksi Gagal!</b>\n\n<b>Error:</b> <code>%s</code>", html.EscapeString(errStr))
+	}
+
+	statusIcon := "🟢"
+	statusText := "BERHASIL TERHUBUNG"
+	if !res.Success || err != nil {
+		statusIcon = "🔴"
+		statusText = "KONEKSI GAGAL"
+	}
+
+	msgText := res.Message
+	if msgText == "" && err != nil {
+		msgText = err.Error()
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%s <b>HASIL DIAGNOSTIK KONEKSI EMBEDDING (%s):</b>\n\n", statusIcon, statusText))
+	sb.WriteString(fmt.Sprintf("• <b>Provider:</b> <code>%s</code>\n", html.EscapeString(res.Provider)))
+	sb.WriteString(fmt.Sprintf("• <b>Model:</b> <code>%s</code>\n", html.EscapeString(res.Model)))
+	sb.WriteString(fmt.Sprintf("• <b>Sumber Key:</b> <code>%s</code>\n", html.EscapeString(res.KeySource)))
+	sb.WriteString(fmt.Sprintf("• <b>Endpoint:</b> <code>%s</code>\n", html.EscapeString(res.Endpoint)))
+	sb.WriteString(fmt.Sprintf("• <b>Status HTTP:</b> <code>%d</code>\n", res.StatusCode))
+	sb.WriteString(fmt.Sprintf("• <b>Latency:</b> <code>%s</code>\n", res.Latency.Round(time.Millisecond)))
+	if res.Success {
+		sb.WriteString(fmt.Sprintf("• <b>Dimensi Vektor Dihasilkan:</b> <code>%d dims</code>\n\n", res.Dimensions))
+		sb.WriteString(fmt.Sprintf("✅ <i>%s</i>", html.EscapeString(msgText)))
+	} else {
+		sb.WriteString(fmt.Sprintf("• <b>Detail Masalah:</b>\n  <code>%s</code>\n\n", html.EscapeString(msgText)))
+		sb.WriteString("💡 <b>Tips & Solusi:</b>\n")
+		if strings.EqualFold(res.Provider, "gemini") {
+			sb.WriteString("• Model Gemini (seperti <code>text-embedding-004</code>) membutuhkan Google AI Studio API Key resmi (diawali <code>AIzaSy...</code>).\n")
+			sb.WriteString("• <i>Catatan:</i> Provider <code>Gemini Web</code> adalah scraper obrolan berbasis cookie browser dan tidak mendukung REST embedding API.\n")
+			sb.WriteString("• Dapatkan API Key gratis di <a href=\"https://aistudio.google.com\">Google AI Studio</a> lalu setel ke bot:\n")
+			sb.WriteString("  <code>/memory key &lt;AIzaSy...&gt;</code>\n")
+		} else if strings.EqualFold(res.Provider, "openai") {
+			sb.WriteString("• Pastikan API Key OpenAI atau OmniRoute valid dan kuota mencukupi.\n")
+			sb.WriteString("  Setel via: <code>/memory key &lt;api_key&gt;</code>\n")
+		} else if strings.EqualFold(res.Provider, "ollama") {
+			sb.WriteString("• Pastikan daemon Ollama aktif di server (default <code>http://localhost:11434/v1</code>) dan model embedding sudah di-pull:\n")
+			sb.WriteString(fmt.Sprintf("  <code>ollama pull %s</code>\n", html.EscapeString(res.Model)))
+		}
+	}
+
+	return sb.String()
 }
 
 // HandleCallback handles all inline callback queries with prefix `mem_`
@@ -1136,32 +1163,7 @@ func (ui *MemoryUI) HandleCallback(c tele.Context, data string) error {
 	case "mem_test_embed":
 		_ = c.Respond(&tele.CallbackResponse{Text: "🧪 Menguji koneksi embedding..."})
 		res, err := ui.memoryManager.TestEmbedding(context.Background())
-		if err != nil {
-			return c.Send(fmt.Sprintf("❌ <b>Uji Koneksi Gagal!</b>\n\n<b>Error:</b> <code>%v</code>", html.EscapeString(err.Error())), tele.ModeHTML)
-		}
-		statusIcon := "🟢"
-		if !res.Success {
-			statusIcon = "🔴"
-		}
-		msg := fmt.Sprintf("%s <b>HASIL DIAGNOSTIK KONEKSI EMBEDDING:</b>\n\n"+
-			"• <b>Provider:</b> <code>%s</code>\n"+
-			"• <b>Model:</b> <code>%s</code>\n"+
-			"• <b>Sumber Key:</b> <code>%s</code>\n"+
-			"• <b>Endpoint:</b> <code>%s</code>\n"+
-			"• <b>Status HTTP:</b> <code>%d</code>\n"+
-			"• <b>Latency:</b> <code>%s</code>\n"+
-			"• <b>Dimensi Vektor Dihasilkan:</b> <code>%d dims</code>\n"+
-			"• <b>Pesan:</b> %s",
-			statusIcon,
-			html.EscapeString(res.Provider),
-			html.EscapeString(res.Model),
-			html.EscapeString(res.KeySource),
-			html.EscapeString(res.Endpoint),
-			res.StatusCode,
-			res.Latency.Round(time.Millisecond),
-			res.Dimensions,
-			html.EscapeString(res.Message))
-		return c.Send(msg, tele.ModeHTML)
+		return c.Send(formatAdminEmbeddingDiagnosticReport(res, err), tele.ModeHTML)
 
 	// Data Management Callbacks
 	case "mem_list_now":

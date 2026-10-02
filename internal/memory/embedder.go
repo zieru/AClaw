@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -73,6 +74,27 @@ func (e *ClientEmbedder) Dimensions() int {
 	return e.cfg.Dimensions
 }
 
+func isCookieOrInvalidKey(k string) bool {
+	k = strings.TrimSpace(k)
+	if k == "" {
+		return true
+	}
+	if strings.HasPrefix(k, "__Secure-") || strings.HasPrefix(k, "SAPISID") || strings.HasPrefix(k, "SSID") {
+		return true
+	}
+	if strings.Contains(k, ";") || strings.Contains(k, "=") {
+		return true
+	}
+	return false
+}
+
+func truncateKey(k string) string {
+	if len(k) <= 8 {
+		return k
+	}
+	return k[:4] + "..." + k[len(k)-4:]
+}
+
 // ResolveAPIKey determines the API key to use and describes its source
 func (e *ClientEmbedder) ResolveAPIKey() (string, string) {
 	if e == nil {
@@ -80,7 +102,11 @@ func (e *ClientEmbedder) ResolveAPIKey() (string, string) {
 	}
 	// 1. Explicitly configured API Key in memory settings
 	if strings.TrimSpace(e.cfg.APIKey) != "" {
-		return strings.TrimSpace(e.cfg.APIKey), "Pengaturan Memory Manual"
+		manualKey := strings.TrimSpace(e.cfg.APIKey)
+		if isCookieOrInvalidKey(manualKey) {
+			return manualKey, "Kunci Manual (Peringatan: Berupa cookie web, bukan API key resmi)"
+		}
+		return manualKey, "Pengaturan Memory Manual"
 	}
 
 	targetProv := strings.ToLower(strings.TrimSpace(e.cfg.Provider))
@@ -88,18 +114,51 @@ func (e *ClientEmbedder) ResolveAPIKey() (string, string) {
 		targetProv = "openai"
 	}
 
+	hasGeminiWebOnly := false
+
 	// 2. Query GoAssistant database for an active provider with matching type or name
 	if e.db != nil {
 		if providers, err := e.db.ListProviders(); err == nil {
 			for _, p := range providers {
 				pType := strings.ToLower(strings.TrimSpace(p.Type))
 				pName := strings.ToLower(strings.TrimSpace(p.Name))
-				if (pType == targetProv || pName == targetProv || strings.Contains(pName, targetProv)) && p.IsActive {
-					if len(p.APIKeys) > 0 && strings.TrimSpace(p.APIKeys[0]) != "" {
-						return strings.TrimSpace(p.APIKeys[0]), fmt.Sprintf("Provider Database '%s'", p.Name)
+
+				// Never treat web scrapers as REST embedding providers
+				if pType == "gemini_web" || strings.Contains(pType, "web") || strings.Contains(pType, "scrape") {
+					if targetProv == "gemini" && p.IsActive {
+						hasGeminiWebOnly = true
 					}
-					if strings.TrimSpace(p.APIKey) != "" {
-						return strings.TrimSpace(p.APIKey), fmt.Sprintf("Provider Database '%s'", p.Name)
+					continue
+				}
+
+				isMatch := false
+				if targetProv == "gemini" {
+					if pType == "gemini" {
+						isMatch = true
+					} else if strings.Contains(pName, "gemini") && !strings.Contains(pName, "web") && !strings.Contains(pName, "scrape") {
+						isMatch = true
+					}
+				} else if targetProv == "openai" {
+					if pType == "openai" || pType == "9router" || pType == "custom" {
+						isMatch = true
+					} else if strings.Contains(pName, "openai") {
+						isMatch = true
+					}
+				} else {
+					if pType == targetProv || pName == targetProv {
+						isMatch = true
+					}
+				}
+
+				if isMatch && p.IsActive {
+					key := ""
+					if len(p.APIKeys) > 0 && strings.TrimSpace(p.APIKeys[0]) != "" {
+						key = strings.TrimSpace(p.APIKeys[0])
+					} else if strings.TrimSpace(p.APIKey) != "" {
+						key = strings.TrimSpace(p.APIKey)
+					}
+					if key != "" && !isCookieOrInvalidKey(key) {
+						return key, fmt.Sprintf("Provider Database '%s'", p.Name)
 					}
 				}
 			}
@@ -109,13 +168,17 @@ func (e *ClientEmbedder) ResolveAPIKey() (string, string) {
 	// 3. Fallback to Environment Variables
 	switch targetProv {
 	case "gemini":
-		if envKey := os.Getenv("GEMINI_API_KEY"); envKey != "" {
+		if envKey := os.Getenv("GEMINI_API_KEY"); envKey != "" && !isCookieOrInvalidKey(envKey) {
 			return envKey, "Environment (GEMINI_API_KEY)"
 		}
 	case "openai":
-		if envKey := os.Getenv("OPENAI_API_KEY"); envKey != "" {
+		if envKey := os.Getenv("OPENAI_API_KEY"); envKey != "" && !isCookieOrInvalidKey(envKey) {
 			return envKey, "Environment (OPENAI_API_KEY)"
 		}
+	}
+
+	if targetProv == "gemini" && hasGeminiWebOnly {
+		return "", "Provider 'Gemini Web' adalah web scraper cookie dan tidak mendukung REST Embedding API. Harap setel kunci resmi Google AI Studio via /memory key <api_key> (diawali AIzaSy...)"
 	}
 
 	return "", "Tidak Ditemukan"
@@ -206,7 +269,11 @@ func normalizeGeminiModel(m string) string {
 func (e *ClientEmbedder) embedGemini(ctx context.Context, texts []string) ([][]float32, error) {
 	apiKey, keySource := e.ResolveAPIKey()
 	if apiKey == "" {
-		return nil, fmt.Errorf("API key Gemini tidak ditemukan (%s). Harap isi via /memory key <api_key> atau daftarkan provider Gemini di GoAssistant", keySource)
+		return nil, fmt.Errorf("API key Gemini tidak ditemukan (%s). Harap isi via /memory key <api_key> (diawali AIzaSy...) atau daftarkan provider Gemini resmi", keySource)
+	}
+
+	if isCookieOrInvalidKey(apiKey) {
+		return nil, fmt.Errorf("kunci '%s' terdeteksi sebagai cookie sesi web, bukan Google AI Studio API Key. Harap gunakan kunci resmi (diawali 'AIzaSy...') via /memory key <api_key>", truncateKey(apiKey))
 	}
 
 	baseURL := strings.TrimRight(e.cfg.BaseURL, "/")
@@ -217,7 +284,7 @@ func (e *ClientEmbedder) embedGemini(ctx context.Context, texts []string) ([][]f
 
 	// Single item embedContent
 	if len(texts) == 1 {
-		reqURL := fmt.Sprintf("%s/v1beta/%s:embedContent?key=%s", baseURL, modelWithPrefix, apiKey)
+		reqURL := fmt.Sprintf("%s/v1beta/%s:embedContent?key=%s", baseURL, modelWithPrefix, url.QueryEscape(apiKey))
 		reqBody := geminiEmbedContentRequest{
 			Model: modelWithPrefix,
 			Content: geminiContent{
@@ -235,6 +302,7 @@ func (e *ClientEmbedder) embedGemini(ctx context.Context, texts []string) ([][]f
 			return nil, fmt.Errorf("create gemini request: %w", err)
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("x-goog-api-key", apiKey)
 
 		resp, err := e.httpClient.Do(httpReq)
 		if err != nil {
@@ -244,7 +312,11 @@ func (e *ClientEmbedder) embedGemini(ctx context.Context, texts []string) ([][]f
 
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("gemini embedding error (%d): %s", resp.StatusCode, string(bodyBytes))
+			bodyStr := string(bodyBytes)
+			if strings.Contains(bodyStr, "<html") || strings.Contains(bodyStr, "<!DOCTYPE") {
+				return nil, fmt.Errorf("gemini api error (HTTP %d): Bad Request dari Google Front End (periksa kembali API key Google AI Studio Anda)", resp.StatusCode)
+			}
+			return nil, fmt.Errorf("gemini embedding error (%d): %s", resp.StatusCode, bodyStr)
 		}
 
 		var parsed geminiEmbedContentResponse
@@ -263,7 +335,7 @@ func (e *ClientEmbedder) embedGemini(ctx context.Context, texts []string) ([][]f
 	}
 
 	// Batch embedContents
-	reqURL := fmt.Sprintf("%s/v1beta/%s:batchEmbedContents?key=%s", baseURL, modelWithPrefix, apiKey)
+	reqURL := fmt.Sprintf("%s/v1beta/%s:batchEmbedContents?key=%s", baseURL, modelWithPrefix, url.QueryEscape(apiKey))
 	var batchReq geminiBatchEmbedContentsRequest
 	for _, t := range texts {
 		batchReq.Requests = append(batchReq.Requests, geminiEmbedContentRequest{
@@ -284,6 +356,7 @@ func (e *ClientEmbedder) embedGemini(ctx context.Context, texts []string) ([][]f
 		return nil, fmt.Errorf("create gemini batch request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-goog-api-key", apiKey)
 
 	resp, err := e.httpClient.Do(httpReq)
 	if err != nil {
@@ -293,7 +366,11 @@ func (e *ClientEmbedder) embedGemini(ctx context.Context, texts []string) ([][]f
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("gemini batch embedding error (%d): %s", resp.StatusCode, string(bodyBytes))
+		bodyStr := string(bodyBytes)
+		if strings.Contains(bodyStr, "<html") || strings.Contains(bodyStr, "<!DOCTYPE") {
+			return nil, fmt.Errorf("gemini api error (HTTP %d): Bad Request dari Google Front End (periksa kembali API key Google AI Studio Anda)", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("gemini batch embedding error (%d): %s", resp.StatusCode, bodyStr)
 	}
 
 	var parsed geminiBatchEmbedContentsResponse

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,15 +34,15 @@ func TestResolveAPIKey(t *testing.T) {
 		Enabled:  true,
 		Provider: "gemini",
 		Model:    "text-embedding-004",
-		APIKey:   "manual-gemini-key",
+		APIKey:   "AIzaSyManualTestKey",
 	}
 	emb := NewEmbedder(cfg, db)
 	key, src := emb.ResolveAPIKey()
-	if key != "manual-gemini-key" || src != "Pengaturan Memory Manual" {
+	if key != "AIzaSyManualTestKey" || src != "Pengaturan Memory Manual" {
 		t.Errorf("expected manual key from config, got %s (%s)", key, src)
 	}
 
-	// 2. Fallback to DB provider
+	// 2. Prevent Gemini Web Scraper cookie from being selected as API key
 	cfgNoKey := config.EmbeddingConfig{
 		Enabled:  true,
 		Provider: "gemini",
@@ -49,37 +50,60 @@ func TestResolveAPIKey(t *testing.T) {
 		APIKey:   "",
 	}
 	err := db.SaveProvider(&storage.ProviderRecord{
-		ID:        "p_gemini_1",
-		Name:      "Google Gemini Main",
-		Type:      "gemini",
-		APIKey:    "db-gemini-key-1234",
+		ID:        "p_gemini_web",
+		Name:      "Gemini Web (Google Auth)",
+		Type:      "gemini_web",
+		APIKey:    "__Secure-1PSID=cookie123; __Secure-1PSIDTS=cookie456",
 		IsActive:  true,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	})
 	if err != nil {
-		t.Fatalf("failed to save provider: %v", err)
+		t.Fatalf("failed to save gemini_web provider: %v", err)
+	}
+
+	embWebOnly := NewEmbedder(cfgNoKey, db)
+	keyWeb, srcWeb := embWebOnly.ResolveAPIKey()
+	if keyWeb != "" {
+		t.Errorf("expected empty key when only gemini_web scraper is present, got %s", keyWeb)
+	}
+	if !strings.Contains(srcWeb, "web scraper cookie") {
+		t.Errorf("expected warning about web scraper cookie, got: %s", srcWeb)
+	}
+
+	// 3. Fallback to legitimate DB provider
+	err = db.SaveProvider(&storage.ProviderRecord{
+		ID:        "p_gemini_official",
+		Name:      "Google Gemini Official",
+		Type:      "gemini",
+		APIKey:    "AIzaSyOfficialKey1234",
+		IsActive:  true,
+		CreatedAt: time.Now().Add(time.Second),
+		UpdatedAt: time.Now().Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("failed to save official gemini provider: %v", err)
 	}
 
 	embDB := NewEmbedder(cfgNoKey, db)
 	keyDB, srcDB := embDB.ResolveAPIKey()
-	if keyDB != "db-gemini-key-1234" || srcDB != "Provider Database 'Google Gemini Main'" {
-		t.Errorf("expected key from db provider, got %s (%s)", keyDB, srcDB)
+	if keyDB != "AIzaSyOfficialKey1234" || srcDB != "Provider Database 'Google Gemini Official'" {
+		t.Errorf("expected official key from db provider, got %s (%s)", keyDB, srcDB)
 	}
 
-	// 3. Fallback to Environment variable
+	// 4. Fallback to Environment variable
 	cfgNoKeyOpenAI := config.EmbeddingConfig{
 		Enabled:  true,
 		Provider: "openai",
 		Model:    "text-embedding-3-small",
 		APIKey:   "",
 	}
-	os.Setenv("OPENAI_API_KEY", "env-openai-key-5678")
+	os.Setenv("OPENAI_API_KEY", "sk-proj-env-openai-key-5678")
 	defer os.Unsetenv("OPENAI_API_KEY")
 
 	embEnv := NewEmbedder(cfgNoKeyOpenAI, db)
 	keyEnv, srcEnv := embEnv.ResolveAPIKey()
-	if keyEnv != "env-openai-key-5678" || srcEnv != "Environment (OPENAI_API_KEY)" {
+	if keyEnv != "sk-proj-env-openai-key-5678" || srcEnv != "Environment (OPENAI_API_KEY)" {
 		t.Errorf("expected key from env var, got %s (%s)", keyEnv, srcEnv)
 	}
 }
@@ -87,13 +111,15 @@ func TestResolveAPIKey(t *testing.T) {
 func TestGeminiNativeEmbedding(t *testing.T) {
 	// Mock Gemini API Server
 	var receivedPath string
-	var receivedKey string
+	var receivedQueryKey string
+	var receivedHeaderKey string
 	var singleReq geminiEmbedContentRequest
 	var batchReq geminiBatchEmbedContentsRequest
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
-		receivedKey = r.URL.Query().Get("key")
+		receivedQueryKey = r.URL.Query().Get("key")
+		receivedHeaderKey = r.Header.Get("x-goog-api-key")
 
 		if r.URL.Path == "/v1beta/models/text-embedding-004:embedContent" {
 			_ = json.NewDecoder(r.Body).Decode(&singleReq)
@@ -150,8 +176,11 @@ func TestGeminiNativeEmbedding(t *testing.T) {
 	if receivedPath != "/v1beta/models/text-embedding-004:embedContent" {
 		t.Errorf("unexpected path: %s", receivedPath)
 	}
-	if receivedKey != "secret-gemini-test-key" {
-		t.Errorf("unexpected api key: %s", receivedKey)
+	if receivedQueryKey != "secret-gemini-test-key" {
+		t.Errorf("unexpected query api key: %s", receivedQueryKey)
+	}
+	if receivedHeaderKey != "secret-gemini-test-key" {
+		t.Errorf("unexpected header x-goog-api-key: %s", receivedHeaderKey)
 	}
 	if len(singleReq.Content.Parts) == 0 || singleReq.Content.Parts[0].Text != "Halo dunia" {
 		t.Errorf("unexpected content text: %+v", singleReq.Content)
