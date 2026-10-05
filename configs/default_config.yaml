@@ -88,9 +88,8 @@ mcp_servers:
 
   - name: "browser_use"
     enabled: true
-    transport: "stdio"
-    command: "uv"
-    args: ["run", "--directory", "scripts/browser_use_mcp", "python", "server.py"]
+    transport: "sse"
+    url: "http://127.0.0.1:20129/sse"
     prefix: ""
     env:
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}"

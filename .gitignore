@@ -33,6 +33,10 @@ gocache/
 .env.*
 configs/config.yaml
 *.local.yaml
+session_token.txt
+interact.py
+remote_exec.py
+test_camoufox.py
 
 # IDE & Editor Files
 .idea/
