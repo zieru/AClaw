@@ -11,8 +11,24 @@ from dotenv import load_dotenv
 
 # Muat file .env dari folder project jika ada
 load_dotenv()
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+project_root = os.getenv("PROJECT_ROOT")
+if not project_root:
+    if os.path.exists("/app/data"):
+        project_root = "/app"
+    else:
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 load_dotenv(os.path.join(project_root, ".env"))
+
+def format_attachment_path(local_path: str) -> str:
+    host_data_dir = os.getenv("HOST_DATA_DIR")
+    if host_data_dir:
+        data_root = os.path.join(project_root, "data")
+        try:
+            rel = os.path.relpath(local_path, data_root)
+            return os.path.join(host_data_dir, rel).replace("\\", "/")
+        except Exception:
+            return local_path
+    return local_path
 
 def is_cdp_available(host: str = "127.0.0.1", port: int = 9222, timeout: float = 0.5) -> bool:
     """Cek apakah headless Chromium di Docker/CDP aktif dan siap menerima koneksi"""
@@ -33,9 +49,7 @@ try:
 except ImportError:
     _STEALTH_AVAILABLE = False
 
-mcp_host = os.getenv("MCP_HOST", "0.0.0.0")
-mcp_port = int(os.getenv("MCP_PORT", "20129"))
-mcp = FastMCP("browser-use-server", host=mcp_host, port=mcp_port)
+mcp = FastMCP("browser-use-server")
 
 def get_db_providers():
     """Mengambil provider aktif dari database SQLite goassistant.db"""
@@ -791,7 +805,8 @@ PENTING:
             try:
                 await page.screenshot(path=screenshot_path, full_page=False)
                 if os.path.exists(screenshot_path):
-                    attachment_tag = f"\n\n[ATTACH_FILE:{screenshot_path}|CAPTION:Tangkapan Layar Camoufox Stealth ({page.url})]"
+                    reported_shot = format_attachment_path(screenshot_path)
+                    attachment_tag = f"\n\n[ATTACH_FILE:{reported_shot}|CAPTION:Tangkapan Layar Camoufox Stealth ({page.url})]"
             except Exception:
                 pass
 
@@ -1045,9 +1060,11 @@ async def browser(
                     dest_path = os.path.join(screenshot_dir, f"browser_use_{timestamp}.png")
                     try:
                         shutil.copy2(last_shot, dest_path)
-                        attachment_tag = f"\n\n[ATTACH_FILE:{dest_path}|CAPTION:Tangkapan Layar Hasil Browser-Use ({model})]"
+                        reported_dest = format_attachment_path(dest_path)
+                        attachment_tag = f"\n\n[ATTACH_FILE:{reported_dest}|CAPTION:Tangkapan Layar Hasil Browser-Use ({model})]"
                     except Exception:
-                        attachment_tag = f"\n\n[ATTACH_FILE:{last_shot}|CAPTION:Tangkapan Layar Hasil Browser-Use ({model})]"
+                        reported_shot = format_attachment_path(last_shot)
+                        attachment_tag = f"\n\n[ATTACH_FILE:{reported_shot}|CAPTION:Tangkapan Layar Hasil Browser-Use ({model})]"
                 
         mode_str = "Vision" if vision_enabled else "Text-DOM (DeepSeek Mode)"
         if is_blocked and not is_camoufox_ready():
@@ -1059,7 +1076,4 @@ async def browser(
         return f"❌ Gagal menjalankan tugas browser-use: {err}"
 
 if __name__ == "__main__":
-    transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
-    if len(sys.argv) > 1 and sys.argv[1].lower() in ["stdio", "sse"]:
-        transport = sys.argv[1].lower()
-    mcp.run(transport=transport)
+    mcp.run(transport="stdio")

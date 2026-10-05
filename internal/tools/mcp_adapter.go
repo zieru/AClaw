@@ -251,7 +251,10 @@ func (m *MCPManager) StartAndRegister(ctx context.Context, reg *Registry) error 
 				log.Printf("⚠️ [MCP] URL kosong untuk SSE server '%s', dilewati", srvCfg.Name)
 				continue
 			}
-			sseTrans, err := transport.NewSSE(srvCfg.URL)
+			sseTrans, err := transport.NewSSE(
+				srvCfg.URL,
+				transport.WithResponseTimeout(5*time.Minute),
+			)
 			if err != nil {
 				log.Printf("⚠️ [MCP] Gagal inisialisasi SSE transport '%s': %v", srvCfg.Name, err)
 				continue

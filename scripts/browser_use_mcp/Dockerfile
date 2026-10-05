@@ -4,7 +4,9 @@ ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
     MCP_TRANSPORT=sse \
     MCP_HOST=0.0.0.0 \
-    MCP_PORT=20129
+    MCP_PORT=20129 \
+    PROJECT_ROOT=/app \
+    HOST_DATA_DIR=/home/zieru/AClaw/data
 
 WORKDIR /app
 
@@ -34,16 +36,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv from official binary
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Install uv and uvx from official binary
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 # Copy project dependency files and source
 COPY pyproject.toml README.md server.py ./
 
-# Sync dependencies and fetch Camoufox browser binary
+# Sync dependencies, install geoip, fetch Camoufox & Playwright Chromium
 RUN uv sync --no-install-project && \
-    uv add camoufox && \
-    uv run python -m camoufox fetch
+    uv add "camoufox[geoip]" && \
+    uv run python -m camoufox fetch && \
+    uv run playwright install chromium
 
 EXPOSE 20129
 
