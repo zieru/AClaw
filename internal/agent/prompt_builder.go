@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"goassistant/internal/sysenv"
 	"goassistant/internal/tools"
 )
 
@@ -161,6 +162,10 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 	sb.WriteString(fmt.Sprintf("- Current Time: %s\n", time.Now().Format("Monday, 02 January 2006 15:04:05 MST")))
 	sb.WriteString("\n")
 
+	// Injected Host System Environment (dynamic detection of OS, privilege tools, package managers, init systems)
+	sb.WriteString(sysenv.GetHostInfo().FormatPrompt())
+	sb.WriteString("\n")
+
 	if ctx.SessionSummary != "" {
 		sb.WriteString("### Previous Conversation Summary:\n")
 		sb.WriteString(ctx.SessionSummary)
@@ -219,6 +224,15 @@ func (pb *PromptBuilder) BuildSubagentPrompt(role string, optTools ...[]tools.To
 			sb.WriteString("## Pedoman Penggunaan Tools:\n")
 			sb.WriteString(filtered)
 			sb.WriteString("\n\n")
+		}
+
+		// Host Environment if bash_exec is allowed
+		for _, t := range allowedTools {
+			if t.Name() == "bash_exec" {
+				sb.WriteString(sysenv.GetHostInfo().FormatPrompt())
+				sb.WriteString("\n")
+				break
+			}
 		}
 	}
 

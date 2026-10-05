@@ -106,6 +106,7 @@ func Open(dbPath string) (*DB, error) {
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN thinking_enabled INTEGER NOT NULL DEFAULT 1")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN thinking_display TEXT NOT NULL DEFAULT 'full'")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN timeout_api_seconds INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN timeout_handler_seconds INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN max_audit_logs INTEGER NOT NULL DEFAULT 5000")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN token_budget INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN response_cache_enabled INTEGER NOT NULL DEFAULT 1")

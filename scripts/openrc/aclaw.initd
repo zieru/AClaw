@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+
+name="AClaw"
+description="Daemon Service for AClaw (GoAssistant Core)"
+
+supervisor="supervise-daemon"
+command="${ACLAW_BIN:-/home/zieru/AClaw/goassistant-linux-amd64}"
+command_args="${ACLAW_OPTS:--config /home/zieru/AClaw/configs/default_config.yaml}"
+command_user="${ACLAW_USER:-zieru:zieru}"
+directory="${ACLAW_DIR:-/home/zieru/AClaw}"
+
+output_log="${ACLAW_LOG:-/var/log/aclaw.log}"
+error_log="${ACLAW_ERR:-/var/log/aclaw.err}"
+
+respawn_delay=5
+respawn_max=0
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    export HOME="/home/zieru"
+    export PATH="/home/zieru/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+    checkpath -f -m 0644 -o "${command_user}" "$output_log" "$error_log"
+}

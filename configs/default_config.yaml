@@ -80,9 +80,9 @@ webshare:
 # MCP (Model Context Protocol) External Tools Configuration
 mcp_servers:
   - name: "g3a"
-    enabled: false
+    enabled: true
     transport: "stdio"        # "stdio" (subprocess otomatis) atau "sse" (HTTP)
-    command: "/root/bin/g3a"  # Path executable g3a (misal: /root/bin/g3a atau /home/<user>/bin/g3a)
+    command: "/home/zieru/bin/g3a"  # Path executable g3a (misal: /root/bin/g3a atau /home/<user>/bin/g3a)
     args: ["mcp"]
     prefix: "g3a"            # Prefix tool: g3a_query_analytics, g3a_run_sql, g3a_describe_dataset, dll.
 

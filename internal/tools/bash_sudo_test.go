@@ -90,3 +90,37 @@ func TestBashToolExecuteSimple(t *testing.T) {
 		t.Fatalf("expected non-empty output")
 	}
 }
+
+func TestDetectPrivilegeAndDoas(t *testing.T) {
+	tests := []struct {
+		cmd          string
+		expectedType PrivilegeType
+	}{
+		{"sudo apt update", PrivilegeSudo},
+		{"doas apk add curl", PrivilegeDoas},
+		{"doas -n rc-service nginx restart", PrivilegeDoas},
+		{"echo hello | doas tee /etc/motd", PrivilegeDoas},
+		{"ls -la /var/log", PrivilegeNone},
+		{"echo 'doas in quotes'", PrivilegeDoas},
+	}
+
+	for _, tt := range tests {
+		got := detectPrivilege(tt.cmd)
+		if got != tt.expectedType {
+			t.Errorf("detectPrivilege(%q) = %v, expected %v", tt.cmd, got, tt.expectedType)
+		}
+	}
+
+	// Test injectDoasNonInteractive
+	injected := injectDoasNonInteractive("doas apk add curl")
+	expected := "doas -n apk add curl"
+	if injected != expected {
+		t.Errorf("expected %q, got %q", expected, injected)
+	}
+
+	// Do not duplicate
+	if injectDoasNonInteractive("doas -n apk add curl") != "doas -n apk add curl" {
+		t.Errorf("should not duplicate flag")
+	}
+}
+
