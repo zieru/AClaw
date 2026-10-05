@@ -130,8 +130,9 @@ func (s *Server) Start() error {
 
 	s.httpServer = &http.Server{
 		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		ReadTimeout:  60 * time.Second,
+		WriteTimeout: 0, // Disabled for long-lived SSE streaming (e.g. browser tasks)
+		IdleTimeout:  120 * time.Second,
 	}
 
 	go func() {
@@ -229,8 +230,9 @@ func (s *Server) Restart(bindAddress string, newPort int) error {
 	mux := s.buildRoutes()
 	s.httpServer = &http.Server{
 		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		ReadTimeout:  60 * time.Second,
+		WriteTimeout: 0, // Disabled for long-lived SSE streaming
+		IdleTimeout:  120 * time.Second,
 	}
 
 	go func() {

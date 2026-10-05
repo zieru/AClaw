@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"goassistant/internal/agent"
 	"goassistant/internal/provider"
@@ -138,8 +139,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Setup cancellable context for this active chat
-	ctx, cancel := context.WithCancel(r.Context())
+	// Setup cancellable context with 10-minute safety ceiling for multi-step browser tasks
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 
 	chatKey := fmt.Sprintf("%d", sess.TelegramID)
