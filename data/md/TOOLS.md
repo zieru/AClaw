@@ -54,15 +54,18 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
 6. **HTTP Request (`http_request`)**:
    - Gunakan untuk menghubungkan AI dengan endpoint REST API internal (seperti GoAssist HTTP di `http://localhost:8080/api/...`) atau layanan webhook luar.
 
-6. **Browser Automation (`browser`) - [POWERED BY PYTHON BROWSER-USE]**:
+6. **Browser Automation (`browser`) - [POWERED BY DOCKER CAMOUFOX MCP SERVER]**:
    - Kamu **MEMILIKI BROWSER OTOMATIS OTONOM PENUH (AUTONOMOUS WEB AGENT)** berbasis **Python `browser-use`**!
    - Tool `browser` ini dapat menyelesaikan seluruh kebutuhan penjelajahan web secara mandiri, mulai dari membuka URL, riset berita, mencari harga tiket pesawat/kereta (Traveloka, KAI, Tiket.com), belanja/cek produk (Tokopedia, Shopee), pengisian form bertahap, hingga ekstraksi data halaman web interaktif.
    - **Dukungan Model DeepSeek (Mode Default & Sangat Hemat Token)**:
      * Tool ini **MENDUKUNG PENUH DEEPSEEK** (`deepseek-chat`, `deepseek-ai/DeepSeek-V4-Flash-0731`, `deepseek-reasoner`).
      * Sistem otomatis mengaktifkan mode *Text-DOM* (`use_vision=False`), sehingga **TIDAK MEMBUTUHKAN VISION MODEL**, menghemat 80-90% token, bebas error, dan memanfaatkan kecerdasan penalaran DeepSeek secara maksimal!
-   - **Dual-Engine Otomatis (Chromium CDP + Camoufox Stealth Anti-Bot)**:
-     * **Engine 1 (Chromium CDP Default)**: Cepat, efisien, dan cocok untuk 95% situs web (Traveloka, Tiket.com, berita, belanja).
-     * **Engine 2 (Camoufox Stealth Engine)**: Otomatis aktif saat membuka situs berproteksi Cloudflare Bot Management / Turnstile ketat (seperti `booking.kai.id`) untuk menembus blokir secara engine-level.
+   - **PENTING — Arsitektur Eksekusi Browser**:
+     * Browser automation dijalankan SEPENUHNYA di dalam **Docker Container `aclaw-camoufox`** yang terpisah dari host server.
+     * Engine yang digunakan: **Camoufox (Firefox stealth anti-detect)** dengan geoip, mampu menembus Cloudflare Turnstile, WAF, dan anti-bot fingerprinting.
+     * **DILARANG KERAS** menggunakan `bash_exec` untuk menginstall `pip`, `camoufox`, `playwright`, `geoip`, atau paket apapun yang berkaitan dengan browser — semua dependensi sudah tersedia di Docker container.
+     * **JANGAN** mencoba menjalankan `python3 -m camoufox`, `uvx`, atau `uv run` di host untuk browser — semua sudah dikelola Docker secara otomatis.
+     * Jika tool `browser` gagal (timeout atau error), LANGSUNG laporkan errornya kepada pengguna. JANGAN mencoba memperbaiki instalasi secara mandiri.
    - **ATURAN WAJIB KLARIFIKASI TARGET**: Jika kata kunci pencarian atau target URL ambigu atau diduga typo (contoh: "KAAKSES" yang diduga "KAI Access"), DILARANG langsung membuka browser. Tanyakan konfirmasi terlebih dahulu kepada pengguna dengan opsi interaktif [OPSI: ...].
    - **Parameter Tool `browser`**:
      * `task` (string, wajib): Tugas lengkap yang ingin dicari atau dilakukan (contoh: `"Cari tiket kereta termurah Jakarta ke Bandung untuk tanggal 15 bulan depan di Traveloka"`).
