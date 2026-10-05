@@ -715,6 +715,22 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				tracker.SetCurrent("Menyusun respon akhir")
 				continue
 			}
+
+			// If the model produced an unfinished transitional message or explicitly says "Lanjutkan" / promises future action without calling a tool,
+			// and we still have turns left, don't stop prematurely! Prompt the model to execute the action immediately!
+			if isUnfinishedTransition(finalContent) && turn < maxTurns-1 {
+				messages = append(messages, provider.ChatMessage{
+					Role:    provider.RoleAssistant,
+					Content: finalContent,
+				})
+				messages = append(messages, provider.ChatMessage{
+					Role:    provider.RoleUser,
+					Content: "Jangan hanya menarasikan rencana berikutnya atau berhenti dengan kata 'Lanjutkan'. Langsung eksekusi tindakan tersebut sekarang dengan memanggil tool yang diperlukan sampai tuntas!",
+				})
+				tracker.SetCurrent("Melanjutkan eksekusi tindakan otomatis")
+				continue
+			}
+
 			break
 		}
 
@@ -1150,4 +1166,43 @@ func cleanThinkingForTelegram(think string) string {
 	think = reFences.ReplaceAllString(think, "")
 
 	return strings.TrimSpace(think)
+}
+
+// isUnfinishedTransition detects if the assistant output indicates talking to itself, promising next action,
+// or ending with "Lanjutkan" without calling a tool when the task is not yet concluded.
+func isUnfinishedTransition(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+
+	// Explicit continuation signals at the end or standalone
+	if strings.HasSuffix(lower, "lanjutkan.") || strings.HasSuffix(lower, "lanjutkan") ||
+		strings.HasSuffix(lower, "mari kita lanjutkan.") || strings.HasSuffix(lower, "mari kita lanjutkan") ||
+		strings.HasSuffix(lower, "lanjutkan?") || strings.HasSuffix(lower, "silakan lanjutkan.") {
+		return true
+	}
+
+	// Transitional cues promising next action without finishing
+	transitionalPhrases := []string{
+		"tinggal klik",
+		"selanjutnya saya akan",
+		"berikutnya saya akan",
+		"langkah selanjutnya adalah",
+		"sekarang kita klik",
+		"sekarang tinggal",
+		"mari kita buka",
+	}
+
+	for _, phrase := range transitionalPhrases {
+		if strings.Contains(lower, phrase) {
+			// Ensure it's not already a finished summary
+			if !strings.Contains(lower, "kesimpulan") && !strings.Contains(lower, "selesai") && !strings.Contains(lower, "berhasil") {
+				return true
+			}
+		}
+	}
+
+	return false
 }

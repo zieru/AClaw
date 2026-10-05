@@ -49,12 +49,9 @@ try:
 except ImportError:
     _STEALTH_AVAILABLE = False
 
-mcp_host = os.getenv("FASTMCP_HOST") or os.getenv("MCP_HOST") or "0.0.0.0"
+mcp_host = os.getenv("MCP_HOST", "0.0.0.0")
 mcp_port = int(os.getenv("FASTMCP_PORT") or os.getenv("MCP_PORT") or "20129")
 mcp = FastMCP("browser-use-server", host=mcp_host, port=mcp_port)
-if hasattr(mcp, "settings"):
-    mcp.settings.host = mcp_host
-    mcp.settings.port = mcp_port
 
 def get_db_providers():
     """Mengambil provider aktif dari database SQLite goassistant.db"""
@@ -564,113 +561,195 @@ async def run_camoufox_task(
         action_log = []
         if wants_interaction:
             import json
-            # Kumpulkan seluruh elemen interaktif yang terlihat (button, link <a>, input, select, dll)
-            elements = await page.evaluate("""
-                () => {
-                    const items = [];
-                    window._camoufoxInteractive = [];
-                    const selectors = 'button, a, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [role="tab"], [role="checkbox"]';
-                    document.querySelectorAll(selectors).forEach((el) => {
-                        const rect = el.getBoundingClientRect();
-                        const style = window.getComputedStyle(el);
-                        if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0') {
-                            const idx = items.length;
-                            window._camoufoxInteractive.push(el);
-                            el.setAttribute('data-camoufox-idx', idx.toString());
-                                
-                            let label = (el.innerText || el.value || el.getAttribute('aria-label') || el.title || el.placeholder || '').trim();
-                            if (label.length > 80) label = label.slice(0, 80) + '...';
-                                
-                            let sel = '';
-                            if (el.id) {
-                                sel = '#' + CSS.escape(el.id);
-                            } else if (el.name) {
-                                sel = `${el.tagName.toLowerCase()}[name="${CSS.escape(el.name)}"]`;
-                            } else if (el.tagName.toLowerCase() === 'a' && el.getAttribute('href')) {
-                                const href = el.getAttribute('href');
-                                if (href && !href.startsWith('javascript:')) {
-                                    sel = `a[href="${CSS.escape(href)}"]`;
-                                }
-                            }
-                            if (!sel) {
-                                sel = `[data-camoufox-idx="${idx}"]`;
-                            }
 
-                            items.push({
-                                idx: idx,
-                                tag: el.tagName.toLowerCase(),
-                                type: el.type || '',
-                                id: el.id || '',
-                                name: el.name || '',
-                                selector: sel,
-                                text: label,
-                                href: el.getAttribute('href') || '',
-                                placeholder: el.placeholder || '',
-                            });
+            max_interaction_steps = 4
+            if action in ["click", "type", "fill", "press_key", "eval_js"]:
+                max_interaction_steps = 1  # Single explicit action requested
+
+            executed_history = []
+
+            for step_num in range(1, max_interaction_steps + 1):
+                # 0. Auto dismiss cookie banners if present
+                try:
+                    cookie_btn = page.locator("button:has-text('Got it!'), button:has-text('Accept'), button:has-text('Setuju'), a:has-text('Got it!')").first
+                    if await cookie_btn.count() > 0 and await cookie_btn.is_visible():
+                        await cookie_btn.click(timeout=2000)
+                        await asyncio.sleep(0.5)
+                except Exception:
+                    pass
+
+                # 1. Kumpulkan seluruh elemen interaktif yang terlihat (termasuk menembus Shadow DOM Vue / Web Components)
+                elements = await page.evaluate("""
+                    () => {
+                        const items = [];
+                        window._camoufoxInteractive = [];
+                        const selectors = 'button, a, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [role="tab"], [role="checkbox"]';
+
+                        function collect(root) {
+                            if (!root) return;
+                            try {
+                                const nodes = root.querySelectorAll(selectors);
+                                nodes.forEach((el) => {
+                                    try {
+                                        const rect = el.getBoundingClientRect();
+                                        const style = window.getComputedStyle(el);
+                                        if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0') {
+                                            const idx = items.length;
+                                            window._camoufoxInteractive.push(el);
+                                            try { el.setAttribute('data-camoufox-idx', idx.toString()); } catch(e) {}
+                                                
+                                            let label = (el.innerText || el.value || el.getAttribute('aria-label') || el.title || el.placeholder || '').trim();
+                                            if (label.length > 80) label = label.slice(0, 80) + '...';
+                                                
+                                            let sel = '';
+                                            if (el.id) {
+                                                sel = '#' + CSS.escape(el.id);
+                                            } else if (el.name) {
+                                                sel = `${el.tagName.toLowerCase()}[name="${CSS.escape(el.name)}"]`;
+                                            } else if (el.tagName.toLowerCase() === 'a' && el.getAttribute('href')) {
+                                                const href = el.getAttribute('href');
+                                                if (href && !href.startsWith('javascript:')) {
+                                                    sel = `a[href="${CSS.escape(href)}"]`;
+                                                }
+                                            }
+                                            if (!sel) {
+                                                sel = `[data-camoufox-idx="${idx}"]`;
+                                            }
+
+                                            items.push({
+                                                idx: idx,
+                                                tag: el.tagName.toLowerCase(),
+                                                type: el.type || '',
+                                                id: el.id || '',
+                                                name: el.name || '',
+                                                selector: sel,
+                                                text: label,
+                                                href: el.getAttribute('href') || '',
+                                                placeholder: el.placeholder || '',
+                                            });
+                                        }
+                                    } catch(e) {}
+
+                                    if (el.shadowRoot) {
+                                        collect(el.shadowRoot);
+                                    }
+                                });
+
+                                const allNodes = root.querySelectorAll('*');
+                                allNodes.forEach((el) => {
+                                    if (el.shadowRoot && !el.matches(selectors)) {
+                                        collect(el.shadowRoot);
+                                    }
+                                });
+                            } catch(e) {}
                         }
-                    });
-                    return items.slice(0, 100);
-                }
-            """)
 
-            # Cek jika ada gambar captcha di halaman
-            captcha_detected = False
-            captcha_val = ""
-            try:
-                captcha_elem = await page.query_selector('img[src*="captcha"], #captchaImg, img[alt*="captcha"]')
-                if captcha_elem:
-                    captcha_detected = True
-                    captcha_bytes = await captcha_elem.screenshot()
-                    import base64
-                    b64_captcha = base64.b64encode(captcha_bytes).decode('utf-8')
-                    ocr_prompt = "Baca teks atau angka pada gambar captcha ini dengan persis. Balas HANYA dengan karakter captchanya saja tanpa spasi atau kata pengantar:"
-                    raw_c = await call_llm(llm, ocr_prompt, image_b64=b64_captcha)
-                    captcha_val = re.sub(r'[^a-zA-Z0-9]', '', raw_c.strip())
-            except Exception:
-                pass
+                        collect(document);
+                        return items.slice(0, 100);
+                    }
+                """)
 
-            captcha_info = f"Teks Captcha yang berhasil di-OCR: '{captcha_val}'" if captcha_val else "Tidak ada atau gagal membaca captcha"
-            planner_prompt = f"""Kamu adalah browser automation controller.
+                # 2. Cek jika ada gambar captcha di halaman
+                captcha_detected = False
+                captcha_val = ""
+                try:
+                    captcha_elem = await page.query_selector('img[src*="captcha"], #captchaImg, img[alt*="captcha"]')
+                    if captcha_elem:
+                        captcha_detected = True
+                        captcha_bytes = await captcha_elem.screenshot()
+                        import base64
+                        b64_captcha = base64.b64encode(captcha_bytes).decode('utf-8')
+                        ocr_prompt = "Baca teks atau angka pada gambar captcha ini dengan persis. Balas HANYA dengan karakter captchanya saja tanpa spasi atau kata pengantar:"
+                        raw_c = await call_llm(llm, ocr_prompt, image_b64=b64_captcha)
+                        captcha_val = re.sub(r'[^a-zA-Z0-9]', '', raw_c.strip())
+                except Exception:
+                    pass
+
+                captcha_info = f"Teks Captcha yang berhasil di-OCR: '{captcha_val}'" if captcha_val else "Tidak ada atau gagal membaca captcha"
+                history_desc = "\n".join(f"- {h}" for h in executed_history) if executed_history else "Belum ada tindakan sebelumnya (Langkah awal)"
+                cur_title = await page.title()
+
+                planner_prompt = f"""Kamu adalah browser automation controller otonom (Langkah {step_num}/{max_interaction_steps}).
 Tugas Pengguna: {clean_task}
-Halaman Saat Ini: {title} ({page.url})
+Halaman Saat Ini: {cur_title} ({page.url})
+Riwayat Tindakan yang Sudah Dilakukan:
+{history_desc}
+
 Elemen Interaktif di Halaman (Top 100):
 {json.dumps(elements, indent=2, ensure_ascii=False)}
 Status Captcha: {captcha_info}
 
-Berdasarkan tugas pengguna, tentukan urutan aksi interaksi web (click, fill, type, press, eval_js).
-Balas HANYA dengan valid JSON array berisi daftar aksi, contoh:
+Berdasarkan tugas pengguna dan keadaan halaman saat ini, tentukan daftar aksi interaksi berikutnya (click, fill, type, press, eval_js).
+PENTING:
+- Jika tugas pengguna SUDAH SELESAI (misalnya sudah berhasil login, atau hasil pencarian sudah terbuka, atau tidak perlu tindakan lagi), balas HANYA dengan `[]`.
+- Gunakan field `idx` (nomor indeks numerik dari daftar elemen di atas) agar browser dapat mengklik/mengisi target secara presisi tanpa salah sasaran.
+- Balas HANYA dengan valid JSON array berisi daftar aksi, contoh:
 [
-  {{"action": "click", "idx": 5, "text": "Scan My Browser Now"}},
+  {{"action": "click", "idx": 5, "text": "Masuk"}},
   {{"action": "fill", "idx": 2, "value": "user@example.com"}}
 ]
-PENTING:
-- Gunakan field `idx` (nomor indeks numerik dari daftar elemen di atas) agar browser dapat mengklik/mengisi target secara presisi tanpa salah sasaran.
-- Untuk aksi click, sertakan juga "text" atau "selector" dan "href" jika ada.
-- Jika tugas adalah melakukan scan fingerprint di pixelscan dan terdapat tombol/link seperti "Scan My Browser Now" atau "Fingerprint Check", pilih elemen tersebut untuk diklik.
-- Jika tidak ada aksi yang diperlukan, balas dengan `[]`.
 """
-            try:
-                raw_plan = await call_llm(llm, planner_prompt)
                 actions = []
-                m = re.search(r'\[\s*\{.*\}\s*\]', raw_plan, re.DOTALL)
-                if m:
-                    try:
-                        actions = json.loads(m.group(0))
-                    except Exception:
-                        actions = []
+                try:
+                    raw_plan = await call_llm(llm, planner_prompt)
+                    m = re.search(r'\[\s*\{.*\}\s*\]', raw_plan, re.DOTALL)
+                    if m:
+                        try:
+                            actions = json.loads(m.group(0))
+                        except Exception:
+                            actions = []
+                except Exception:
+                    actions = []
 
-                # Heuristic fallback jika AI planner tidak menghasilkan aksi tapi tugasnya jelas:
+                # Heuristic fallback jika AI planner tidak menghasilkan aksi:
                 if not actions:
                     if any(k in clean_task.lower() for k in ["login", "masuk"]):
-                        user_match = re.search(r'([\w\.-]+@[\w\.-]+\.\w+)', clean_task)
-                        pass_match = re.search(r'password\s+([^\s,]+)', clean_task, re.IGNORECASE)
-                        if user_match:
-                            actions.append({"action": "fill", "selector": "#username", "value": user_match.group(1)})
-                        if pass_match:
-                            actions.append({"action": "fill", "selector": "#password", "value": pass_match.group(1)})
-                        if captcha_val:
-                            actions.append({"action": "fill", "selector": "#captcha", "value": captcha_val})
-                        actions.append({"action": "click", "selector": "#btnLogin"})
+                        has_email_input = any(el.get("type") == "email" or "email" in el.get("name", "").lower() or "email" in el.get("placeholder", "").lower() or "user" in el.get("name", "").lower() for el in elements)
+                        has_pwd_input = any(el.get("type") == "password" or "pass" in el.get("name", "").lower() or "pass" in el.get("placeholder", "").lower() or "sandi" in el.get("placeholder", "").lower() for el in elements)
+
+                        if not (has_email_input or has_pwd_input):
+                            # Tahap 1: Klik tombol Masuk / Login untuk membuka form modal
+                            for el in elements:
+                                el_txt = el.get("text", "").lower()
+                                if el_txt in ["masuk", "login", "sign in", "masuk / daftar"] or ("masuk" in el_txt and "daftar" not in el_txt):
+                                    actions.append({
+                                        "action": "click",
+                                        "idx": el.get("idx"),
+                                        "selector": el.get("selector"),
+                                        "text": el.get("text")
+                                    })
+                                    break
+                        else:
+                            # Tahap 2: Input email & password sudah ada di layar, isi dan klik submit!
+                            user_match = re.search(r'([\w\.-]+@[\w\.-]+\.\w+)', clean_task)
+                            pass_match = re.search(r'password\s+([^\s,]+)', clean_task, re.IGNORECASE)
+                            if user_match:
+                                for el in elements:
+                                    e_type = el.get("type", "").lower()
+                                    e_name = el.get("name", "").lower()
+                                    e_ph = el.get("placeholder", "").lower()
+                                    if (e_type == "email" or "email" in e_name or "email" in e_ph or "user" in e_name):
+                                        actions.append({"action": "fill", "idx": el.get("idx"), "selector": el.get("selector"), "value": user_match.group(1)})
+                                        break
+                            if pass_match:
+                                for el in elements:
+                                    e_type = el.get("type", "").lower()
+                                    e_name = el.get("name", "").lower()
+                                    e_ph = el.get("placeholder", "").lower()
+                                    if (e_type == "password" or "pass" in e_name or "pass" in e_ph or "sandi" in e_ph):
+                                        actions.append({"action": "fill", "idx": el.get("idx"), "selector": el.get("selector"), "value": pass_match.group(1)})
+                                        break
+                            if captcha_val:
+                                for el in elements:
+                                    if "captcha" in el.get("name", "").lower() or "captcha" in el.get("id", "").lower():
+                                        actions.append({"action": "fill", "idx": el.get("idx"), "selector": el.get("selector"), "value": captcha_val})
+                                        break
+                            for el in elements:
+                                el_txt = el.get("text", "").lower()
+                                if (el.get("type") == "submit" or el_txt in ["masuk", "login", "submit", "sign in"]) and el.get("idx") not in [a.get("idx") for a in actions]:
+                                    actions.append({"action": "click", "idx": el.get("idx"), "selector": el.get("selector"), "text": el.get("text")})
+                                    break
+
                     elif any(k in clean_task.lower() for k in ["pixelscan", "fingerprint", "scan"]):
                         for el in elements:
                             el_txt = el.get("text", "").lower()
@@ -683,6 +762,10 @@ PENTING:
                                     "href": el.get("href")
                                 })
                                 break
+
+                # Jika planner mengembalikan array kosong `[]`, berarti sasaran tugas sudah tercapai
+                if not actions:
+                    break
 
                 for act in actions:
                     action_type = act.get("action", "").lower()
@@ -706,8 +789,8 @@ PENTING:
                                     if (el) {
                                         el.focus();
                                         el.value = v;
-                                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                                        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                                        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
                                         return true;
                                     }
                                     return false;
@@ -716,9 +799,11 @@ PENTING:
                                 await page.fill(sel, str(val), timeout=5000)
                                 filled = True
 
-                            is_pwd = "pass" in str(sel).lower() or "pwd" in str(sel).lower()
+                            is_pwd = "pass" in str(sel).lower() or "pwd" in str(sel).lower() or "sandi" in str(sel).lower()
                             display_val = "••••••••" if is_pwd else val
-                            action_log.append(f"• Mengisi {sel or f'elemen [{idx}]'}: {display_val}")
+                            action_desc = f"Mengisi {sel or f'elemen [{idx}]'}: {display_val}"
+                            action_log.append(f"• {action_desc}")
+                            executed_history.append(action_desc)
 
                         elif action_type == "click":
                             clicked = False
@@ -774,36 +859,40 @@ PENTING:
                                         pass
 
                             if clicked:
-                                action_log.append(f"• Berhasil mengklik: {target_desc}")
+                                action_desc = f"Berhasil mengklik: {target_desc}"
+                                action_log.append(f"• {action_desc}")
+                                executed_history.append(action_desc)
                             else:
-                                action_log.append(f"• Gagal mengklik: {target_desc}")
+                                action_desc = f"Gagal mengklik: {target_desc}"
+                                action_log.append(f"• {action_desc}")
+                                executed_history.append(action_desc)
 
-                            await asyncio.sleep(3)
+                            await asyncio.sleep(2)
 
                         elif action_type == "eval_js":
                             script = act.get("script", "") or val
                             if script:
                                 js_out = await page.evaluate(script)
-                                action_log.append(f"• Eksekusi JS: {js_out}")
+                                action_desc = f"Eksekusi JS: {js_out}"
+                                action_log.append(f"• {action_desc}")
+                                executed_history.append(action_desc)
 
                         elif action_type == "press":
                             key = act.get("key") or val or "Enter"
                             await page.keyboard.press(str(key))
-                            action_log.append(f"• Menekan tombol keyboard {key}")
-                            await asyncio.sleep(2)
+                            action_desc = f"Menekan tombol keyboard {key}"
+                            action_log.append(f"• {action_desc}")
+                            executed_history.append(action_desc)
+                            await asyncio.sleep(1)
 
                     except Exception as act_err:
                         action_log.append(f"• Kendala aksi {action_type}: {act_err}")
 
-                # Tunggu jeda setelah eksekusi seluruh aksi agar halaman baru termuat
+                # Tunggu jeda setelah eksekusi langkah agar DOM / modal / AJAX baru termuat
                 await asyncio.sleep(3)
-                # Khusus pixelscan atau situs scanner fingerprint, beri waktu hingga analisis selesai
                 if "pixelscan" in page.url or "pixelscan" in clean_task.lower():
                     await asyncio.sleep(7)
-
-                title = await page.title()
-            except Exception as plan_err:
-                action_log.append(f"• Gagal mengeksekusi rencana aksi: {plan_err}")
+                    break  # Pixelscan cukup 1 siklus klik scan
 
         attachment_tag = ""
         if attach_screenshot:

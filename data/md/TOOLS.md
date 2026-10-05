@@ -72,6 +72,10 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
      * `url` (string, opsional): Alamat URL spesifik jika ingin langsung menuju situs tertentu.
      * `headless` (boolean, opsional, default: `true`): Jika pengguna meminta *"tampilkan layarnya"* atau *"buka browsernya di desktop"*, berikan `headless=false`. Jendela browser Chromium akan otomatis terbuka di layar monitor pengguna!
      * `model` (string, opsional): Model AI (default: otomatis mewarisi model aktif orchestrator).
+   - **ATURAN MUTLAK EKSEKUSI TUNTAS (ANTI-HALFWAY STOP)**:
+     * **DILARANG KERAS** berhenti di tengah jalan dengan hanya menarasikan rencana berikutnya atau berbicara sendiri tanpa memanggil tool (misalnya: *"Tinggal klik menu Masuk... Lanjutkan"*, *"Selanjutnya saya akan mengisi form login"*).
+     * Jika tugas pengguna belum selesai tuntas (misalnya login akun, pencarian tiket, pemesanan, atau pengisian form), kamu **WAJIB LANGSUNG MEMANGGIL TOOL SECARA BERTAHAP** sampai seluruh rangkaian aksi selesai dan hasil akhirnya terlihat di layar.
+     * Tuliskan deskripsi `task` pada tool `browser` selengkap dan sejelas mungkin dalam satu alur tugas, contoh: `task="Buka https://reservation.railink.co.id/id, klik tombol Masuk, ketik email nazirul777@gmail.com dan password zierong7 di form login, klik Submit, lalu laporkan status login dan ambil screenshot"`. Mesin browser Camoufox memiliki multi-step autonomous loop dan akan mengeksekusi seluruh tahapan tersebut secara tuntas!
 
 7. **Pencarian Web AI (`web_search`)**:
    - Gunakan untuk mencari berita terkini, fakta terbaru, atau dokumentasi teknis di internet secara real-time via multi-provider search engine pintar (Tavily/Firecrawl) tanpa membuka browser interaktif.
