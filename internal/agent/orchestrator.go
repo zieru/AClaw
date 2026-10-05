@@ -37,9 +37,6 @@ func NewOrchestrator(
 	tr *tools.Registry,
 	pm *provider.Manager,
 ) *Orchestrator {
-	if db != nil {
-		GetGlobalResponseCache().SetDB(db)
-	}
 	return &Orchestrator{
 		db:              db,
 		sessionManager:  sm,
@@ -47,7 +44,7 @@ func NewOrchestrator(
 		promptBuilder:   pb,
 		toolRegistry:    tr,
 		providerManager: pm,
-		commandRouter:   NewCommandRouter(GetGlobalResponseCache()),
+		commandRouter:   NewCommandRouter(),
 	}
 }
 
@@ -395,12 +392,6 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		}
 	}
 
-	// 4. Exact Response Cache Check (0 Token, Instant Delivery)
-	if policy.ResponseCacheEnabled && req.AttachedFileMB <= 0 {
-		if cachedResp, hit := GetGlobalResponseCache().Get(req.ChannelID, activeModelName, req.UserPrompt); hit {
-			return cachedResp, nil
-		}
-	}
 
 	// 5. Get or Create Session
 	session, err := o.sessionManager.GetOrCreate(req.ChannelID, req.ChatID, req.UserID)
@@ -967,11 +958,6 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		ModelUsed:        lastModel,
 	}
 
-	// 13. Save to Exact Response Cache if enabled, no tools called, and no files
-	if policy.ResponseCacheEnabled && len(allToolsCalled) == 0 && len(mediaFiles) == 0 {
-		ttl := time.Duration(policy.ResponseCacheTTLSec) * time.Second
-		GetGlobalResponseCache().Set(req.ChannelID, activeModelName, req.UserPrompt, agentResp, ttl)
-	}
 
 	return agentResp, nil
 }

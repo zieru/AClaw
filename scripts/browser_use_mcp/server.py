@@ -49,7 +49,12 @@ try:
 except ImportError:
     _STEALTH_AVAILABLE = False
 
-mcp = FastMCP("browser-use-server")
+mcp_host = os.getenv("FASTMCP_HOST") or os.getenv("MCP_HOST") or "0.0.0.0"
+mcp_port = int(os.getenv("FASTMCP_PORT") or os.getenv("MCP_PORT") or "20129")
+mcp = FastMCP("browser-use-server", host=mcp_host, port=mcp_port)
+if hasattr(mcp, "settings"):
+    mcp.settings.host = mcp_host
+    mcp.settings.port = mcp_port
 
 def get_db_providers():
     """Mengambil provider aktif dari database SQLite goassistant.db"""
@@ -1076,4 +1081,7 @@ async def browser(
         return f"❌ Gagal menjalankan tugas browser-use: {err}"
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
+    if len(sys.argv) > 1 and sys.argv[1].lower() in ["stdio", "sse"]:
+        transport = sys.argv[1].lower()
+    mcp.run(transport=transport)
