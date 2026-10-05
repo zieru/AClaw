@@ -253,7 +253,7 @@ func (m *MCPManager) StartAndRegister(ctx context.Context, reg *Registry) error 
 			}
 			sseTrans, err := transport.NewSSE(
 				srvCfg.URL,
-				transport.WithResponseTimeout(5*time.Minute),
+				transport.WithResponseTimeout(10*time.Minute),
 			)
 			if err != nil {
 				log.Printf("⚠️ [MCP] Gagal inisialisasi SSE transport '%s': %v", srvCfg.Name, err)

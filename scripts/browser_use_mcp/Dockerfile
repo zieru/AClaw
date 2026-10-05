@@ -38,6 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install uv and uvx from official binary
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+# Image astral/uv:latest terkadang tidak menyertakan /uvx -> buat symlink agar selalu tersedia
+RUN if [ ! -e /usr/local/bin/uvx ]; then ln -s /usr/local/bin/uv /usr/local/bin/uvx; fi
 
 # Copy project dependency files and source
 COPY pyproject.toml README.md server.py ./

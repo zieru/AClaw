@@ -6,7 +6,7 @@ import socket
 import sys
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 from dotenv import load_dotenv
 
 # Muat file .env dari folder project jika ada
@@ -189,7 +189,7 @@ async def call_llm(llm, prompt_text: str, image_b64: Optional[str] = None) -> st
             msg = UserMessage(content=content)
         else:
             msg = UserMessage(content=prompt_text)
-        resp = await llm.ainvoke([msg])
+        resp = await asyncio.wait_for(llm.ainvoke([msg]), timeout=CAMOUFOX_LLM_TIMEOUT)
         if hasattr(resp, "completion"):
             return str(resp.completion)
         if hasattr(resp, "content"):
@@ -199,12 +199,12 @@ async def call_llm(llm, prompt_text: str, image_b64: Optional[str] = None) -> st
         try:
             from langchain_core.messages import HumanMessage
             if image_b64:
-                resp = await llm.ainvoke([HumanMessage(content=[
+                resp = await asyncio.wait_for(llm.ainvoke([HumanMessage(content=[
                     {"type": "text", "text": prompt_text},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}}
-                ])])
+                ])]), timeout=CAMOUFOX_LLM_TIMEOUT)
             else:
-                resp = await llm.ainvoke([HumanMessage(content=prompt_text)])
+                resp = await asyncio.wait_for(llm.ainvoke([HumanMessage(content=prompt_text)]), timeout=CAMOUFOX_LLM_TIMEOUT)
             if hasattr(resp, "content"):
                 return str(resp.content)
             return str(resp)
@@ -236,6 +236,11 @@ def is_camoufox_ready() -> bool:
 
 CAMOUFOX_MAX_SESSIONS = int(os.getenv("CAMOUFOX_MAX_SESSIONS", "1"))
 CAMOUFOX_SESSION_TTL = float(os.getenv("CAMOUFOX_SESSION_TTL", "300"))  # 5 menit
+
+# Batas keras eksekusi task Camoufox (detik) agar tidak menggantung hingga timeout webadmin/MCP
+CAMOUFOX_TASK_TIMEOUT = float(os.getenv("CAMOUFOX_TASK_TIMEOUT", "240"))
+# Timeout per panggilan LLM internal (planner/OCR/analisis), detik
+CAMOUFOX_LLM_TIMEOUT = float(os.getenv("CAMOUFOX_LLM_TIMEOUT", "60"))
 
 _SESSION_LOCK = asyncio.Lock()
 # session_id -> { "ctx": BrowserContext, "page": Page, "browser": AsyncCamoufox, "user_data_dir": str, "last_activity": float, "ignore_ssl": bool }
@@ -432,7 +437,7 @@ async def _get_or_create_camoufox_session(
         return ctx, active_page
 
 
-async def run_camoufox_task(
+async def _run_camoufox_task_impl(
     clean_task: str,
     target_url: Optional[str],
     llm,
@@ -930,6 +935,23 @@ PENTING:
         return f"❌ Gagal menjalankan Camoufox Stealth Engine: {err}", False
 
 
+async def run_camoufox_task(*args, **kwargs):
+    """Wrapper dengan batas keras waktu eksekusi (anti-hang hingga timeout webadmin/MCP)."""
+    try:
+        return await asyncio.wait_for(
+            _run_camoufox_task_impl(*args, **kwargs),
+            timeout=CAMOUFOX_TASK_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        return (
+            f"⏱️ <b>Task Camoufox timeout ({int(CAMOUFOX_TASK_TIMEOUT)}s)</b> — halaman/aksi "
+            f"memakan waktu terlalu lama. Persempit lingkup tugas atau periksa koneksi situs.",
+            False,
+        )
+    except Exception as err:
+        return f"❌ Gagal menjalankan Camoufox Stealth Engine: {err}", False
+
+
 @mcp.tool(
     name="browser",
     description=(
@@ -949,14 +971,14 @@ async def browser(
     provider: Optional[str] = None,
     api_base: Optional[str] = None,
     api_key: Optional[str] = None,
-    headless: bool = True,
-    max_steps: int = 15,
-    use_vision: Optional[bool] = None,
-    attach_screenshot: bool = True,
+    headless: Union[bool, str] = True,
+    max_steps: Union[int, str] = 15,
+    use_vision: Optional[Union[bool, str]] = None,
+    attach_screenshot: Union[bool, str] = True,
     engine: str = "camoufox",
-    ignore_ssl: bool = False,
+    ignore_ssl: Union[bool, str] = False,
     session_id: Optional[str] = None,
-    force_reload: bool = False,
+    force_reload: Union[bool, str] = False,
 ) -> str:
     """
     Eksekusi tugas browser otonom dengan kontrol dinamis dan dukungan model multi-provider.
@@ -977,6 +999,29 @@ async def browser(
     force_reload (bool): Jika True, paksa navigasi ulang ke URL meski sesi sudah di halaman itu.
     """
     try:
+        # Normalisasi argumen bool/int (model DeepSeek terkadang mengirim string kosong "")
+        def _coerce_bool(v, default=True):
+            if isinstance(v, str):
+                v = v.strip().lower()
+                if v in ("", "none", "null"):
+                    return default
+                return v in ("1", "true", "yes", "on")
+            return default if v is None else bool(v)
+
+        headless = _coerce_bool(headless, True)
+        attach_screenshot = _coerce_bool(attach_screenshot, True)
+        ignore_ssl = _coerce_bool(ignore_ssl, False)
+        force_reload = _coerce_bool(force_reload, False)
+        if isinstance(use_vision, str):
+            uv = use_vision.strip().lower()
+            use_vision = None if uv in ("", "none", "null") else uv in ("1", "true", "yes", "on")
+        try:
+            max_steps = int(max_steps)
+        except (TypeError, ValueError):
+            max_steps = 15
+        if max_steps <= 0:
+            max_steps = 15
+
         act_lower = (action or "").strip().lower()
         if act_lower in ["close", "exit", "quit", "tutup"]:
             target_sess = session_id or "default"
@@ -1056,7 +1101,7 @@ async def browser(
                 )
                 result += "\n\n⚠️ <i>Peringatan sertifikat SSL terdeteksi; akses di-retry dengan bypass SSL (per-sesi, read-only).</i>"
             return result
-        elif engine.lower() == "camoufox" and not is_camoufox_ready():
+        elif not is_chromium_forced:
             return "⚠️ Engine Camoufox belum terpasang binary-nya di sistem. Silakan jalankan 'uv run python -m camoufox fetch' di server."
 
         # -------------------------------------------------------------
@@ -1076,6 +1121,9 @@ async def browser(
                     if os.path.exists(p):
                         executable_path = p
                         break
+
+        if not cdp_endpoint and not executable_path:
+            return "⚠️ Engine Chromium tidak tersedia di container (tidak ada CDP/Chromium lokal). Gunakan engine Camoufox (default)."
 
         default_ua = os.getenv(
             "BROWSER_USER_AGENT",
