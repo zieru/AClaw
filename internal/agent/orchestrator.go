@@ -573,14 +573,18 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			// Check if error is timeout, context length exceeded, or network issue with long context
+			// Check if error is timeout, stream stalled, context length exceeded, or network issue
 			errStr := strings.ToLower(genErr.Error())
+			isStreamStalled := strings.Contains(errStr, "stream stalled") ||
+				strings.Contains(errStr, "stream read error") ||
+				strings.Contains(errStr, "unexpected eof")
 			isContextOrTimeout := strings.Contains(errStr, "context deadline exceeded") ||
 				strings.Contains(errStr, "timeout") ||
 				strings.Contains(errStr, "context_length_exceeded") ||
 				strings.Contains(errStr, "maximum context length") ||
 				strings.Contains(errStr, "token limit") ||
-				strings.Contains(errStr, "rate limit")
+				strings.Contains(errStr, "rate limit") ||
+				isStreamStalled
 
 			retrySeconds := 120
 			if cfg := config.Get(); cfg != nil && cfg.Timeouts.RetrySeconds > 0 {
@@ -589,7 +593,11 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 
 			// If error happened and we had history turns in the request, try auto-compacting and retrying once with minimal context
 			if isContextOrTimeout && len(history) > 0 {
-				tracker.SetCurrent("Konteks penuh/timeout, merampingkan riwayat & mencoba ulang")
+				if isStreamStalled {
+					tracker.SetCurrent("Aliran respon AI sempat terhenti, menyambung ulang otomatis")
+				} else {
+					tracker.SetCurrent("Konteks penuh/timeout, merampingkan riwayat & mencoba ulang")
+				}
 
 				// Auto clean old session messages in DB (keep only the very latest 2 messages)
 				_ = o.db.TruncateOldMessages(session.ID, 2)
@@ -632,7 +640,11 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				cancelRetry()
 			} else if ctx.Err() == nil {
 				// Auto-retry once for transient provider/network glitches before failing
-				tracker.SetCurrent("Kendala koneksi/server sementara, mencoba ulang otomatis")
+				if isStreamStalled {
+					tracker.SetCurrent("Aliran respon AI terputus, memulihkan koneksi...")
+				} else {
+					tracker.SetCurrent("Kendala koneksi/server sementara, mencoba ulang otomatis")
+				}
 				select {
 				case <-time.After(1200 * time.Millisecond):
 				case <-ctx.Done():

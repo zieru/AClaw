@@ -587,6 +587,8 @@ func (p *AnthropicProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 		return nil, lastErr
 	}
 	defer resp.Body.Close()
+	streamBody := NewWatchdogReader(resp.Body, 35*time.Second)
+	defer streamBody.Close()
 
 	var contentBuilder strings.Builder
 	var thinkingBuilder strings.Builder
@@ -605,7 +607,7 @@ func (p *AnthropicProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 		}
 
 		var n int
-		n, readErr = resp.Body.Read(buf)
+		n, readErr = streamBody.Read(buf)
 		if n > 0 {
 			lineBuffer.Write(buf[:n])
 			text := lineBuffer.String()

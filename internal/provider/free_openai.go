@@ -950,6 +950,8 @@ func (p *FreeRouterProvider) callEndpointStream(ctx context.Context, ep *FreeEnd
 		return nil, fmt.Errorf("status %d: %s", httpResp.StatusCode, string(bodyBytes))
 	}
 	defer httpResp.Body.Close()
+	streamBody := NewWatchdogReader(httpResp.Body, 35*time.Second)
+	defer streamBody.Close()
 
 	thinkFilter := NewStreamingThinkingFilter(req.StreamCallback)
 	var toolCalls []ToolCall
@@ -976,7 +978,7 @@ func (p *FreeRouterProvider) callEndpointStream(ctx context.Context, ep *FreeEnd
 		}
 
 		var n int
-		n, readErr = httpResp.Body.Read(buf)
+		n, readErr = streamBody.Read(buf)
 		if n > 0 {
 			lineBuffer.Write(buf[:n])
 			rawStr := lineBuffer.String()

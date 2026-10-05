@@ -854,6 +854,8 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		return nil, lastErr
 	}
 	defer httpResp.Body.Close()
+	streamBody := NewWatchdogReader(httpResp.Body, 35*time.Second)
+	defer streamBody.Close()
 
 	// Parse SSE stream
 	thinkFilter := NewStreamingThinkingFilter(req.StreamCallback)
@@ -882,7 +884,7 @@ func (p *OpenAIProvider) GenerateChatStream(ctx context.Context, req ChatRequest
 		}
 
 		var n int
-		n, readErr = httpResp.Body.Read(buf)
+		n, readErr = streamBody.Read(buf)
 		if n > 0 {
 			lineBuffer.Write(buf[:n])
 

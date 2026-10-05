@@ -66,7 +66,7 @@ func (a *AdminBot) handleDirectChatWithMediaAndReply(c tele.Context, replyTo *te
 	}
 	defer stopUpdater()
 
-	timeoutSec := 180
+	timeoutSec := 300
 	if cfg := config.Get(); cfg != nil && cfg.Timeouts.HandlerSeconds > 0 {
 		timeoutSec = cfg.Timeouts.HandlerSeconds
 	}
