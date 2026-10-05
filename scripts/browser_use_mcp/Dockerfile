@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     libgtk-3-0 \
-    libdbus-glibc-1-2 \
+    libdbus-1-3 \
     libxt6 \
     libx11-xcb1 \
     libasound2 \
