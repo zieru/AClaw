@@ -232,6 +232,13 @@ func copyOrMoveFile(src, dst string) error {
 
 // RestartSelf starts a new instance of the current executable and exits the current process
 func RestartSelf() error {
+	return RestartSelfWithArgs(os.Args[1:])
+}
+
+// RestartSelfWithArgs starts the current executable with an explicit argument
+// list, then exits the current process. It is used by CLI updates to avoid
+// carrying the one-shot --update/--check flag into the restarted daemon.
+func RestartSelfWithArgs(args []string) error {
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("gagal menentukan path executable: %w", err)
@@ -241,7 +248,6 @@ func RestartSelf() error {
 		return fmt.Errorf("gagal mengevaluasi symlink executable: %w", err)
 	}
 
-	args := os.Args[1:]
 	cmd := exec.Command(exePath, args...)
 	cmd.Dir, _ = os.Getwd()
 	cmd.Env = os.Environ()

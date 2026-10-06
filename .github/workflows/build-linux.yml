@@ -26,11 +26,11 @@ jobs:
           check-latest: true
           cache: true
 
-      - name: Build Static Linux x64 Binary (Zero-CGO)
+      - name: Build Static Linux x64 Binary (Zero-CGO, + Bifrost semantic cache)
         run: |
           mkdir -p dist
           # Linux AMD64 (x86_64 Pure Go Static Binary)
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/goassistant-linux-amd64 ./cmd/goassistant
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags bifrostcache -ldflags="-s -w" -o dist/goassistant-linux-amd64 ./cmd/goassistant
 
       - name: Upload Linux Binary as Artifact
         uses: actions/upload-artifact@v4

@@ -14,17 +14,17 @@ type AppConfig struct {
 	mu sync.RWMutex
 
 	Server struct {
-		DataDir   string `yaml:"data_dir"`
-		DBPath    string `yaml:"db_path"`
-		MDDir     string `yaml:"md_dir"`
-		LogDir    string `yaml:"log_dir"`
-		LogLevel  string `yaml:"log_level"`
+		DataDir  string `yaml:"data_dir"`
+		DBPath   string `yaml:"db_path"`
+		MDDir    string `yaml:"md_dir"`
+		LogDir   string `yaml:"log_dir"`
+		LogLevel string `yaml:"log_level"`
 	} `yaml:"server"`
 
 	AdminTelegram struct {
-		BotToken       string   `yaml:"bot_token"`
-		AllowedUserIDs []int64  `yaml:"allowed_user_ids"`
-		PollTimeout    int      `yaml:"poll_timeout"`
+		BotToken       string  `yaml:"bot_token"`
+		AllowedUserIDs []int64 `yaml:"allowed_user_ids"`
+		PollTimeout    int     `yaml:"poll_timeout"`
 	} `yaml:"admin_telegram"`
 
 	Defaults struct {
@@ -89,7 +89,7 @@ type AppConfig struct {
 
 	Webshare struct {
 		APIKey              string   `yaml:"api_key"`
-		Mode                string   `yaml:"mode"` // direct or backbone
+		Mode                string   `yaml:"mode"`     // direct or backbone
 		Protocol            string   `yaml:"protocol"` // http or socks5
 		Countries           []string `yaml:"countries"`
 		AutoSync            bool     `yaml:"auto_sync"`
@@ -103,29 +103,46 @@ type AppConfig struct {
 
 	Memory MemoryConfig `yaml:"memory"`
 
+	Bifrost BifrostConfig `yaml:"bifrost"`
+
 	MCPServers []MCPServerConfig `yaml:"mcp_servers"`
+}
+
+// BifrostConfig defines configuration for the embedded Bifrost AI Gateway core.
+// When Enabled, Bifrost takes over multi-provider routing, fallbacks, load
+// balancing, caching and observability (see also ProviderConfig / Account).
+type BifrostConfig struct {
+	Enabled          bool   `yaml:"enabled"`
+	VectorStore      string `yaml:"vector_store"`       // "none" or "redis" (default redis)
+	VectorStoreAddr  string `yaml:"vector_store_addr"`  // Redis address e.g. "127.0.0.1:6379"
+	SemanticCache    bool   `yaml:"semantic_cache"`     // enable semantic_cache LLM plugin (direct-only default)
+	SemanticCacheTTL string `yaml:"semantic_cache_ttl"` // e.g. "5m"
+	PromptCache      bool   `yaml:"prompt_cache"`       // enable prompt_cache auto_inject on providers
+	Logging          bool   `yaml:"logging"`            // enable Bifrost logging plugin (observability)
+	LogStore         string `yaml:"log_store"`          // "none" or "sqlite" (default none; requires logging)
+	ProxyURL         string `yaml:"proxy_url"`          // default upstream proxy for providers with ProxyEnabled (http://... atau socks5://...)
 }
 
 // MemoryConfig defines configuration for GoAssistant's standalone memory engine
 type MemoryConfig struct {
 	Enabled                 bool            `yaml:"enabled" json:"enabled"`
 	AutoExtract             bool            `yaml:"auto_extract" json:"auto_extract"`
-	Strategy                string          `yaml:"strategy" json:"strategy"`                                  // "hybrid", "recent", "semantic"
-	RetrievalStrategy       string          `yaml:"retrieval_strategy" json:"retrieval_strategy,omitempty"`    // legacy alias
-	MemoryStrategy          string          `yaml:"memory_strategy" json:"memory_strategy,omitempty"`         // OmniRoute alias
-	MaxTokens               int             `yaml:"max_tokens" json:"max_tokens"`                              // Prompt injection token budget (default 2000)
-	MemoryMaxTokens         int             `yaml:"memory_max_tokens" json:"memory_max_tokens,omitempty"`     // OmniRoute alias
-	MaxContextItems         int             `yaml:"max_context_items" json:"max_context_items"`               // Fallback item count limit
-	RetentionDays           int             `yaml:"retention_days" json:"retention_days"`                      // Memory retention window (default 30 days)
+	Strategy                string          `yaml:"strategy" json:"strategy"`                                     // "hybrid", "recent", "semantic"
+	RetrievalStrategy       string          `yaml:"retrieval_strategy" json:"retrieval_strategy,omitempty"`       // legacy alias
+	MemoryStrategy          string          `yaml:"memory_strategy" json:"memory_strategy,omitempty"`             // OmniRoute alias
+	MaxTokens               int             `yaml:"max_tokens" json:"max_tokens"`                                 // Prompt injection token budget (default 2000)
+	MemoryMaxTokens         int             `yaml:"memory_max_tokens" json:"memory_max_tokens,omitempty"`         // OmniRoute alias
+	MaxContextItems         int             `yaml:"max_context_items" json:"max_context_items"`                   // Fallback item count limit
+	RetentionDays           int             `yaml:"retention_days" json:"retention_days"`                         // Memory retention window (default 30 days)
 	MemoryRetentionDays     int             `yaml:"memory_retention_days" json:"memory_retention_days,omitempty"` // OmniRoute alias
-	PromotionThreshold      int             `yaml:"promotion_threshold" json:"promotion_threshold"`           // Access count threshold to promote to permanent memory (default 3)
-	AutoCompaction          bool            `yaml:"auto_compaction" json:"auto_compaction"`                     // Auto deduplication, pruning & FTS vacuum (default true)
-	CompactionIntervalHours int             `yaml:"compaction_interval_hours" json:"compaction_interval_hours"` // Compaction interval (default 24h)
-	CompactionThreshold     int             `yaml:"compaction_threshold" json:"compaction_threshold"`          // Memory count threshold to trigger compaction (default 100)
+	PromotionThreshold      int             `yaml:"promotion_threshold" json:"promotion_threshold"`               // Access count threshold to promote to permanent memory (default 3)
+	AutoCompaction          bool            `yaml:"auto_compaction" json:"auto_compaction"`                       // Auto deduplication, pruning & FTS vacuum (default true)
+	CompactionIntervalHours int             `yaml:"compaction_interval_hours" json:"compaction_interval_hours"`   // Compaction interval (default 24h)
+	CompactionThreshold     int             `yaml:"compaction_threshold" json:"compaction_threshold"`             // Memory count threshold to trigger compaction (default 100)
 	SimilarityThreshold     float64         `yaml:"similarity_threshold" json:"similarity_threshold"`
 	SeedCSVPath             string          `yaml:"seed_csv_path" json:"seed_csv_path"`
 	Embedding               EmbeddingConfig `yaml:"embedding" json:"embedding"`
-	EmbeddingSource         EmbeddingConfig `yaml:"embedding_source" json:"embedding_source,omitempty"`       // OmniRoute alias
+	EmbeddingSource         EmbeddingConfig `yaml:"embedding_source" json:"embedding_source,omitempty"` // OmniRoute alias
 }
 
 // GetStrategy returns the active memory retrieval strategy ("hybrid", "recent", "semantic")
@@ -300,7 +317,7 @@ func Load(configPath string) (*AppConfig, error) {
 		cfg.Webshare.GroupName = "webshare"
 		cfg.Webshare.SyncIntervalMinutes = 60
 		cfg.Webshare.AutoSync = false
- 
+
 		cfg.Search.Enabled = true
 		cfg.Search.Provider = "auto"
 		cfg.Search.Strategy = "fallback"
@@ -335,7 +352,7 @@ func Load(configPath string) (*AppConfig, error) {
 		cfg.Memory.Embedding.Provider = "openai"
 		cfg.Memory.Embedding.Model = "text-embedding-3-small"
 		cfg.Memory.Embedding.Dimensions = 1536
- 
+
 		if configPath != "" {
 			if _, statErr := os.Stat(configPath); statErr != nil {
 				err = fmt.Errorf("file config %s tidak ditemukan: %w", configPath, statErr)

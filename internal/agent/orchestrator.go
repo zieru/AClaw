@@ -392,7 +392,6 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		}
 	}
 
-
 	// 5. Get or Create Session
 	session, err := o.sessionManager.GetOrCreate(req.ChannelID, req.ChatID, req.UserID)
 	if err != nil {
@@ -558,6 +557,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			OnProgress:      req.OnProgress,
 			Stream:          isStreaming,
 			StreamCallback:  req.OnStreamChunk,
+			CacheKey:        "goassistant:" + req.ChannelID + ":" + req.ChatID + ":" + req.UserID,
 		}
 		if !isStreaming {
 			chatReq.StreamCallback = nil
@@ -985,7 +985,6 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		ProviderUsed:     lastProviderName,
 		ModelUsed:        lastModel,
 	}
-
 
 	return agentResp, nil
 }

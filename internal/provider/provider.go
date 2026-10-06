@@ -64,17 +64,18 @@ type StreamCallback func(chunk StreamChunk)
 // ChatRequest holds parameters for calling an LLM
 type ChatRequest struct {
 	Model           string
-	PreferredModel  string         // Optional caller-requested preferred model (used if combo target enables PreferredIfAvailable)
+	PreferredModel  string // Optional caller-requested preferred model (used if combo target enables PreferredIfAvailable)
 	Messages        []ChatMessage
 	Tools           []tools.Tool
 	Temperature     float64
 	MaxTokens       int
-	Stream          bool           // Enable streaming response
-	StreamCallback  StreamCallback // Callback for streaming chunks
-	ThinkingEnabled bool           // Enable thinking/reasoning output
-	ThinkingLevel   string         // "low", "medium", "high", "disabled", etc.
-	ThinkingBudget  int            // Max tokens for thinking (0 = provider default)
+	Stream          bool                // Enable streaming response
+	StreamCallback  StreamCallback      // Callback for streaming chunks
+	ThinkingEnabled bool                // Enable thinking/reasoning output
+	ThinkingLevel   string              // "low", "medium", "high", "disabled", etc.
+	ThinkingBudget  int                 // Max tokens for thinking (0 = provider default)
 	OnProgress      func(status string) // Optional progress callback during retry attempts
+	CacheKey        string              // Optional semantic-cache partition (per user/session)
 }
 
 // ChatResponse holds the output from an LLM call
@@ -128,13 +129,22 @@ type comboLatencyEntry struct {
 	err       string
 }
 
-// Manager coordinates multiple providers, selection, model routing, combos, and fallbacks
+// Router is the AI routing gateway used in place of the legacy multi-provider
+// router (e.g. the embedded Bifrost core). When set, GenerateWithFallback
+// delegates provider/model selection and fallback handling to it.
+type Router interface {
+	Generate(ctx context.Context, preferredName string, req ChatRequest) (*ChatResponse, error)
+}
+
+// Manager coordinates providers, selection, model routing, combos, and fallbacks.
+// When a Router is attached (Bifrost), routing is delegated to it.
 type Manager struct {
 	mu            sync.RWMutex
 	providers     map[string]Provider
 	providersByID map[string]Provider // Map lowercase ID -> Provider instance
 	order         []string            // Priority order
 	combos        map[string]*storage.ModelComboRecord
+	router        Router
 	defaultClient interface{}
 
 	comboMu       sync.RWMutex
@@ -172,6 +182,14 @@ func (m *Manager) SetDefaultHTTPClient(client interface{}) {
 			setter.SetHTTPClient(client)
 		}
 	}
+}
+
+// SetRouter attaches an external routing gateway (e.g. embedded Bifrost). When
+// set, all GenerateWithFallback calls are delegated to it.
+func (m *Manager) SetRouter(r Router) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.router = r
 }
 
 // Register adds or updates a provider with optional ID
@@ -547,6 +565,12 @@ func (m *Manager) ListAll() []Provider {
 
 // GenerateWithFallback executes chat with 9Router Smart Routing, Combo resolution, and Failsafe Fallbacks
 func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string, req ChatRequest) (*ChatResponse, error) {
+	// When an external router (Bifrost) is attached, delegate the entire routing,
+	// fallback and streaming handling to it.
+	if m.router != nil {
+		return m.router.Generate(ctx, preferredName, req)
+	}
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -568,91 +592,91 @@ func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string
 
 	if comboName != "" {
 		if combo, ok := m.combos[comboName]; ok && combo.IsActive && len(combo.Targets) > 0 {
-		orderedTargets := m.GetOrderedTargets(combo)
-		var attemptErrors []string
-		for idx, target := range orderedTargets {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			default:
-			}
-
-			p, exists := m.getLocked(target.ProviderID)
-			if !exists {
-				errMsg := fmt.Sprintf("[%d/%d %s/%s]: provider tidak terdaftar/nonaktif", idx+1, len(orderedTargets), target.ProviderID, target.Model)
-				attemptErrors = append(attemptErrors, errMsg)
-				log.Printf("[Combo:%s] Target #%d [%s/%s] tidak ditemukan atau nonaktif", combo.Name, idx+1, target.ProviderID, target.Model)
-				continue
-			}
-
-			if idx > 0 && req.OnProgress != nil {
-				if idx == 1 {
-					req.OnProgress(fmt.Sprintf("⏳ Mencoba target cadangan combo (%s/%s), butuh sedikit waktu...", target.ProviderID, target.Model))
-				} else {
-					req.OnProgress(fmt.Sprintf("⏳ Percobaan combo ke-%d (%s/%s), masih membutuhkan waktu...", idx+1, target.ProviderID, target.Model))
+			orderedTargets := m.GetOrderedTargets(combo)
+			var attemptErrors []string
+			for idx, target := range orderedTargets {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				default:
 				}
-			}
 
-			targetReq := req
-			targetModel := target.Model
-			if target.PreferredIfAvailable {
-				pref := strings.TrimSpace(req.PreferredModel)
-				if pref != "" && !strings.HasPrefix(strings.ToLower(pref), "combo:") {
-					supportsPref := strings.EqualFold(p.DefaultModel(), pref)
-					if !supportsPref {
-						for _, mName := range p.Models() {
-							if strings.EqualFold(mName, pref) {
-								supportsPref = true
-								break
+				p, exists := m.getLocked(target.ProviderID)
+				if !exists {
+					errMsg := fmt.Sprintf("[%d/%d %s/%s]: provider tidak terdaftar/nonaktif", idx+1, len(orderedTargets), target.ProviderID, target.Model)
+					attemptErrors = append(attemptErrors, errMsg)
+					log.Printf("[Combo:%s] Target #%d [%s/%s] tidak ditemukan atau nonaktif", combo.Name, idx+1, target.ProviderID, target.Model)
+					continue
+				}
+
+				if idx > 0 && req.OnProgress != nil {
+					if idx == 1 {
+						req.OnProgress(fmt.Sprintf("⏳ Mencoba target cadangan combo (%s/%s), butuh sedikit waktu...", target.ProviderID, target.Model))
+					} else {
+						req.OnProgress(fmt.Sprintf("⏳ Percobaan combo ke-%d (%s/%s), masih membutuhkan waktu...", idx+1, target.ProviderID, target.Model))
+					}
+				}
+
+				targetReq := req
+				targetModel := target.Model
+				if target.PreferredIfAvailable {
+					pref := strings.TrimSpace(req.PreferredModel)
+					if pref != "" && !strings.HasPrefix(strings.ToLower(pref), "combo:") {
+						supportsPref := strings.EqualFold(p.DefaultModel(), pref)
+						if !supportsPref {
+							for _, mName := range p.Models() {
+								if strings.EqualFold(mName, pref) {
+									supportsPref = true
+									break
+								}
 							}
 						}
-					}
-					if supportsPref {
-						targetModel = pref
-					}
-				}
-			}
-			targetReq.Model = targetModel
-
-			// Verify if targetModel is enabled and supported on provider p
-			targetSupported := strings.EqualFold(p.DefaultModel(), targetModel)
-			if !targetSupported {
-				for _, mName := range p.Models() {
-					if strings.EqualFold(mName, targetModel) {
-						targetSupported = true
-						break
+						if supportsPref {
+							targetModel = pref
+						}
 					}
 				}
-			}
-			if !targetSupported {
-				errMsg := fmt.Sprintf("[%d/%d %s/%s]: model dinonaktifkan atau tidak didukung", idx+1, len(orderedTargets), target.ProviderID, targetModel)
-				attemptErrors = append(attemptErrors, errMsg)
-				log.Printf("[Combo:%s] Target #%d [%s/%s] model dinonaktifkan/tidak didukung", combo.Name, idx+1, target.ProviderID, targetModel)
-				continue
-			}
+				targetReq.Model = targetModel
 
-			targetStart := time.Now()
-			resp, err := executeProviderCall(ctx, p, targetReq)
-			targetLatency := time.Since(targetStart)
-			if err == nil && resp != nil {
-				m.recordComboLatency(combo.Name, target.ProviderID, target.Model, targetLatency, false, "")
-				resp.Tries = idx + 1
-				if idx > 0 {
-					log.Printf("[Combo:%s] Berhasil fallback ke target #%d [%s/%s] (latensi: %dms)", combo.Name, idx+1, target.ProviderID, target.Model, targetLatency.Milliseconds())
+				// Verify if targetModel is enabled and supported on provider p
+				targetSupported := strings.EqualFold(p.DefaultModel(), targetModel)
+				if !targetSupported {
+					for _, mName := range p.Models() {
+						if strings.EqualFold(mName, targetModel) {
+							targetSupported = true
+							break
+						}
+					}
 				}
-				return resp, nil
-			}
+				if !targetSupported {
+					errMsg := fmt.Sprintf("[%d/%d %s/%s]: model dinonaktifkan atau tidak didukung", idx+1, len(orderedTargets), target.ProviderID, targetModel)
+					attemptErrors = append(attemptErrors, errMsg)
+					log.Printf("[Combo:%s] Target #%d [%s/%s] model dinonaktifkan/tidak didukung", combo.Name, idx+1, target.ProviderID, targetModel)
+					continue
+				}
 
-			m.recordComboLatency(combo.Name, target.ProviderID, target.Model, targetLatency, true, fmt.Sprintf("%v", err))
-			latency := targetLatency.Milliseconds()
-			errItem := fmt.Sprintf("[%d/%d %s/%s (%dms)]: %v", idx+1, len(orderedTargets), target.ProviderID, target.Model, latency, err)
-			attemptErrors = append(attemptErrors, errItem)
-			log.Printf("[Combo:%s] Target #%d [%s/%s] gagal (%dms): %v", combo.Name, idx+1, target.ProviderID, target.Model, latency, err)
+				targetStart := time.Now()
+				resp, err := executeProviderCall(ctx, p, targetReq)
+				targetLatency := time.Since(targetStart)
+				if err == nil && resp != nil {
+					m.recordComboLatency(combo.Name, target.ProviderID, target.Model, targetLatency, false, "")
+					resp.Tries = idx + 1
+					if idx > 0 {
+						log.Printf("[Combo:%s] Berhasil fallback ke target #%d [%s/%s] (latensi: %dms)", combo.Name, idx+1, target.ProviderID, target.Model, targetLatency.Milliseconds())
+					}
+					return resp, nil
+				}
+
+				m.recordComboLatency(combo.Name, target.ProviderID, target.Model, targetLatency, true, fmt.Sprintf("%v", err))
+				latency := targetLatency.Milliseconds()
+				errItem := fmt.Sprintf("[%d/%d %s/%s (%dms)]: %v", idx+1, len(orderedTargets), target.ProviderID, target.Model, latency, err)
+				attemptErrors = append(attemptErrors, errItem)
+				log.Printf("[Combo:%s] Target #%d [%s/%s] gagal (%dms): %v", combo.Name, idx+1, target.ProviderID, target.Model, latency, err)
+			}
+			if len(attemptErrors) > 0 {
+				return nil, fmt.Errorf("combo '%s' seluruh target gagal (%d/%d): %s", combo.Name, len(attemptErrors), len(orderedTargets), strings.Join(attemptErrors, " | "))
+			}
 		}
-		if len(attemptErrors) > 0 {
-			return nil, fmt.Errorf("combo '%s' seluruh target gagal (%d/%d): %s", combo.Name, len(attemptErrors), len(orderedTargets), strings.Join(attemptErrors, " | "))
-		}
-	}
 	}
 
 	// Parse provider prefix from req.Model if specified (e.g. "provider:dahl", "resilient:dahl", or "dahl:deepseek-ai/...")

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	bf "goassistant/internal/bifrost"
 	"goassistant/internal/provider"
 	"goassistant/internal/proxy"
 	"goassistant/internal/storage"
@@ -642,6 +643,9 @@ func (ui *ProviderUI) HandleDelProvider(c tele.Context) error {
 	}
 
 	ui.providerManager.Unregister(p.Name)
+	if bf.Enabled() {
+		bf.SyncProviders()
+	}
 	return c.Reply(fmt.Sprintf("🗑️ Provider <b>%s</b> (<code>%s</code>) berhasil dihapus!", html.EscapeString(p.Name), html.EscapeString(id)), tele.ModeHTML)
 }
 
@@ -681,6 +685,18 @@ func (ui *ProviderUI) HandleSetProviderProxy(c tele.Context) error {
 }
 
 func (ui *ProviderUI) syncProviderToManager(p *storage.ProviderRecord) {
+	// When the Bifrost gateway owns routing, just notify it to re-read the DB
+	// instead of registering into the legacy manager.
+	if bf.Enabled() {
+		if !p.IsActive {
+			ui.providerManager.Unregister(p.Name)
+			bf.SyncProviders()
+			return
+		}
+		bf.SyncProviders()
+		ui.providerManager.RegisterWithID(p.ID, bf.NewGatewayProvider(bf.GetClient(), p), p.Priority)
+		return
+	}
 	if !p.IsActive {
 		ui.providerManager.Unregister(p.Name)
 		return

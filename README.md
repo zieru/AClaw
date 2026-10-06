@@ -8,10 +8,10 @@ Sistem ini menjamin **100% kompatibilitas dengan GLIBC versi lama** (`pypa/manyl
 
 ## 🌟 Fitur Utama
 
-1. **🤖 Multi-Provider AI Hub & Dynamic Switcher**
-   - Integrasi langsung dengan **9Router**, OpenAI, Anthropic Claude, Google Gemini (Official API), **Gemini Web (Scraper dengan Auto-Refresh Token)**, Groq, DeepSeek, Ollama, Free Routers, dan Custom OpenAI-compatible endpoints.
-   - Manajemen API Key (Single & Multi-key load balancing / failover), default model, parameter, dan sistem *auto-fallback* jika salah satu provider error/rate-limited.
-   - Dukungan **Model Combos**: Alur pipeline fallback multi-model (misal: Coba Claude 3.5 Sonnet -> Fallback ke Gemini 2.0 Flash -> Fallback ke DeepSeek V3).
+1. **🤖 Bifrost AI Gateway (Embedded Go SDK)**
+   - Routing provider, pemilihan key, retry, fallback, dan multimodal ditangani Bifrost; konfigurasi provider tetap tersimpan di SQLite GoAssistant.
+   - Telegram `/providers`, `/wizard`, `/model`, dan `/combos` tetap menjadi control plane GoAssistant; combo diteruskan sebagai fallback chain Bifrost.
+   - Auto prompt-cache breakpoints dapat diaktifkan per provider. Semantic direct cache tersedia pada binary yang dibangun dengan tag `bifrostcache` dan memerlukan Redis yang mendukung RediSearch.
 
 2. **🌐 OmniRoute AI Real-Time Web Search**
    - Pencarian internet terstruktur berbasis AI langsung ditangani via OmniRoute upstream search (`/v1/search`) dengan fallback DuckDuckGo.
@@ -83,7 +83,7 @@ Sistem ini menjamin **100% kompatibilitas dengan GLIBC versi lama** (`pypa/manyl
     - Laporan ringkas `/stats`, `/logs`, dan fitur ekspor CSV langsung ke chat Telegram.
 
 13. **🚀 System Auto-Updater & One-Click Backup**
-    - Perintah `/update` untuk cek dan update binary langsung dari GitHub Releases.
+    - Perintah `/update` atau CLI `goassistant --update` untuk update binary dari GitHub Releases; `goassistant --check` hanya mengecek versi.
     - Perintah `/backup` langsung mengirimkan file archive `.zip` berisi database SQLite dan seluruh file `.md` ke Telegram Admin.
 
 14. **🔌 GoAssist HTTP API Server (Dynamic CLI Gateway)**
@@ -146,6 +146,8 @@ admin_telegram:
 ```bash
 go run ./cmd/goassistant -config configs/default_config.yaml
 ```
+
+**Bifrost semantic cache (opsional):** build dengan tag `bifrostcache` dan set `bifrost.semantic_cache: true`, `bifrost.vector_store: "redis"`. Backend Redis harus menyertakan modul RediSearch karena vector store Bifrost menggunakan `FT.CREATE`/`FT.SEARCH`; paket Redis standar tanpa modul tersebut tidak cukup. Tanpa tag ini, binary tetap memakai Bifrost core dan prompt caching, tetapi plugin semantic cache tidak disertakan.
 
 **Untuk Deployment Linux (manylinux_2_28 / Statically Linked Zero-CGO):**
 ```bash

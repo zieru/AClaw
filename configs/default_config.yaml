@@ -124,6 +124,19 @@ omniroute:
   use_upstream_search: false         # Diputus: Web search kini mandiri via Tavily / Firecrawl multiprovider
   use_upstream_memory: false         # Diputus: Sistem memory sekarang 100% mandiri di dalam GoAssistant
 
+# Bifrost AI Gateway (Embedded Core) - Mengambil alih routing provider AI,
+# fallback, load balancing, key management, prompt caching & observability.
+# Search & memory tetap ditangani GoAssistant (Bifrost tidak punya fitur tsb).
+bifrost:
+  enabled: true              # Jika true: Bifrost mensubstitusi provider router goassistant
+  vector_store: "none"       # "none" atau "redis" (Redis harus menyediakan RediSearch)
+  vector_store_addr: "127.0.0.1:6379"
+  semantic_cache: false      # Aktifkan plugin semantic_cache Bifrost (butuh vector_store)
+  semantic_cache_ttl: "5m"   # TTL entri cache (direct-only)
+  prompt_cache: true         # Auto-inject prompt cache breakpoints (hemat biaya konteks panjang)
+  logging: false             # Aktifkan logging plugin Bifrost (observability / audit)
+  log_store: "none"          # "none" atau "sqlite"
+
 # GoAssistant Standalone Memory Engine (SQLite + FTS5 + Hybrid/Vector + Auto-Compaction)
 memory:
   enabled: true
@@ -157,6 +170,5 @@ memory:
     base_url: ""                     # Default: https://generativelanguage.googleapis.com
     api_key: ""                      # Google AI Studio API Key (AIzaSy...) atau setel via /memory key <key>
     dimensions: 768                  # Dimensi vektor embedding (default: 768)
-
 
 

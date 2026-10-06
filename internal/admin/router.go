@@ -569,6 +569,9 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle("/providers", func(c tele.Context) error {
 		return c.Reply(a.providerUI.RenderProvidersList(), a.providerUI.ProviderMenuKeyboard(), tele.ModeHTML)
 	})
+	a.bot.Handle("/provider", func(c tele.Context) error {
+		return c.Reply(a.providerUI.RenderProvidersList(), a.providerUI.ProviderMenuKeyboard(), tele.ModeHTML)
+	})
 	a.bot.Handle("/fetchmodels", a.providerUI.HandleFetchModels)
 	a.bot.Handle("/setproviderproxy", a.providerUI.HandleSetProviderProxy)
 	a.bot.Handle("/addprovider", func(c tele.Context) error {

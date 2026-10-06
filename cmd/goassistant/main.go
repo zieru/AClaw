@@ -7,12 +7,14 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	"goassistant/internal/admin"
 	"goassistant/internal/agent"
+	bf "goassistant/internal/bifrost"
 	"goassistant/internal/channel"
 	tgchannel "goassistant/internal/channel/telegram"
 	wachannel "goassistant/internal/channel/whatsapp"
@@ -28,15 +30,86 @@ import (
 	"goassistant/internal/search"
 	"goassistant/internal/storage"
 	"goassistant/internal/tools"
+	"goassistant/internal/updater"
 	"goassistant/internal/version"
 	"goassistant/internal/webadmin"
 
 	tele "gopkg.in/telebot.v3"
 )
 
+// handleCLIUpdate implements `goassistant --update` / `--check`. It queries
+// GitHub Releases, optionally applies the new binary in-place and restarts via
+// the daemon manager (supervise-daemon on OpenRC respawns automatically).
+func handleCLIUpdate(apply bool, cfg *config.AppConfig) {
+	repo := cfg.Updater.GitHubRepo
+	if repo == "" {
+		repo = version.DefaultRepo
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	fmt.Printf("🔍 Memeriksa update dari %s ...\n", repo)
+	rel, asset, hasUpdate, err := updater.CheckForUpdate(ctx, repo, version.Version)
+	if err != nil {
+		fmt.Printf("❌ Gagal memeriksa update: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("• Versi saat ini : v%s (%s)\n", version.Version, version.BuildDate)
+	fmt.Printf("• Release terbaru: %s (tanggal %s)\n", rel.TagName, rel.PublishedAt.Format("02 Jan 2006 15:04"))
+	if rel.Body != "" {
+		fmt.Printf("• Changelog:\n%s\n", rel.Body)
+	}
+
+	if asset == nil {
+		fmt.Printf("⚠️ Tidak ada binary yang cocok untuk %s/%s pada release %s.\n", runtime.GOOS, runtime.GOARCH, rel.TagName)
+		os.Exit(1)
+	}
+	fmt.Printf("• Binary asset   : %s (%.2f MB)\n", asset.Name, float64(asset.Size)/(1024*1024))
+
+	if !apply {
+		if hasUpdate {
+			fmt.Printf("✨ Update tersedia. Jalankan 'goassistant --update' untuk memasang.\n")
+		} else {
+			fmt.Printf("✅ GoAssistant sudah menggunakan versi terbaru.\n")
+		}
+		return
+	}
+
+	if !hasUpdate {
+		fmt.Printf("✅ Versi terbaru sudah terpasang. Tidak perlu update.\n")
+		return
+	}
+
+	fmt.Printf("⬇️ Mengunduh %s ...\n", asset.Name)
+	if err := updater.ApplyUpdate(ctx, asset.BrowserDownloadURL, func(downloaded, total int64) {
+		if total > 0 {
+			pct := float64(downloaded) / float64(total) * 100
+			fmt.Printf("\r⏳ %.1f%% (%d/%d MB)", pct, downloaded/(1024*1024), total/(1024*1024))
+		}
+	}); err != nil {
+		fmt.Printf("\n❌ Gagal memasang update: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\n✅ Update berhasil dipasang! Memulai restart otomatis...\n")
+	args := make([]string, 0, len(os.Args)-1)
+	for _, arg := range os.Args[1:] {
+		if arg == "--update" || arg == "--check" {
+			continue
+		}
+		args = append(args, arg)
+	}
+	if err := updater.RestartSelfWithArgs(args); err != nil {
+		fmt.Printf("⚠️ Gagal restart otomatis: %v. Silakan restart service/daemon manual.\n", err)
+	}
+}
+
 func main() {
 	configPath := flag.String("config", "configs/default_config.yaml", "Path ke file konfigurasi YAML")
 	showVersion := flag.Bool("version", false, "Tampilkan versi aplikasi")
+	doUpdate := flag.Bool("update", false, "Cek & pasang update binary dari GitHub Releases lalu restart")
+	checkUpdate := flag.Bool("check", false, "Cek versi terbaru dari GitHub Releases tanpa memasang")
 	flag.Parse()
 
 	if *showVersion {
@@ -55,6 +128,12 @@ func main() {
 		log.Fatalf("❌ Gagal memuat konfigurasi: %v", err)
 	}
 	log.Printf("⚙️ Konfigurasi berhasil dimuat dari: %s", *configPath)
+
+	// 1b. Self-update via CLI: goassistant --update / --check
+	if *doUpdate || *checkUpdate {
+		handleCLIUpdate(*doUpdate, cfg)
+		return
+	}
 
 	// Environment variable overrides for OmniRoute
 	if envPass := os.Getenv("OMNIROUTE_PASSWORD"); envPass != "" {
@@ -198,9 +277,29 @@ func main() {
 			Priority:     1,
 		}
 		_ = db.SaveProvider(default9Router)
-		provMgr.RegisterWithID(default9Router.ID, provider.NewOpenAIProviderWithKeys(default9Router.Name, default9Router.Type, default9Router.BaseURL, default9Router.APIKeys, default9Router.KeyStrategy, default9Router.DefaultModel, default9Router.Models), 1)
+		dbProviders, _ = db.ListProviders()
 		log.Printf("🤖 Provider default 9Router didaftarkan (%s)", default9Router.DefaultModel)
+	}
+
+	// 5a. Initialize Bifrost AI Gateway. When enabled it takes over provider
+	// routing, fallback chains, load balancing and key management, replacing the
+	// legacy multi-provider router (per substitution rule).
+	if cfg.Bifrost.Enabled {
+		bifrostClient, err := bf.Init(db, cfg.Bifrost)
+		if err != nil {
+			log.Fatalf("❌ Gagal menginisialisasi Bifrost AI Gateway: %v", err)
+		}
+		defer bifrostClient.Shutdown()
+		provMgr.SetRouter(bifrostClient)
+		for i := range dbProviders {
+			p := &dbProviders[i]
+			if p.IsActive {
+				provMgr.RegisterWithID(p.ID, bf.NewGatewayProvider(bifrostClient, p), p.Priority)
+			}
+		}
+		log.Printf("🚀 Bifrost AI Gateway aktif (routing, fallback & load-balance via Bifrost)")
 	} else {
+		// 5b. Legacy provider registration (only when Bifrost is disabled)
 		for _, p := range dbProviders {
 			if !p.IsActive {
 				continue
@@ -244,15 +343,15 @@ func main() {
 			provMgr.RegisterWithID(p.ID, inst, p.Priority)
 			log.Printf("🤖 Provider aktif: %s (Tipe: %s, Default Model: %s, Keys: %d)", p.Name, p.Type, p.DefaultModel, len(keys))
 		}
-	}
 
-	// 5b. Load Registered Combos
-	dbCombos, _ := db.ListCombos()
-	for _, c := range dbCombos {
-		if c.IsActive {
-			comboCopy := c
-			provMgr.RegisterCombo(&comboCopy)
-			log.Printf("🔀 Combo aktif dimuat: %s (%d targets)", c.Name, len(c.Targets))
+		// 5c. Load Registered Combos (legacy path)
+		dbCombos, _ := db.ListCombos()
+		for _, c := range dbCombos {
+			if c.IsActive {
+				comboCopy := c
+				provMgr.RegisterCombo(&comboCopy)
+				log.Printf("🔀 Combo aktif dimuat: %s (%d targets)", c.Name, len(c.Targets))
+			}
 		}
 	}
 
@@ -431,4 +530,3 @@ func main() {
 		}
 	}
 }
-

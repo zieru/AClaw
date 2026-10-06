@@ -12,18 +12,19 @@ build:
 	go build -ldflags="-s -w" -o $(DIST_DIR)/$(BINARY_NAME) $(CMD_DIR)
 
 ## Build Static Binary untuk Linux x86_64 (Zero-CGO, 100% manylinux_2_28 / glibc lama compatible)
+## Termasuk Bifrost semantic cache plugin (tag bifrostcache; butuh Redis saat diaktifkan)
 build-linux-static:
 	@echo "==> Mengompilasi Static Binary untuk Linux (manylinux_2_28 / pure Go)..."
 	@mkdir -p $(DIST_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -ldflags="-s -w -extldflags '-static'" -o $(DIST_DIR)/$(BINARY_NAME)-linux-amd64 $(CMD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags bifrostcache -a -ldflags="-s -w -extldflags '-static'" -o $(DIST_DIR)/$(BINARY_NAME)-linux-amd64 $(CMD_DIR)
 	@echo "✅ Selesai: $(DIST_DIR)/$(BINARY_NAME)-linux-amd64"
 
 ## Cross-compile untuk semua arsitektur target
 build-all:
 	@echo "==> Mengompilasi untuk Linux amd64, arm64, dan Windows amd64..."
 	@mkdir -p $(DIST_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o $(DIST_DIR)/$(BINARY_NAME)-linux-amd64 $(CMD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o $(DIST_DIR)/$(BINARY_NAME)-linux-arm64 $(CMD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags bifrostcache -ldflags="-s -w" -o $(DIST_DIR)/$(BINARY_NAME)-linux-amd64 $(CMD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags bifrostcache -ldflags="-s -w" -o $(DIST_DIR)/$(BINARY_NAME)-linux-arm64 $(CMD_DIR)
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o $(DIST_DIR)/$(BINARY_NAME)-windows-amd64.exe $(CMD_DIR)
 	@echo "✅ Seluruh binary berhasil dibuat di folder $(DIST_DIR)/"
 
