@@ -2,7 +2,6 @@ package bifrost
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -200,4 +199,17 @@ func TestMapProviderType(t *testing.T) {
 	}
 }
 
-var _ = json.Marshal
+func TestNormalizeBaseURL(t *testing.T) {
+	tests := map[string]string{
+		"https://gateway.example/v1":  "https://gateway.example",
+		"https://gateway.example/v1/": "https://gateway.example",
+		"https://gateway.example/v2":  "https://gateway.example/v2",
+		"https://gateway.example/":    "https://gateway.example",
+		"":                            "",
+	}
+	for input, expected := range tests {
+		if got := normalizeBaseURL(input); got != expected {
+			t.Errorf("normalizeBaseURL(%q) = %q; want %q", input, got, expected)
+		}
+	}
+}

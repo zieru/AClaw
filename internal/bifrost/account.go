@@ -135,7 +135,7 @@ func (a *Account) GetConfigForProvider(providerKey schemas.ModelProvider) (*sche
 	}
 
 	nc := schemas.NetworkConfig{
-		BaseURL:                        rec.BaseURL,
+		BaseURL:                        normalizeBaseURL(rec.BaseURL),
 		DefaultRequestTimeoutInSeconds: timeout,
 		MaxRetries:                     2,
 		RetryBackoffInitial:            500 * time.Millisecond,
@@ -172,6 +172,18 @@ func (a *Account) GetConfigForProvider(providerKey schemas.ModelProvider) (*sche
 	}
 
 	return cfg, nil
+}
+
+// normalizeBaseURL removes a trailing /v1 from provider records. Bifrost's
+// provider implementations append their own versioned endpoint paths (for
+// example /v1/chat/completions); retaining /v1 in the stored base URL causes
+// custom OpenAI-compatible endpoints to receive /v1/v1/... and return 404.
+func normalizeBaseURL(raw string) string {
+	base := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if strings.HasSuffix(strings.ToLower(base), "/v1") {
+		base = strings.TrimRight(base[:len(base)-len("/v1")], "/")
+	}
+	return base
 }
 
 // parseProxyURL converts an "http://user:pass@host:port" or "socks5://host:port"
