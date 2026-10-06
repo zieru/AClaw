@@ -11,8 +11,8 @@ admin_telegram:
   poll_timeout: 30
 
 defaults:
-  default_provider: "9router"
-  default_model: "gpt-4o-mini"
+  default_provider: "wz"
+  default_model: "wz/gpt-6-luna"
   temperature: 0.7
   max_tokens: 2048
   max_context_turns: 20
