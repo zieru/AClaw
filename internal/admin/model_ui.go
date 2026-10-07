@@ -23,6 +23,10 @@ const (
 	ModelUIStepPickCombo
 	ModelUIStepPickProvider
 	ModelUIStepPickModel
+	ModelUIStepPickFallbackVisionProvider
+	ModelUIStepPickFallbackVisionModel
+	ModelUIStepPickFallbackTTSProvider
+	ModelUIStepPickFallbackTTSModel
 )
 
 type ModelUISession struct {
@@ -228,6 +232,36 @@ func (ui *ModelUI) RenderModelDashboard(c tele.Context) string {
 	sb.WriteString(fmt.Sprintf("• 🌐 <b>Global:</b> %s\n", globShort))
 	sb.WriteString(fmt.Sprintf("• 💬 <b>Chat Ini:</b> %s\n\n", chatShort))
 
+	// Fallback Models Summary
+	sb.WriteString("🛡️ <b>Model Failback Terkonfigurasi:</b>\n")
+	visLabel := "<i>(Belum Ditetapkan)</i>"
+	if scope == "global" {
+		if globPol != nil && globPol.FallbackVisionModel != "" {
+			visLabel = fmt.Sprintf("<code>%s</code>", html.EscapeString(globPol.FallbackVisionModel))
+		}
+	} else {
+		if chatPol != nil && chatPol.FallbackVisionModel != "" {
+			visLabel = fmt.Sprintf("<code>%s</code> (Khusus Chat Ini)", html.EscapeString(chatPol.FallbackVisionModel))
+		} else if globPol != nil && globPol.FallbackVisionModel != "" {
+			visLabel = fmt.Sprintf("<code>%s</code> <i>(Inherit Global)</i>", html.EscapeString(globPol.FallbackVisionModel))
+		}
+	}
+	sb.WriteString(fmt.Sprintf("• 👁️ <b>Vision Fallback:</b> %s\n", visLabel))
+
+	ttsLabel := "<i>(Belum Ditetapkan)</i>"
+	if scope == "global" {
+		if globPol != nil && globPol.FallbackAudioModel != "" {
+			ttsLabel = fmt.Sprintf("<code>%s</code>", html.EscapeString(globPol.FallbackAudioModel))
+		}
+	} else {
+		if chatPol != nil && chatPol.FallbackAudioModel != "" {
+			ttsLabel = fmt.Sprintf("<code>%s</code> (Khusus Chat Ini)", html.EscapeString(chatPol.FallbackAudioModel))
+		} else if globPol != nil && globPol.FallbackAudioModel != "" {
+			ttsLabel = fmt.Sprintf("<code>%s</code> <i>(Inherit Global)</i>", html.EscapeString(globPol.FallbackAudioModel))
+		}
+	}
+	sb.WriteString(fmt.Sprintf("• 🎙️ <b>TTS Fallback:</b> %s\n\n", ttsLabel))
+
 	sb.WriteString("📦 <b>Ketersediaan Engine:</b>\n")
 	sb.WriteString(fmt.Sprintf("• AI Providers Aktif: <code>%d provider</code>\n", len(allProvs)))
 	sb.WriteString(fmt.Sprintf("• Fallback Combos: <code>%d combo</code>\n\n", len(allCombos)))
@@ -254,12 +288,14 @@ func (ui *ModelUI) ModelMenuKeyboard(userID int64) *tele.ReplyMarkup {
 	btnDefault := menu.Data("🔄 Gunakan Default / Auto", "mod_set_default")
 	btnCombos := menu.Data("🔀 Pilih Model Combo", "mod_menu_combos")
 	btnProviders := menu.Data("🤖 Pilih Provider & Model", "mod_menu_providers")
+	btnFallback := menu.Data("🛡️ Model Failback (Vision & TTS)", "mod_menu_fallback")
 	btnRefresh := menu.Data("🔄 Refresh", "mod_refresh")
 	btnBack := menu.Data("⬅️ Menu Utama", "menu_main")
 
 	menu.Inline(
 		menu.Row(btnDefault),
 		menu.Row(btnCombos, btnProviders),
+		menu.Row(btnFallback),
 		menu.Row(btnScope),
 		menu.Row(btnRefresh, btnBack),
 	)
@@ -906,4 +942,335 @@ func (ui *ModelUI) HandleToggleScopeCallback(c tele.Context) error {
 		_ = c.Respond(&tele.CallbackResponse{Text: "💬 Scope: Chat Ini"})
 	}
 	return c.EditOrSend(ui.RenderModelDashboard(c), ui.ModelMenuKeyboard(userID), tele.ModeHTML)
+}
+
+// ==============================================================================
+// MODEL FAILBACK (VISION & TTS) UI METHODS
+// ==============================================================================
+
+// RenderFallbackDashboard renders the interactive menu for configuring Vision and TTS fallbacks
+func (ui *ModelUI) RenderFallbackDashboard(c tele.Context) (string, *tele.ReplyMarkup) {
+	userID := int64(0)
+	chatIDStr := ""
+	if c.Sender() != nil {
+		userID = c.Sender().ID
+	}
+	if c.Chat() != nil {
+		chatIDStr = fmt.Sprintf("%d", c.Chat().ID)
+	}
+
+	scope := ui.getScope(userID)
+	scopeLabel := "💬 Chat Ini (Sesi PM Admin)"
+	if scope == "global" {
+		scopeLabel = "🌐 Global (Semua Channel/Chat)"
+	}
+
+	globPol, _ := ui.db.GetPolicy("global", "system")
+	chatPol, _ := ui.db.GetPolicy("chat", chatIDStr)
+
+	visVal := "<i>(Belum Ditetapkan / Nonaktif)</i>"
+	if scope == "global" {
+		if globPol != nil && globPol.FallbackVisionModel != "" {
+			visVal = fmt.Sprintf("<code>%s</code>", html.EscapeString(globPol.FallbackVisionModel))
+		}
+	} else {
+		if chatPol != nil && chatPol.FallbackVisionModel != "" {
+			visVal = fmt.Sprintf("<code>%s</code> (Khusus Chat Ini)", html.EscapeString(chatPol.FallbackVisionModel))
+		} else if globPol != nil && globPol.FallbackVisionModel != "" {
+			visVal = fmt.Sprintf("<code>%s</code> <i>(Inherit Global)</i>", html.EscapeString(globPol.FallbackVisionModel))
+		}
+	}
+
+	ttsVal := "<i>(Belum Ditetapkan / Nonaktif)</i>"
+	if scope == "global" {
+		if globPol != nil && globPol.FallbackAudioModel != "" {
+			ttsVal = fmt.Sprintf("<code>%s</code>", html.EscapeString(globPol.FallbackAudioModel))
+		}
+	} else {
+		if chatPol != nil && chatPol.FallbackAudioModel != "" {
+			ttsVal = fmt.Sprintf("<code>%s</code> (Khusus Chat Ini)", html.EscapeString(chatPol.FallbackAudioModel))
+		} else if globPol != nil && globPol.FallbackAudioModel != "" {
+			ttsVal = fmt.Sprintf("<code>%s</code> <i>(Inherit Global)</i>", html.EscapeString(globPol.FallbackAudioModel))
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🛡️ <b>PENGATURAN MODEL FAILBACK (VISION & TTS)</b>\n\n")
+	sb.WriteString(fmt.Sprintf("📌 <b>Target Scope:</b> <code>%s</code>\n\n", scopeLabel))
+	sb.WriteString("Jika model aktif berbasis teks murni (contoh: <code>deepseek-v4-flash</code>) dan pengguna mengirim gambar atau audio, sistem akan otomatis mengalihkan eksekusi ke model failback ini:\n\n")
+
+	sb.WriteString(fmt.Sprintf("👁️ <b>Failback Vision (Gambar/Foto):</b>\n• Status: %s\n\n", visVal))
+	sb.WriteString(fmt.Sprintf("🎙️ <b>Failback TTS (Suara/Audio):</b>\n• Status: %s\n\n", ttsVal))
+	sb.WriteString("💡 <i>Menu pemilihan model di bawah HANYA menampilkan model-model yang kompatibel dengan kapabilitas terkait:</i>\n")
+
+	menu := &tele.ReplyMarkup{}
+	btnSetVis := menu.Data("👁️ Atur Failback Vision", "mod_fb_vis_provs")
+	btnSetTTS := menu.Data("🎙️ Atur Failback TTS", "mod_fb_tts_provs")
+	btnResetVis := menu.Data("❌ Reset Vision", "mod_fb_reset_vis")
+	btnResetTTS := menu.Data("❌ Reset TTS", "mod_fb_reset_tts")
+	btnBack := menu.Data("⬅️ Kembali ke Menu Model", "mod_main")
+
+	menu.Inline(
+		menu.Row(btnSetVis, btnSetTTS),
+		menu.Row(btnResetVis, btnResetTTS),
+		menu.Row(btnBack),
+	)
+
+	return sb.String(), menu
+}
+
+// RenderFallbackProvidersList lists providers that contain models supporting the requested mode (vis or tts)
+func (ui *ModelUI) RenderFallbackProvidersList(c tele.Context, mode string) (string, *tele.ReplyMarkup) {
+	cat := provider.GetCatalog()
+	allProvs := ui.providerManager.ListAll()
+	menu := &tele.ReplyMarkup{}
+
+	modeTitle := "VISION (GAMBAR)"
+	modeIcon := "👁️"
+	if mode == "tts" {
+		modeTitle = "TTS (SUARA/AUDIO)"
+		modeIcon = "🎙️"
+	}
+
+	var validProvs []provider.Provider
+	var counts []int
+
+	for _, p := range allProvs {
+		models := ui.getAllModelsForProvider(p)
+		var matched []string
+		if mode == "vis" {
+			matched = cat.FilterVisionModels(models)
+		} else {
+			matched = cat.FilterAudioModels(models)
+		}
+		if len(matched) > 0 {
+			validProvs = append(validProvs, p)
+			counts = append(counts, len(matched))
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%s <b>PILIH PROVIDER FAILBACK %s</b>\n\n", modeIcon, modeTitle))
+
+	if len(validProvs) == 0 {
+		sb.WriteString("<i>(Tidak ada provider aktif yang memiliki model dengan kapabilitas ini)</i>\n\n")
+		btnBack := menu.Data("⬅️ Kembali ke Menu Failback", "mod_menu_fallback")
+		menu.Inline(menu.Row(btnBack))
+		return sb.String(), menu
+	}
+
+	sb.WriteString("Pilih salah satu provider AI di bawah untuk melihat daftar model yang mendukung:\n\n")
+
+	var rows []tele.Row
+	var curRow []tele.Btn
+
+	for i, p := range validProvs {
+		count := counts[i]
+		sb.WriteString(fmt.Sprintf("%d. <b>%s</b> (<code>%d model kompatibel</code>)\n", i+1, html.EscapeString(p.Name()), count))
+		btnText := fmt.Sprintf("🤖 %s (%d)", p.Name(), count)
+		btn := menu.Data(btnText, fmt.Sprintf("mod_fb_prov_%s_%s", mode, p.Name()))
+		curRow = append(curRow, btn)
+		if len(curRow) == 2 {
+			rows = append(rows, menu.Row(curRow...))
+			curRow = []tele.Btn{}
+		}
+	}
+	if len(curRow) > 0 {
+		rows = append(rows, menu.Row(curRow...))
+	}
+
+	btnBack := menu.Data("⬅️ Kembali ke Menu Failback", "mod_menu_fallback")
+	rows = append(rows, menu.Row(btnBack))
+	menu.Inline(rows...)
+
+	return sb.String(), menu
+}
+
+// RenderFallbackProviderModels renders strictly filtered models for the selected provider
+func (ui *ModelUI) RenderFallbackProviderModels(c tele.Context, mode, provName string, page int) (string, *tele.ReplyMarkup) {
+	p, ok := ui.providerManager.Get(provName)
+	menu := &tele.ReplyMarkup{}
+
+	if !ok || p == nil {
+		return "❌ Provider tidak ditemukan atau sedang nonaktif.", menu
+	}
+
+	modeTitle := "VISION (GAMBAR)"
+	modeIcon := "👁️"
+	if mode == "tts" {
+		modeTitle = "TTS (SUARA/AUDIO)"
+		modeIcon = "🎙️"
+	}
+
+	allModels := ui.getAllModelsForProvider(p)
+	cat := provider.GetCatalog()
+
+	// STRICT CAPABILITY FILTERING
+	var filteredModels []string
+	if mode == "vis" {
+		filteredModels = cat.FilterVisionModels(allModels)
+	} else {
+		filteredModels = cat.FilterAudioModels(allModels)
+	}
+
+	totalModels := len(filteredModels)
+	if totalModels == 0 {
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("%s <b>PROVIDER: %s</b>\n\n", modeIcon, html.EscapeString(provName)))
+		sb.WriteString(fmt.Sprintf("<i>(Tidak ada model %s yang terdeteksi pada provider ini)</i>\n", modeTitle))
+		btnBack := menu.Data("⬅️ Pilih Provider Lain", fmt.Sprintf("mod_fb_%s_provs", mode))
+		menu.Inline(menu.Row(btnBack))
+		return sb.String(), menu
+	}
+
+	totalPages := (totalModels + modelsPerPage - 1) / modelsPerPage
+	if page < 0 {
+		page = 0
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+
+	startIdx := page * modelsPerPage
+	endIdx := startIdx + modelsPerPage
+	if endIdx > totalModels {
+		endIdx = totalModels
+	}
+
+	pageModels := filteredModels[startIdx:endIdx]
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%s <b>MODEL FAILBACK %s: %s</b>\n", modeIcon, modeTitle, html.EscapeString(strings.ToUpper(provName))))
+	sb.WriteString(fmt.Sprintf("Halaman <code>%d/%d</code> (Total: <code>%d model kompatibel</code>)\n\n", page+1, totalPages, totalModels))
+	sb.WriteString("✅ <i>Daftar di bawah telah disaring otomatis hanya menampilkan model yang mendukung fitur ini:</i>\n\n")
+
+	var rows []tele.Row
+
+	for i, m := range pageModels {
+		globalIdx := startIdx + i + 1
+		sb.WriteString(fmt.Sprintf("%d. <code>%s</code>\n", globalIdx, html.EscapeString(m)))
+
+		btnLabel := m
+		if len(btnLabel) > 26 {
+			btnLabel = btnLabel[:23] + "..."
+		}
+		btnLabel = modeIcon + " " + btnLabel
+
+		btn := menu.Data(btnLabel, fmt.Sprintf("mod_fb_set_%s_%s__%d", mode, provName, startIdx+i))
+		rows = append(rows, menu.Row(btn))
+	}
+
+	// Pagination buttons
+	if totalPages > 1 {
+		var navRow []tele.Btn
+		if page > 0 {
+			navRow = append(navRow, menu.Data("⬅️ Prev", fmt.Sprintf("mod_fb_p_prev_%s_%s_%d", mode, provName, page-1)))
+		}
+		navRow = append(navRow, menu.Data(fmt.Sprintf("📄 %d/%d", page+1, totalPages), "mod_noop"))
+		if page < totalPages-1 {
+			navRow = append(navRow, menu.Data("Next ➡️", fmt.Sprintf("mod_fb_p_next_%s_%s_%d", mode, provName, page+1)))
+		}
+		rows = append(rows, navRow)
+	}
+
+	btnBackProv := menu.Data("⬅️ Daftar Provider", fmt.Sprintf("mod_fb_%s_provs", mode))
+	btnBackMain := menu.Data("🏠 Menu Failback", "mod_menu_fallback")
+	rows = append(rows, menu.Row(btnBackProv, btnBackMain))
+	menu.Inline(rows...)
+
+	return sb.String(), menu
+}
+
+// HandleSetFallbackModelCallback saves the selected fallback model
+func (ui *ModelUI) HandleSetFallbackModelCallback(c tele.Context, mode, provName string, modelIndex int) error {
+	userID := c.Sender().ID
+	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
+	scope := ui.getScope(userID)
+
+	p, ok := ui.providerManager.Get(provName)
+	if !ok || p == nil {
+		_ = c.Respond(&tele.CallbackResponse{Text: "❌ Provider tidak ditemukan"})
+		txt, kb := ui.RenderFallbackDashboard(c)
+		return c.EditOrSend(txt, kb, tele.ModeHTML)
+	}
+
+	allModels := ui.getAllModelsForProvider(p)
+	cat := provider.GetCatalog()
+
+	var filtered []string
+	if mode == "vis" {
+		filtered = cat.FilterVisionModels(allModels)
+	} else {
+		filtered = cat.FilterAudioModels(allModels)
+	}
+
+	if modelIndex < 0 || modelIndex >= len(filtered) {
+		_ = c.Respond(&tele.CallbackResponse{Text: "❌ Model tidak valid"})
+		txt, kb := ui.RenderFallbackDashboard(c)
+		return c.EditOrSend(txt, kb, tele.ModeHTML)
+	}
+
+	chosenModel := filtered[modelIndex]
+	fullVal := fmt.Sprintf("%s:%s", p.Name(), chosenModel)
+
+	msg, err := ui.saveFallbackOverride(scope, chatIDStr, mode, fullVal)
+	if err != nil {
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("❌ Gagal: %v", err)})
+	} else {
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("✅ Failback diset ke %s!", chosenModel)})
+		_ = c.Reply(msg, tele.ModeHTML)
+	}
+
+	txt, kb := ui.RenderFallbackDashboard(c)
+	return c.EditOrSend(txt, kb, tele.ModeHTML)
+}
+
+// HandleResetFallbackCallback resets fallback model to empty (inherit/disabled)
+func (ui *ModelUI) HandleResetFallbackCallback(c tele.Context, mode string) error {
+	userID := c.Sender().ID
+	chatIDStr := fmt.Sprintf("%d", c.Chat().ID)
+	scope := ui.getScope(userID)
+
+	msg, err := ui.saveFallbackOverride(scope, chatIDStr, mode, "")
+	if err != nil {
+		_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("❌ Gagal: %v", err)})
+	} else {
+		_ = c.Respond(&tele.CallbackResponse{Text: "✅ Failback berhasil direset"})
+		_ = c.Reply(msg, tele.ModeHTML)
+	}
+
+	txt, kb := ui.RenderFallbackDashboard(c)
+	return c.EditOrSend(txt, kb, tele.ModeHTML)
+}
+
+func (ui *ModelUI) saveFallbackOverride(scope, chatIDStr, mode, val string) (string, error) {
+	scopeType := "chat"
+	scopeID := chatIDStr
+	scopeLabel := "Chat PM Admin Ini"
+
+	if scope == "global" {
+		scopeType = "global"
+		scopeID = "system"
+		scopeLabel = "Global (Seluruh Sistem)"
+	}
+
+	pol := ui.db.GetOrCreatePolicy(scopeType, scopeID)
+
+	modeName := "Vision (Gambar)"
+	if mode == "vis" {
+		pol.FallbackVisionModel = val
+	} else {
+		modeName = "TTS (Suara)"
+		pol.FallbackAudioModel = val
+	}
+
+	if err := ui.db.SavePolicy(pol); err != nil {
+		return "", err
+	}
+
+	if val == "" {
+		return fmt.Sprintf("✅ Model Failback <b>%s</b> untuk <b>%s</b> berhasil direset ke <b>Default / Nonaktif</b>!", modeName, scopeLabel), nil
+	}
+
+	return fmt.Sprintf("✅ Model Failback <b>%s</b> untuk <b>%s</b> berhasil ditetapkan ke: <code>%s</code>!", modeName, scopeLabel, html.EscapeString(val)), nil
 }

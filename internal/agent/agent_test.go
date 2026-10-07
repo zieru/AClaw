@@ -407,3 +407,84 @@ func TestProcessMessage_CanceledImmediateExit(t *testing.T) {
 		t.Errorf("audit log for canceled prompt was not found in DB")
 	}
 }
+
+type mockVisionProvider struct {
+	name     string
+	defModel string
+}
+
+func (m *mockVisionProvider) Name() string                     { return m.name }
+func (m *mockVisionProvider) Type() string                     { return "mock" }
+func (m *mockVisionProvider) DefaultModel() string             { return m.defModel }
+func (m *mockVisionProvider) Models() []string                 { return []string{m.defModel, "gemini-2.0-flash"} }
+func (m *mockVisionProvider) SetHTTPClient(client interface{}) {}
+func (m *mockVisionProvider) GenerateChat(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	return &provider.ChatResponse{
+		Content:      "Berhasil memproses gambar",
+		Model:        req.Model,
+		ProviderName: m.name,
+	}, nil
+}
+
+func TestVisionGuard(t *testing.T) {
+	tempDir := t.TempDir()
+	db, err := storage.Open(filepath.Join(tempDir, "test_vision.db"))
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+	defer db.Close()
+
+	provider.InitCatalog(db)
+
+	provMgr := provider.GetManager()
+	mockP := &mockVisionProvider{name: "dahl", defModel: "deepseek-v4-flash"}
+	provMgr.Register(mockP, 10)
+
+	sm := memory.NewSessionManager(db)
+	mm := memory.NewManager(db, config.MemoryConfig{}, nil, nil)
+	loader := NewMDLoader(tempDir)
+	pb := NewPromptBuilder(loader)
+	tr := tools.GetRegistry()
+
+	orch := NewOrchestrator(db, sm, mm, pb, tr, provMgr)
+
+	// 1. Without fallback model: text-only model should reject image with friendly notice
+	resp, err := orch.ProcessMessage(context.Background(), UserRequest{
+		ChannelType:    "telegram",
+		ChannelID:      "chan_1",
+		ChatID:         "chat_1",
+		UserID:         "user_1",
+		UserPrompt:     "Lihat gambar ini",
+		AttachedImages: []string{"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="},
+		PreferredProv:  "dahl",
+		PreferredModel: "deepseek-v4-flash",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(resp.Text, "Model Tidak Mendukung Gambar") {
+		t.Errorf("expected warning 'Model Tidak Mendukung Gambar', got: %s", resp.Text)
+	}
+
+	// 2. With fallback model configured in policy
+	policy := db.GetOrCreatePolicy("chat", "chat_1")
+	policy.FallbackVisionModel = "dahl:gemini-2.0-flash"
+	_ = db.SavePolicy(policy)
+
+	respWithFallback, err := orch.ProcessMessage(context.Background(), UserRequest{
+		ChannelType:    "telegram",
+		ChannelID:      "chan_1",
+		ChatID:         "chat_1",
+		UserID:         "user_1",
+		UserPrompt:     "Lihat gambar ini",
+		AttachedImages: []string{"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="},
+		PreferredProv:  "dahl",
+		PreferredModel: "deepseek-v4-flash",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(respWithFallback.Text, "Gambar diproses dengan model vision: gemini-2.0-flash") {
+		t.Errorf("expected notice 'Gambar diproses dengan model vision: gemini-2.0-flash', got: %s", respWithFallback.Text)
+	}
+}

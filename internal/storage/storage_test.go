@@ -63,12 +63,14 @@ func TestStorageAndPolicyResolver(t *testing.T) {
 
 	// 4. Test Chat/Group Policy Override
 	err = db.SavePolicy(&PolicyRecord{
-		Scope:            "chat",
-		ScopeID:          "chat_group_1",
-		MaxUploadFileMB:  2,
-		ModelOverride:    "gpt-4o-mini",
-		FooterMode:       "off",
-		StreamingEnabled: false,
+		Scope:               "chat",
+		ScopeID:             "chat_group_1",
+		MaxUploadFileMB:     2,
+		ModelOverride:       "gpt-4o-mini",
+		FooterMode:          "off",
+		StreamingEnabled:    false,
+		FallbackVisionModel: "gpt-4o",
+		FallbackAudioModel:  "gpt-4o-audio-preview",
 	})
 	if err != nil {
 		t.Fatalf("failed to save chat policy: %v", err)
@@ -77,6 +79,46 @@ func TestStorageAndPolicyResolver(t *testing.T) {
 	pol = db.GetResolvedPolicy("chan_tg", "chat_group_1")
 	if pol.MaxUploadFileMB != 2 || pol.ModelOverride != "gpt-4o-mini" || pol.MaxTokens != 4096 || pol.FooterMode != "off" || pol.StreamingEnabled {
 		t.Fatalf("chat policy did not override properly: %+v", pol)
+	}
+	if pol.FallbackVisionModel != "gpt-4o" {
+		t.Fatalf("expected FallbackVisionModel 'gpt-4o', got '%s'", pol.FallbackVisionModel)
+	}
+	if pol.FallbackAudioModel != "gpt-4o-audio-preview" {
+		t.Fatalf("expected FallbackAudioModel 'gpt-4o-audio-preview', got '%s'", pol.FallbackAudioModel)
+	}
+
+	// Test Model Catalog DB operations
+	err = db.UpsertModelCatalog([]ModelCatalogRecord{
+		{
+			ModelID:        "deepseek-v4-flash",
+			DisplayName:    "DeepSeek V4 Flash",
+			SupportsVision: false,
+			SupportsTools:  true,
+		},
+		{
+			ModelID:          "gemini-2.0-flash",
+			DisplayName:      "Gemini 2.0 Flash",
+			SupportsVision:   true,
+			SupportsAudioOut: true,
+			SupportsTools:    true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to upsert model catalog: %v", err)
+	}
+
+	catMap, err := db.GetModelCatalog()
+	if err != nil {
+		t.Fatalf("failed to get model catalog: %v", err)
+	}
+	if len(catMap) < 2 {
+		t.Fatalf("expected at least 2 models in catalog, got %d", len(catMap))
+	}
+	if catMap["deepseek-v4-flash"].SupportsVision {
+		t.Errorf("expected deepseek-v4-flash SupportsVision=false in DB")
+	}
+	if !catMap["gemini-2.0-flash"].SupportsVision {
+		t.Errorf("expected gemini-2.0-flash SupportsVision=true in DB")
 	}
 
 	// 5. Test Session & Truncation

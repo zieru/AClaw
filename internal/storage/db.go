@@ -111,6 +111,8 @@ func Open(dbPath string) (*DB, error) {
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN token_budget INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN response_cache_enabled INTEGER NOT NULL DEFAULT 1")
 	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN response_cache_ttl_sec INTEGER NOT NULL DEFAULT 1800")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN fallback_vision_model TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN fallback_audio_model TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS response_cache (
 		cache_key TEXT PRIMARY KEY,
 		channel_id TEXT NOT NULL,
@@ -129,6 +131,23 @@ func Open(dbPath string) (*DB, error) {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_response_cache_expires ON response_cache(expires_at)")
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS model_catalog (
+		model_id TEXT PRIMARY KEY,
+		raw_id TEXT NOT NULL DEFAULT '',
+		display_name TEXT NOT NULL DEFAULT '',
+		provider_family TEXT NOT NULL DEFAULT '',
+		modality TEXT NOT NULL DEFAULT 'text->text',
+		supports_vision INTEGER NOT NULL DEFAULT 0,
+		supports_audio_in INTEGER NOT NULL DEFAULT 0,
+		supports_audio_out INTEGER NOT NULL DEFAULT 0,
+		supports_tools INTEGER NOT NULL DEFAULT 1,
+		supports_reasoning INTEGER NOT NULL DEFAULT 0,
+		context_length INTEGER NOT NULL DEFAULT 4096,
+		is_custom INTEGER NOT NULL DEFAULT 0,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_model_catalog_vision ON model_catalog(supports_vision)")
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_model_catalog_audio_out ON model_catalog(supports_audio_out)")
 	_, _ = db.Exec("ALTER TABLE memories ADD COLUMN is_promoted INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_memories_promoted ON memories(scope, scope_id, is_promoted)")
 
@@ -173,7 +192,25 @@ type PolicyRecord struct {
 	TokenBudget         int       `json:"token_budget"`        // 0 = default
 	ResponseCacheEnabled bool     `json:"response_cache_enabled"` // Toggle local response caching
 	ResponseCacheTTLSec int       `json:"response_cache_ttl_sec"` // TTL in seconds (default 1800)
+	FallbackVisionModel string    `json:"fallback_vision_model"` // Fallback model if current model does not support image/vision
+	FallbackAudioModel  string    `json:"fallback_audio_model"`  // Fallback model if current model does not support audio/TTS
 	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+type ModelCatalogRecord struct {
+	ModelID          string    `json:"model_id"`
+	RawID            string    `json:"raw_id"`
+	DisplayName      string    `json:"display_name"`
+	ProviderFamily   string    `json:"provider_family"`
+	Modality         string    `json:"modality"`
+	SupportsVision   bool      `json:"supports_vision"`
+	SupportsAudioIn  bool      `json:"supports_audio_in"`
+	SupportsAudioOut bool      `json:"supports_audio_out"`
+	SupportsTools    bool      `json:"supports_tools"`
+	SupportsReasoning bool     `json:"supports_reasoning"`
+	ContextLength    int       `json:"context_length"`
+	IsCustom         bool      `json:"is_custom"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type ProxyNodeRecord struct {
@@ -415,6 +452,7 @@ func (d *DB) GetPolicy(scope, scopeID string) (*PolicyRecord, error) {
 		       COALESCE(streaming_enabled, 1), COALESCE(thinking_enabled, 1), COALESCE(thinking_display, 'full'),
 		       COALESCE(timeout_api_seconds, 0), COALESCE(timeout_handler_seconds, 0), COALESCE(max_audit_logs, 5000), COALESCE(token_budget, 0),
 		       COALESCE(response_cache_enabled, 1), COALESCE(response_cache_ttl_sec, 1800),
+		       COALESCE(fallback_vision_model, ''), COALESCE(fallback_audio_model, ''),
 		       updated_at 
 		FROM channel_policies WHERE scope = ? AND scope_id = ?`, scope, scopeID).
 		Scan(&p.ID, &p.Scope, &p.ScopeID, &p.MaxUploadFileMB, &p.MaxTokens, &p.MaxHistoryTurns, &autoCompInt, &p.CompactionThreshold, 
@@ -422,6 +460,7 @@ func (d *DB) GetPolicy(scope, scopeID string) (*PolicyRecord, error) {
 			&streamingInt, &thinkingInt, &p.ThinkingDisplay,
 			&p.TimeoutAPISeconds, &p.TimeoutHandlerSec, &p.MaxAuditLogs, &p.TokenBudget,
 			&respCacheInt, &p.ResponseCacheTTLSec,
+			&p.FallbackVisionModel, &p.FallbackAudioModel,
 			&p.UpdatedAt)
 
 	if err == sql.ErrNoRows {
@@ -477,6 +516,8 @@ func (d *DB) GetOrCreatePolicy(scope, scopeID string) *PolicyRecord {
 		TokenBudget:          resolved.TokenBudget,
 		ResponseCacheEnabled: resolved.ResponseCacheEnabled,
 		ResponseCacheTTLSec:  resolved.ResponseCacheTTLSec,
+		FallbackVisionModel:  resolved.FallbackVisionModel,
+		FallbackAudioModel:   resolved.FallbackAudioModel,
 	}
 }
 
@@ -524,8 +565,8 @@ func (d *DB) SavePolicy(p *PolicyRecord) error {
 	}
 
 	query := `
-	INSERT INTO channel_policies (id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, model_override, footer_mode, token_saver_mode, proxy_pool_enabled, streaming_enabled, thinking_enabled, thinking_display, timeout_api_seconds, timeout_handler_seconds, max_audit_logs, token_budget, response_cache_enabled, response_cache_ttl_sec, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	INSERT INTO channel_policies (id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, model_override, footer_mode, token_saver_mode, proxy_pool_enabled, streaming_enabled, thinking_enabled, thinking_display, timeout_api_seconds, timeout_handler_seconds, max_audit_logs, token_budget, response_cache_enabled, response_cache_ttl_sec, fallback_vision_model, fallback_audio_model, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 	ON CONFLICT(scope, scope_id) DO UPDATE SET
 		max_upload_file_mb=excluded.max_upload_file_mb,
 		max_tokens=excluded.max_tokens,
@@ -545,9 +586,11 @@ func (d *DB) SavePolicy(p *PolicyRecord) error {
 		token_budget=excluded.token_budget,
 		response_cache_enabled=excluded.response_cache_enabled,
 		response_cache_ttl_sec=excluded.response_cache_ttl_sec,
+		fallback_vision_model=excluded.fallback_vision_model,
+		fallback_audio_model=excluded.fallback_audio_model,
 		updated_at=CURRENT_TIMESTAMP
 	`
-	_, err := d.db.Exec(query, p.ID, p.Scope, p.ScopeID, p.MaxUploadFileMB, p.MaxTokens, p.MaxHistoryTurns, autoCompInt, p.CompactionThreshold, p.ModelOverride, p.FooterMode, p.TokenSaverMode, proxyPoolInt, streamingInt, thinkingInt, p.ThinkingDisplay, p.TimeoutAPISeconds, p.TimeoutHandlerSec, p.MaxAuditLogs, p.TokenBudget, respCacheInt, p.ResponseCacheTTLSec)
+	_, err := d.db.Exec(query, p.ID, p.Scope, p.ScopeID, p.MaxUploadFileMB, p.MaxTokens, p.MaxHistoryTurns, autoCompInt, p.CompactionThreshold, p.ModelOverride, p.FooterMode, p.TokenSaverMode, proxyPoolInt, streamingInt, thinkingInt, p.ThinkingDisplay, p.TimeoutAPISeconds, p.TimeoutHandlerSec, p.MaxAuditLogs, p.TokenBudget, respCacheInt, p.ResponseCacheTTLSec, p.FallbackVisionModel, p.FallbackAudioModel)
 	return err
 }
 
@@ -621,6 +664,12 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 		if glob.ResponseCacheTTLSec > 0 {
 			res.ResponseCacheTTLSec = glob.ResponseCacheTTLSec
 		}
+		if glob.FallbackVisionModel != "" {
+			res.FallbackVisionModel = glob.FallbackVisionModel
+		}
+		if glob.FallbackAudioModel != "" {
+			res.FallbackAudioModel = glob.FallbackAudioModel
+		}
 	}
 
 	// 3. Channel overlay
@@ -669,6 +718,12 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 			res.ResponseCacheEnabled = chPol.ResponseCacheEnabled
 			if chPol.ResponseCacheTTLSec > 0 {
 				res.ResponseCacheTTLSec = chPol.ResponseCacheTTLSec
+			}
+			if chPol.FallbackVisionModel != "" {
+				res.FallbackVisionModel = chPol.FallbackVisionModel
+			}
+			if chPol.FallbackAudioModel != "" {
+				res.FallbackAudioModel = chPol.FallbackAudioModel
 			}
 		}
 	}
@@ -719,6 +774,12 @@ func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
 			res.ResponseCacheEnabled = chatPol.ResponseCacheEnabled
 			if chatPol.ResponseCacheTTLSec > 0 {
 				res.ResponseCacheTTLSec = chatPol.ResponseCacheTTLSec
+			}
+			if chatPol.FallbackVisionModel != "" {
+				res.FallbackVisionModel = chatPol.FallbackVisionModel
+			}
+			if chatPol.FallbackAudioModel != "" {
+				res.FallbackAudioModel = chatPol.FallbackAudioModel
 			}
 		}
 	}
@@ -2632,3 +2693,126 @@ func (d *DB) FlushCachedResponses() error {
 	_, err := d.db.Exec("DELETE FROM response_cache")
 	return err
 }
+
+// --- Model Catalog Operations ---
+
+func (d *DB) UpsertModelCatalog(records []ModelCatalogRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO model_catalog (
+			model_id, raw_id, display_name, provider_family, modality,
+			supports_vision, supports_audio_in, supports_audio_out,
+			supports_tools, supports_reasoning, context_length, is_custom, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(model_id) DO UPDATE SET
+			raw_id=excluded.raw_id,
+			display_name=excluded.display_name,
+			provider_family=excluded.provider_family,
+			modality=excluded.modality,
+			supports_vision=excluded.supports_vision,
+			supports_audio_in=excluded.supports_audio_in,
+			supports_audio_out=excluded.supports_audio_out,
+			supports_tools=excluded.supports_tools,
+			supports_reasoning=excluded.supports_reasoning,
+			context_length=excluded.context_length,
+			updated_at=CURRENT_TIMESTAMP
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, r := range records {
+		visInt := 0
+		if r.SupportsVision {
+			visInt = 1
+		}
+		audInInt := 0
+		if r.SupportsAudioIn {
+			audInInt = 1
+		}
+		audOutInt := 0
+		if r.SupportsAudioOut {
+			audOutInt = 1
+		}
+		toolsInt := 0
+		if r.SupportsTools {
+			toolsInt = 1
+		}
+		reasInt := 0
+		if r.SupportsReasoning {
+			reasInt = 1
+		}
+		customInt := 0
+		if r.IsCustom {
+			customInt = 1
+		}
+
+		_, err = stmt.Exec(
+			r.ModelID, r.RawID, r.DisplayName, r.ProviderFamily, r.Modality,
+			visInt, audInInt, audOutInt, toolsInt, reasInt, r.ContextLength, customInt,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (d *DB) GetModelCatalog() (map[string]ModelCatalogRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query(`
+		SELECT model_id, raw_id, display_name, provider_family, modality,
+		       supports_vision, supports_audio_in, supports_audio_out,
+		       supports_tools, supports_reasoning, context_length, is_custom, updated_at
+		FROM model_catalog
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	res := make(map[string]ModelCatalogRecord)
+	for rows.Next() {
+		var r ModelCatalogRecord
+		var vis, audIn, audOut, tools, reas, custom int
+		if err := rows.Scan(
+			&r.ModelID, &r.RawID, &r.DisplayName, &r.ProviderFamily, &r.Modality,
+			&vis, &audIn, &audOut, &tools, &reas, &r.ContextLength, &custom, &r.UpdatedAt,
+		); err != nil {
+			continue
+		}
+		r.SupportsVision = vis == 1
+		r.SupportsAudioIn = audIn == 1
+		r.SupportsAudioOut = audOut == 1
+		r.SupportsTools = tools == 1
+		r.SupportsReasoning = reas == 1
+		r.IsCustom = custom == 1
+		res[r.ModelID] = r
+	}
+	return res, nil
+}
+
+func (d *DB) SetFallbackVisionModel(scope, scopeID, model string) error {
+	p := d.GetOrCreatePolicy(scope, scopeID)
+	p.FallbackVisionModel = model
+	return d.SavePolicy(p)
+}
+
+func (d *DB) SetFallbackAudioModel(scope, scopeID, model string) error {
+	p := d.GetOrCreatePolicy(scope, scopeID)
+	p.FallbackAudioModel = model
+	return d.SavePolicy(p)
+}
+

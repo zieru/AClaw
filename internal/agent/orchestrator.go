@@ -392,6 +392,34 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		}
 	}
 
+	// 4b. Vision Capability Guard & Dynamic Fallback
+	var visionFallbackNotice string
+	if len(req.AttachedImages) > 0 {
+		cat := provider.GetCatalog()
+		cap := cat.Resolve(activeModelName)
+		if !cap.SupportsVision {
+			if strings.TrimSpace(policy.FallbackVisionModel) != "" {
+				fbModel := strings.TrimSpace(policy.FallbackVisionModel)
+				log.Printf("📷 [VisionGuard] Model aktif %q tidak mendukung gambar. Mengalihkan ke fallback vision: %q", activeModelName, fbModel)
+				if strings.Contains(fbModel, ":") && !strings.HasPrefix(strings.ToLower(fbModel), "combo:") {
+					parts := strings.SplitN(fbModel, ":", 2)
+					provToCall = parts[0]
+					modelToUse = parts[1]
+				} else {
+					modelToUse = fbModel
+				}
+				activeModelName = modelToUse
+				visionFallbackNotice = fmt.Sprintf("⚡ <i>(Gambar diproses dengan model vision: %s)</i>\n\n", activeModelName)
+			} else {
+				rejectMsg := fmt.Sprintf("⚠️ <b>Model Tidak Mendukung Gambar</b>\n\nModel aktif saat ini (<code>%s</code>) adalah model berbasis teks murni dan tidak mendukung analisis gambar.\n\n💡 <i>Silakan atur <b>Model Failback Vision</b> melalui menu <code>/model</code> atau beralih ke model multimodal (seperti Gemini 2.0 Flash atau GPT-4o).</i>", activeModelName)
+				return &AgentResponse{
+					Text:    rejectMsg,
+					RawText: rejectMsg,
+				}, nil
+			}
+		}
+	}
+
 	// 5. Get or Create Session
 	session, err := o.sessionManager.GetOrCreate(req.ChannelID, req.ChatID, req.UserID)
 	if err != nil {
@@ -967,6 +995,10 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 
 	if footer != "" {
 		finalText = finalText + "\n\n" + footer
+	}
+
+	if visionFallbackNotice != "" {
+		finalText = visionFallbackNotice + finalText
 	}
 
 	agentResp := &AgentResponse{

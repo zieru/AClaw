@@ -212,6 +212,75 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 			return a.modelUI.HandleSetModelCallback(c, provName, modelIdx)
 		}
 	}
+	// Model Fallback (Vision & TTS) Callbacks
+	if data == "mod_menu_fallback" {
+		txt, kb := a.modelUI.RenderFallbackDashboard(c)
+		return c.EditOrSend(txt, kb, tele.ModeHTML)
+	}
+	if data == "mod_fb_vis_provs" {
+		txt, kb := a.modelUI.RenderFallbackProvidersList(c, "vis")
+		return c.EditOrSend(txt, kb, tele.ModeHTML)
+	}
+	if data == "mod_fb_tts_provs" {
+		txt, kb := a.modelUI.RenderFallbackProvidersList(c, "tts")
+		return c.EditOrSend(txt, kb, tele.ModeHTML)
+	}
+	if strings.HasPrefix(data, "mod_fb_prov_") {
+		raw := strings.TrimPrefix(data, "mod_fb_prov_")
+		parts := strings.SplitN(raw, "_", 2)
+		if len(parts) == 2 {
+			mode := parts[0]
+			provName := parts[1]
+			txt, kb := a.modelUI.RenderFallbackProviderModels(c, mode, provName, 0)
+			return c.EditOrSend(txt, kb, tele.ModeHTML)
+		}
+	}
+	if strings.HasPrefix(data, "mod_fb_p_prev_") {
+		raw := strings.TrimPrefix(data, "mod_fb_p_prev_")
+		lastUnderscore := strings.LastIndex(raw, "_")
+		if lastUnderscore != -1 {
+			var page int
+			fmt.Sscanf(raw[lastUnderscore+1:], "%d", &page)
+			remaining := raw[:lastUnderscore]
+			parts := strings.SplitN(remaining, "_", 2)
+			if len(parts) == 2 {
+				txt, kb := a.modelUI.RenderFallbackProviderModels(c, parts[0], parts[1], page)
+				return c.EditOrSend(txt, kb, tele.ModeHTML)
+			}
+		}
+	}
+	if strings.HasPrefix(data, "mod_fb_p_next_") {
+		raw := strings.TrimPrefix(data, "mod_fb_p_next_")
+		lastUnderscore := strings.LastIndex(raw, "_")
+		if lastUnderscore != -1 {
+			var page int
+			fmt.Sscanf(raw[lastUnderscore+1:], "%d", &page)
+			remaining := raw[:lastUnderscore]
+			parts := strings.SplitN(remaining, "_", 2)
+			if len(parts) == 2 {
+				txt, kb := a.modelUI.RenderFallbackProviderModels(c, parts[0], parts[1], page)
+				return c.EditOrSend(txt, kb, tele.ModeHTML)
+			}
+		}
+	}
+	if strings.HasPrefix(data, "mod_fb_set_") {
+		raw := strings.TrimPrefix(data, "mod_fb_set_")
+		splitIdx := strings.Split(raw, "__")
+		if len(splitIdx) == 2 {
+			var modelIdx int
+			fmt.Sscanf(splitIdx[1], "%d", &modelIdx)
+			modeAndProv := strings.SplitN(splitIdx[0], "_", 2)
+			if len(modeAndProv) == 2 {
+				return a.modelUI.HandleSetFallbackModelCallback(c, modeAndProv[0], modeAndProv[1], modelIdx)
+			}
+		}
+	}
+	if data == "mod_fb_reset_vis" {
+		return a.modelUI.HandleResetFallbackCallback(c, "vis")
+	}
+	if data == "mod_fb_reset_tts" {
+		return a.modelUI.HandleResetFallbackCallback(c, "tts")
+	}
 	if data == "mod_noop" || data == "cwiz_noop" || data == "wiz_mod_noop" {
 		return c.Respond(&tele.CallbackResponse{})
 	}

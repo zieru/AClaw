@@ -174,6 +174,9 @@ func main() {
 	defer db.Close()
 	log.Printf("📦 Database SQLite berhasil dimuat: %s", cfg.Server.DBPath)
 
+	// 2b. Initialize Model Capability Catalog (OpenRouter Sync + Heuristics)
+	provider.InitCatalog(db)
+
 	// 3. Initialize Core Managers
 	search.InitGlobalEngine(cfg.Search)
 	log.Printf("🔍 Web Search Engine aktif (Provider: %s, Fallback: %t)", cfg.Search.Provider, cfg.Search.FallbackEnabled)

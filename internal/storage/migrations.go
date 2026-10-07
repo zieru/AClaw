@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS channel_policies (
     token_budget INTEGER NOT NULL DEFAULT 0,
     response_cache_enabled INTEGER NOT NULL DEFAULT 1,
     response_cache_ttl_sec INTEGER NOT NULL DEFAULT 1800,
+    fallback_vision_model TEXT NOT NULL DEFAULT '',
+    fallback_audio_model TEXT NOT NULL DEFAULT '',
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(scope, scope_id)
 );
@@ -245,4 +247,23 @@ CREATE TABLE IF NOT EXISTS response_cache (
 );
 
 CREATE INDEX IF NOT EXISTS idx_response_cache_expires ON response_cache(expires_at);
+
+CREATE TABLE IF NOT EXISTS model_catalog (
+    model_id TEXT PRIMARY KEY,
+    raw_id TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    provider_family TEXT NOT NULL DEFAULT '',
+    modality TEXT NOT NULL DEFAULT 'text->text',
+    supports_vision INTEGER NOT NULL DEFAULT 0,
+    supports_audio_in INTEGER NOT NULL DEFAULT 0,
+    supports_audio_out INTEGER NOT NULL DEFAULT 0,
+    supports_tools INTEGER NOT NULL DEFAULT 1,
+    supports_reasoning INTEGER NOT NULL DEFAULT 0,
+    context_length INTEGER NOT NULL DEFAULT 4096,
+    is_custom INTEGER NOT NULL DEFAULT 0,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_catalog_vision ON model_catalog(supports_vision);
+CREATE INDEX IF NOT EXISTS idx_model_catalog_audio_out ON model_catalog(supports_audio_out);
 `
