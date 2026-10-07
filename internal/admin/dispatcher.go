@@ -90,6 +90,13 @@ func (a *AdminBot) handleTextMessage(c tele.Context) error {
 		}
 	}
 
+	// 8f. Check Bifrost Proxy Input dialog
+	if a.bifrostUI != nil {
+		if a.bifrostUI.CheckInput(c) {
+			return nil
+		}
+	}
+
 	// 9. Direct Chat with Assistant from Admin PM
 	msg := c.Message().Text
 	if msg == "" || msg[0] == '/' {
@@ -743,6 +750,81 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 	// Memory Engine Callbacks
 	if strings.HasPrefix(data, "mem_") {
 		return a.memoryUI.HandleCallback(c, data)
+	}
+
+	// Bifrost AI Gateway Callbacks
+	if strings.HasPrefix(data, "bf_") && a.bifrostUI != nil {
+		switch data {
+		case "bf_menu_workers":
+			txt, kb := a.bifrostUI.RenderWorkersMenu()
+			return c.EditOrSend(txt, kb, tele.ModeHTML)
+		case "bf_menu_net":
+			txt, kb := a.bifrostUI.RenderNetworkMenu()
+			return c.EditOrSend(txt, kb, tele.ModeHTML)
+		case "bf_menu_stream":
+			txt, kb := a.bifrostUI.RenderStreamMenu()
+			return c.EditOrSend(txt, kb, tele.ModeHTML)
+		case "bf_menu_cache":
+			txt, kb := a.bifrostUI.RenderCacheMenu()
+			return c.EditOrSend(txt, kb, tele.ModeHTML)
+		case "bf_menu_proxy":
+			txt, kb := a.bifrostUI.RenderProxyMenu()
+			return c.EditOrSend(txt, kb, tele.ModeHTML)
+		case "bf_reload_all":
+			return a.bifrostUI.HandleReloadAll(c)
+		case "bf_set_conc_4":
+			return a.bifrostUI.HandleConcurrencySet(c, 4)
+		case "bf_set_conc_8":
+			return a.bifrostUI.HandleConcurrencySet(c, 8)
+		case "bf_set_conc_16":
+			return a.bifrostUI.HandleConcurrencySet(c, 16)
+		case "bf_set_conc_32":
+			return a.bifrostUI.HandleConcurrencySet(c, 32)
+		case "bf_set_buf_32":
+			return a.bifrostUI.HandleBufferSizeSet(c, 32)
+		case "bf_set_buf_64":
+			return a.bifrostUI.HandleBufferSizeSet(c, 64)
+		case "bf_set_buf_128":
+			return a.bifrostUI.HandleBufferSizeSet(c, 128)
+		case "bf_set_to_30":
+			return a.bifrostUI.HandleTimeoutSet(c, 30)
+		case "bf_set_to_60":
+			return a.bifrostUI.HandleTimeoutSet(c, 60)
+		case "bf_set_to_90":
+			return a.bifrostUI.HandleTimeoutSet(c, 90)
+		case "bf_set_to_120":
+			return a.bifrostUI.HandleTimeoutSet(c, 120)
+		case "bf_set_retry_0":
+			return a.bifrostUI.HandleRetrySet(c, 0)
+		case "bf_set_retry_1":
+			return a.bifrostUI.HandleRetrySet(c, 1)
+		case "bf_set_retry_2":
+			return a.bifrostUI.HandleRetrySet(c, 2)
+		case "bf_set_retry_3":
+			return a.bifrostUI.HandleRetrySet(c, 3)
+		case "bf_tgl_private":
+			return a.bifrostUI.HandleTogglePrivate(c)
+		case "bf_tgl_tls":
+			return a.bifrostUI.HandleToggleTLS(c)
+		case "bf_set_st_15":
+			return a.bifrostUI.HandleStreamTimeoutSet(c, 15)
+		case "bf_set_st_30":
+			return a.bifrostUI.HandleStreamTimeoutSet(c, 30)
+		case "bf_set_st_60":
+			return a.bifrostUI.HandleStreamTimeoutSet(c, 60)
+		case "bf_set_st_120":
+			return a.bifrostUI.HandleStreamTimeoutSet(c, 120)
+		case "bf_tgl_usage":
+			return a.bifrostUI.HandleToggleUsage(c)
+		case "bf_tgl_done":
+			return a.bifrostUI.HandleToggleDone(c)
+		case "bf_tgl_cache":
+			return a.bifrostUI.HandleToggleCache(c)
+		case "bf_prompt_proxy":
+			return a.bifrostUI.HandlePromptProxy(c)
+		case "bf_clear_proxy":
+			return a.bifrostUI.HandleClearProxy(c)
+		}
 	}
 
 	return nil

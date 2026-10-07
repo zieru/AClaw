@@ -243,6 +243,37 @@ func providerHash(p *storage.ProviderRecord) string {
 		strings.Join(keys, ","), p.ProxyEnabled, p.ProxyGroup, p.Priority)
 }
 
+// ReloadAllProviders clears the sync cache and forces Bifrost to update every active provider.
+// This is used when global Bifrost settings (timeouts, concurrency, retries, etc.) change.
+func (c *Client) ReloadAllProviders() error {
+	if c == nil || c.core == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	recs, err := c.db.ListProviders()
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for i := range recs {
+		p := &recs[i]
+		if !p.IsActive {
+			continue
+		}
+		key := providerKey(p)
+		if err := c.core.UpdateProvider(key); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		c.lastSync[string(key)] = providerHash(p)
+	}
+	return firstErr
+}
+
 // SyncProviders forces an immediate full reconciliation (called after admin
 // provider mutations so Bifrost picks them up without waiting for the loop).
 func SyncProviders() {
@@ -251,6 +282,15 @@ func SyncProviders() {
 		return
 	}
 	_ = c.SyncProviders()
+}
+
+// ReloadAll forces all providers in Bifrost to re-read account configuration.
+func ReloadAll() error {
+	c := GetClient()
+	if c == nil {
+		return nil
+	}
+	return c.ReloadAllProviders()
 }
 
 // Generate routes a GoAssistant chat request through Bifrost. It implements the

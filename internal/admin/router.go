@@ -93,6 +93,15 @@ func (a *AdminBot) registerRoutes() {
 		return nil
 	})
 
+	// Bifrost AI Gateway Command
+	a.bot.Handle("/bifrost", func(c tele.Context) error {
+		if a.bifrostUI != nil {
+			txt, kb := a.bifrostUI.RenderBifrostDashboard()
+			return c.Send(txt, kb, tele.ModeHTML)
+		}
+		return c.Send("⚠️ Layanan Bifrost Gateway belum aktif.", tele.ModeHTML)
+	})
+
 	// Topic / Multi-Chat Commands
 	a.bot.Handle("/topic", a.topicUI.HandleTopicDashboard)
 	a.bot.Handle("/topics", a.topicUI.HandleTopicDashboard)
@@ -147,6 +156,13 @@ func (a *AdminBot) registerRoutes() {
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_providers"}, func(c tele.Context) error {
 		return c.EditOrSend(a.providerUI.RenderProvidersList(), a.providerUI.ProviderMenuKeyboard(), tele.ModeHTML)
+	})
+	a.bot.Handle(&tele.Btn{Unique: "menu_bifrost"}, func(c tele.Context) error {
+		if a.bifrostUI != nil {
+			txt, kb := a.bifrostUI.RenderBifrostDashboard()
+			return c.EditOrSend(txt, kb, tele.ModeHTML)
+		}
+		return nil
 	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_combos"}, func(c tele.Context) error {
 		return c.EditOrSend(a.comboUI.RenderCombosList(), a.comboUI.CombosKeyboard(), tele.ModeHTML)
@@ -959,6 +975,7 @@ func (a *AdminBot) registerCommands() {
 		{Text: "help", Description: "Panduan lengkap perintah bot"},
 		{Text: "model", Description: "Ganti model AI / fallback combo"},
 		{Text: "providers", Description: "Kelola AI providers & API keys"},
+		{Text: "bifrost", Description: "Konfigurasi Bifrost AI Gateway (workers, retries, caching)"},
 		{Text: "combos", Description: "Kelola model fallback combos"},
 		{Text: "proxies", Description: "Kelola proxy upstream pool"},
 		{Text: "tokensaver", Description: "Konfigurasi token saver & compression"},

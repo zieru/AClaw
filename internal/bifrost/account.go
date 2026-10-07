@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"goassistant/internal/config"
 	"goassistant/internal/storage"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -123,51 +122,46 @@ func (a *Account) GetConfigForProvider(providerKey schemas.ModelProvider) (*sche
 		return nil, fmt.Errorf("provider %s tidak ditemukan", providerKey)
 	}
 
-	timeout := 90
-	retrySeconds := 120
-	if c := config.Get(); c != nil {
-		if c.Timeouts.APICallSeconds > 0 {
-			timeout = c.Timeouts.APICallSeconds
-		}
-		if c.Timeouts.RetrySeconds > 0 {
-			retrySeconds = c.Timeouts.RetrySeconds
-		}
-	}
+	dynCfg := LoadDynamicConfig(a.db)
 
 	nc := schemas.NetworkConfig{
 		BaseURL:                        normalizeBaseURL(rec.BaseURL),
-		DefaultRequestTimeoutInSeconds: timeout,
-		MaxRetries:                     2,
+		DefaultRequestTimeoutInSeconds: dynCfg.TimeoutSeconds,
+		MaxRetries:                     dynCfg.MaxRetries,
 		RetryBackoffInitial:            500 * time.Millisecond,
-		RetryBackoffMax:                time.Duration(retrySeconds) * time.Second,
-		AllowPrivateNetwork:            true,
+		RetryBackoffMax:                time.Duration(dynCfg.RetryBackoffMaxSec) * time.Second,
+		StreamIdleTimeoutInSeconds:     dynCfg.StreamIdleTimeout,
+		KeepAliveTimeoutInSeconds:      dynCfg.KeepAliveTimeout,
+		InsecureSkipVerify:             dynCfg.InsecureSkipVerify,
+		AllowPrivateNetwork:            dynCfg.AllowPrivateNetwork,
 	}
 
 	cfg := &schemas.ProviderConfig{
 		NetworkConfig: nc,
-		// VPS target has one CPU and ~2 GB RAM. Bifrost's upstream default of
-		// 1000 workers per provider is excessive for this embedded daemon.
+		// Configurable concurrency and buffer size per provider
 		ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
-			Concurrency: 8,
-			BufferSize:  64,
+			Concurrency: dynCfg.Concurrency,
+			BufferSize:  dynCfg.BufferSize,
 		},
 	}
 
 	baseType := mapBaseProviderType(rec.Type)
 	cfg.CustomProviderConfig = &schemas.CustomProviderConfig{
-		BaseProviderType: baseType,
-		IsKeyLess:        isKeylessType(rec.Type),
+		BaseProviderType:      baseType,
+		IsKeyLess:             isKeylessType(rec.Type),
+		DoesNotSendDoneMarker: dynCfg.DoesNotSendDone,
+		WaitForUsage:          dynCfg.WaitForUsage,
 	}
 
-	if c := config.Get(); c != nil {
-		if c.Bifrost.PromptCache {
-			cfg.PromptCache = &schemas.PromptCacheConfig{AutoInject: true}
-		}
-		if rec.ProxyEnabled && c.Bifrost.ProxyURL != "" {
-			pc, perr := parseProxyURL(c.Bifrost.ProxyURL)
-			if perr == nil {
-				cfg.ProxyConfig = pc
-			}
+	if dynCfg.PromptCache {
+		cfg.PromptCache = &schemas.PromptCacheConfig{AutoInject: true}
+	}
+
+	proxyTarget := dynCfg.ProxyURL
+	if rec.ProxyEnabled && proxyTarget != "" {
+		pc, perr := parseProxyURL(proxyTarget)
+		if perr == nil {
+			cfg.ProxyConfig = pc
 		}
 	}
 
