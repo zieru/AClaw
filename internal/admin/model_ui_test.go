@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,26 +92,39 @@ func TestModelUISaveOverride(t *testing.T) {
 	}
 }
 
+type testMockProvider struct {
+	name         string
+	pType        string
+	defaultModel string
+	models       []string
+}
+
+func (m *testMockProvider) Name() string                     { return m.name }
+func (m *testMockProvider) Type() string                     { return m.pType }
+func (m *testMockProvider) DefaultModel() string             { return m.defaultModel }
+func (m *testMockProvider) Models() []string                 { return m.models }
+func (m *testMockProvider) SetHTTPClient(client interface{}) {}
+func (m *testMockProvider) GenerateChat(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	return &provider.ChatResponse{Content: "mock"}, nil
+}
+
 func TestGetAllModelsForProviderDefaultFirst(t *testing.T) {
 	ui, _, _ := setupTestModelUI(t)
 
 	// Create a provider where default model is "gpt-4o-mini" (starts with g)
 	// and other models include "anthropic/claude-3-5-sonnet", "ai21/jamba", "deepseek/deepseek-chat", "z-model"
-	p := provider.NewOpenAIProviderWithKeys(
-		"test_provider",
-		"openai",
-		"https://api.openai.com/v1",
-		[]string{"sk-test"},
-		"round-robin",
-		"gpt-4o-mini", // Default model
-		[]string{
+	p := &testMockProvider{
+		name:         "test_provider",
+		pType:        "openai",
+		defaultModel: "gpt-4o-mini", // Default model
+		models: []string{
 			"z-model",
 			"anthropic/claude-3-5-sonnet",
 			"gpt-4o-mini",
 			"ai21/jamba",
 			"deepseek/deepseek-chat",
 		},
-	)
+	}
 
 	models := ui.getAllModelsForProvider(p)
 	if len(models) != 5 {
@@ -139,20 +153,16 @@ func TestGetAllModelsForProviderDefaultFirst(t *testing.T) {
 func TestGetAllModelsForProvider_DisabledExcluded(t *testing.T) {
 	ui, _, _ := setupTestModelUI(t)
 
-	// Provider with only enabled models passed (simulating syncProviderToManager with p.EnabledModels())
-	p := provider.NewOpenAIProviderWithKeys(
-		"dahl_provider",
-		"dahl",
-		"https://inference.dahl.global/v1",
-		[]string{"sk-test"},
-		"round-robin",
-		"MiniMaxAI/MiniMax-M2.7",
-		[]string{
+	p := &testMockProvider{
+		name:         "dahl_provider",
+		pType:        "dahl",
+		defaultModel: "MiniMaxAI/MiniMax-M2.7",
+		models: []string{
 			"MiniMaxAI/MiniMax-M2.7",
 			"deepseek-ai/DeepSeek-V4-Flash-0731",
 			// zai-org/GLM-5.3-Flash is disabled and not passed
 		},
-	)
+	}
 
 	models := ui.getAllModelsForProvider(p)
 	if len(models) != 2 {
@@ -169,15 +179,12 @@ func TestGetAllModelsForProvider_DisabledExcluded(t *testing.T) {
 func TestFormatModelDesc_ProviderBindingAndResilient(t *testing.T) {
 	ui, _, pm := setupTestModelUI(t)
 
-	dahlProv := provider.NewOpenAIProviderWithKeys(
-		"dahl",
-		"dahl",
-		"https://inference.dahl.global/v1",
-		[]string{"sk-test"},
-		"round-robin",
-		"deepseek-ai/DeepSeek-V4-Flash-0731",
-		[]string{"deepseek-ai/DeepSeek-V4-Flash-0731", "MiniMaxAI/MiniMax-M2.7"},
-	)
+	dahlProv := &testMockProvider{
+		name:         "dahl",
+		pType:        "dahl",
+		defaultModel: "deepseek-ai/DeepSeek-V4-Flash-0731",
+		models:       []string{"deepseek-ai/DeepSeek-V4-Flash-0731", "MiniMaxAI/MiniMax-M2.7"},
+	}
 	pm.RegisterWithID("dahl", dahlProv, 1)
 
 	// 1. Resilient Provider format

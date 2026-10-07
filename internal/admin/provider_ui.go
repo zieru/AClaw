@@ -712,22 +712,18 @@ func (ui *ProviderUI) syncProviderToManager(p *storage.ProviderRecord) {
 		models = []string{p.DefaultModel}
 	}
 
-	var inst provider.Provider
-	switch p.Type {
-	case "gemini":
-		inst = provider.NewGeminiProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
-	case "anthropic":
-		inst = provider.NewAnthropicProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
-	default: // 9router, openai, groq, deepseek, ollama, custom, dahl
-		inst = provider.NewOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
+	if p.Type == "gemini_web" || p.Type == "gemini_scrape" {
+		authData := p.APIKey
+		if len(keys) > 0 {
+			authData = strings.Join(keys, "; ")
+		}
+		webInst := provider.NewGeminiWebProvider(p.Name, authData, p.DefaultModel, models)
+		if p.ProxyEnabled && ui.proxyPool != nil {
+			proxyClient := ui.proxyPool.NewHTTPClientForGroup(p.ProxyGroup, 90*time.Second)
+			webInst.SetHTTPClient(proxyClient)
+		}
+		ui.providerManager.RegisterWithID(p.ID, webInst, p.Priority)
 	}
-
-	if p.ProxyEnabled && ui.proxyPool != nil {
-		proxyClient := ui.proxyPool.NewHTTPClientForGroup(p.ProxyGroup, 90*time.Second)
-		inst.SetHTTPClient(proxyClient)
-	}
-
-	ui.providerManager.RegisterWithID(p.ID, inst, p.Priority)
 }
 
 // HandleToggleModelCommand processes `/togglemodel <provider_id> <model_name>`

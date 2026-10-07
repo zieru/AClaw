@@ -293,29 +293,18 @@ func main() {
 		provMgr.SetRouter(bifrostClient)
 		for i := range dbProviders {
 			p := &dbProviders[i]
-			if p.IsActive {
-				provMgr.RegisterWithID(p.ID, bf.NewGatewayProvider(bifrostClient, p), p.Priority)
-			}
-		}
-		log.Printf("🚀 Bifrost AI Gateway aktif (routing, fallback & load-balance via Bifrost)")
-	} else {
-		// 5b. Legacy provider registration (only when Bifrost is disabled)
-		for _, p := range dbProviders {
 			if !p.IsActive {
 				continue
 			}
-			keys := p.APIKeys
-			if len(keys) == 0 && p.APIKey != "" {
-				keys = []string{p.APIKey}
-			}
-			models := p.EnabledModels()
-			if len(models) == 0 && p.DefaultModel != "" {
-				models = []string{p.DefaultModel}
-			}
-
-			var inst provider.Provider
-			switch p.Type {
-			case "gemini_web", "gemini_scrape":
+			if p.Type == "gemini_web" || p.Type == "gemini_scrape" {
+				keys := p.APIKeys
+				if len(keys) == 0 && p.APIKey != "" {
+					keys = []string{p.APIKey}
+				}
+				models := p.EnabledModels()
+				if len(models) == 0 && p.DefaultModel != "" {
+					models = []string{p.DefaultModel}
+				}
 				authData := p.APIKey
 				if len(keys) > 0 {
 					authData = strings.Join(keys, "; ")
@@ -330,27 +319,35 @@ func main() {
 						log.Printf("🔄 [GeminiWeb] Cookie sesi Google (%s) berhasil diperbarui dan disimpan secara otomatis", provName)
 					}
 				})
-				inst = webInst
-			case "gemini":
-				inst = provider.NewGeminiProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
-			case "anthropic":
-				inst = provider.NewAnthropicProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
-			case "free_router", "free_openai", "free_gemini", "opencodefree", "free":
-				inst = provider.NewFreeOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
-			default:
-				inst = provider.NewOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
+				provMgr.RegisterWithID(p.ID, webInst, p.Priority)
+				log.Printf("🤖 Provider aktif [Scraper]: %s (Tipe: %s, Default Model: %s)", p.Name, p.Type, p.DefaultModel)
+			} else {
+				provMgr.RegisterWithID(p.ID, bf.NewGatewayProvider(bifrostClient, p), p.Priority)
 			}
-			provMgr.RegisterWithID(p.ID, inst, p.Priority)
-			log.Printf("🤖 Provider aktif: %s (Tipe: %s, Default Model: %s, Keys: %d)", p.Name, p.Type, p.DefaultModel, len(keys))
 		}
-
-		// 5c. Load Registered Combos (legacy path)
-		dbCombos, _ := db.ListCombos()
-		for _, c := range dbCombos {
-			if c.IsActive {
-				comboCopy := c
-				provMgr.RegisterCombo(&comboCopy)
-				log.Printf("🔀 Combo aktif dimuat: %s (%d targets)", c.Name, len(c.Targets))
+		log.Printf("🚀 Bifrost AI Gateway aktif (routing, fallback & load-balance via Bifrost)")
+	} else {
+		// 5b. Bifrost disabled: fallback minimal registration
+		for _, p := range dbProviders {
+			if !p.IsActive {
+				continue
+			}
+			if p.Type == "gemini_web" || p.Type == "gemini_scrape" {
+				keys := p.APIKeys
+				if len(keys) == 0 && p.APIKey != "" {
+					keys = []string{p.APIKey}
+				}
+				models := p.EnabledModels()
+				if len(models) == 0 && p.DefaultModel != "" {
+					models = []string{p.DefaultModel}
+				}
+				authData := p.APIKey
+				if len(keys) > 0 {
+					authData = strings.Join(keys, "; ")
+				}
+				webInst := provider.NewGeminiWebProvider(p.Name, authData, p.DefaultModel, models)
+				provMgr.RegisterWithID(p.ID, webInst, p.Priority)
+				log.Printf("🤖 Provider aktif: %s (Tipe: %s)", p.Name, p.Type)
 			}
 		}
 	}

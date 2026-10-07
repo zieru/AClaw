@@ -1010,9 +1010,7 @@ func (w *ProviderWizard) syncProviderToManager(p *storage.ProviderRecord) {
 		models = []string{p.DefaultModel}
 	}
 
-	var inst provider.Provider
-	switch p.Type {
-	case "gemini_web", "gemini_scrape":
+	if p.Type == "gemini_web" || p.Type == "gemini_scrape" {
 		authData := p.APIKey
 		if len(keys) > 0 {
 			authData = strings.Join(keys, "; ")
@@ -1028,21 +1026,12 @@ func (w *ProviderWizard) syncProviderToManager(p *storage.ProviderRecord) {
 				}
 			})
 		}
-		inst = webInst
-	case "gemini":
-		inst = provider.NewGeminiProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
-	case "anthropic":
-		inst = provider.NewAnthropicProviderWithKeys(p.Name, keys, p.KeyStrategy, p.DefaultModel, models)
-	default:
-		inst = provider.NewOpenAIProviderWithKeys(p.Name, p.Type, p.BaseURL, keys, p.KeyStrategy, p.DefaultModel, models)
+		if p.ProxyEnabled && w.proxyPool != nil {
+			proxyClient := w.proxyPool.NewHTTPClientForGroup(p.ProxyGroup, 90*time.Second)
+			webInst.SetHTTPClient(proxyClient)
+		}
+		w.providerManager.RegisterWithID(p.ID, webInst, p.Priority)
 	}
-
-	if p.ProxyEnabled && w.proxyPool != nil {
-		proxyClient := w.proxyPool.NewHTTPClientForGroup(p.ProxyGroup, 90*time.Second)
-		inst.SetHTTPClient(proxyClient)
-	}
-
-	w.providerManager.RegisterWithID(p.ID, inst, p.Priority)
 }
 
 // CancelWizard clears state
