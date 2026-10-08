@@ -353,6 +353,7 @@ func (c *Client) stream(ctx *schemas.BifrostContext, bfReq *schemas.BifrostChatR
 	}
 
 	out := &provider.ChatResponse{}
+	var rawArgs map[int]*strings.Builder
 	for {
 		select {
 		case <-ctx.Done():
@@ -361,11 +362,13 @@ func (c *Client) stream(ctx *schemas.BifrostContext, bfReq *schemas.BifrostChatR
 		case chunk, ok := <-chunkCh:
 			if !ok {
 				req.StreamCallback(provider.StreamChunk{Done: true})
+				finalizeToolCalls(out, rawArgs)
 				out.Tries = 1
 				return out, nil
 			}
 			if chunk.BifrostError != nil {
 				req.StreamCallback(provider.StreamChunk{Done: true})
+				finalizeToolCalls(out, rawArgs)
 				return out, bifrostToErr(chunk.BifrostError)
 			}
 			if chunk.BifrostChatResponse == nil {
@@ -394,7 +397,7 @@ func (c *Client) stream(ctx *schemas.BifrostContext, bfReq *schemas.BifrostChatR
 						out.Thinking += *d.Reasoning
 						req.StreamCallback(provider.StreamChunk{Thinking: *d.Reasoning})
 					}
-					mergeToolCallDelta(out, d)
+					mergeToolCallDelta(out, d, &rawArgs)
 				}
 			}
 		}
@@ -654,7 +657,9 @@ func respToChatResponse(resp *schemas.BifrostChatResponse, req provider.ChatRequ
 			if d.Reasoning != nil {
 				out.Thinking = *d.Reasoning
 			}
-			mergeToolCallDelta(out, d)
+			var rawArgs map[int]*strings.Builder
+			mergeToolCallDelta(out, d, &rawArgs)
+			finalizeToolCalls(out, rawArgs)
 		}
 	}
 	if resp.Usage != nil {

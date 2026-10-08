@@ -189,9 +189,13 @@ func toBifrostTools(tools []tools.Tool) []schemas.ChatTool {
 }
 
 // mergeToolCallDelta accumulates a streaming tool-call delta into the response.
-func mergeToolCallDelta(out *provider.ChatResponse, delta *schemas.ChatStreamResponseChoiceDelta) {
+// rawArgs tracks unmarshaled argument JSON fragments per tool call index.
+func mergeToolCallDelta(out *provider.ChatResponse, delta *schemas.ChatStreamResponseChoiceDelta, rawArgs *map[int]*strings.Builder) {
 	if delta == nil || len(delta.ToolCalls) == 0 {
 		return
+	}
+	if *rawArgs == nil {
+		*rawArgs = make(map[int]*strings.Builder)
 	}
 	for _, tc := range delta.ToolCalls {
 		idx := int(tc.Index)
@@ -199,7 +203,9 @@ func mergeToolCallDelta(out *provider.ChatResponse, delta *schemas.ChatStreamRes
 			out.ToolCalls = make([]provider.ToolCall, 0)
 		}
 		for len(out.ToolCalls) <= idx {
-			out.ToolCalls = append(out.ToolCalls, provider.ToolCall{})
+			out.ToolCalls = append(out.ToolCalls, provider.ToolCall{
+				Arguments: make(map[string]interface{}),
+			})
 		}
 		if tc.ID != nil {
 			out.ToolCalls[idx].ID += *tc.ID
@@ -207,9 +213,32 @@ func mergeToolCallDelta(out *provider.ChatResponse, delta *schemas.ChatStreamRes
 		if tc.Function.Name != nil {
 			out.ToolCalls[idx].Name += *tc.Function.Name
 		}
-		out.ToolCalls[idx].Arguments = map[string]interface{}{}
 		if tc.Function.Arguments != "" {
-			_ = json.Unmarshal([]byte(tc.Function.Arguments), &out.ToolCalls[idx].Arguments)
+			sb, ok := (*rawArgs)[idx]
+			if !ok {
+				sb = &strings.Builder{}
+				(*rawArgs)[idx] = sb
+			}
+			sb.WriteString(tc.Function.Arguments)
 		}
 	}
 }
+
+// finalizeToolCalls parses accumulated JSON arguments for all tool calls.
+func finalizeToolCalls(out *provider.ChatResponse, rawArgs map[int]*strings.Builder) {
+	if out == nil || len(out.ToolCalls) == 0 {
+		return
+	}
+	for idx := range out.ToolCalls {
+		if out.ToolCalls[idx].Arguments == nil {
+			out.ToolCalls[idx].Arguments = make(map[string]interface{})
+		}
+		if sb, ok := rawArgs[idx]; ok && sb.Len() > 0 {
+			var parsed map[string]interface{}
+			if err := json.Unmarshal([]byte(sb.String()), &parsed); err == nil && parsed != nil {
+				out.ToolCalls[idx].Arguments = parsed
+			}
+		}
+	}
+}
+
