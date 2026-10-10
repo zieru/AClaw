@@ -992,7 +992,7 @@ func (a *AdminBot) registerCommands() {
 		{Text: "logs", Description: "Lihat log aktivitas request & payload"},
 		{Text: "backup", Description: "Unduh file backup SQLite & Markdown"},
 		{Text: "update", Description: "Cek & pasang update binary dari GitHub"},
-		{Text: "restartg3a", Description: "Restart g3a MCP service (DuckDB & SOP GraPARI)"},
+		{Text: "restartg3a", Description: "Cek update & restart g3a MCP service (DuckDB & SOP)"},
 	}
 
 	if err := a.bot.SetCommands(adminCommands); err != nil {
