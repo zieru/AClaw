@@ -40,6 +40,7 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle("/setsudo", a.handleSetSudo)
 	a.bot.Handle("/password", a.handleSetSudo)
 	a.bot.Handle("/clearsudo", a.handleClearSudo)
+	a.bot.Handle("/restartg3a", a.handleRestartG3A)
 
 	// Web Admin Commands
 	a.bot.Handle("/webadmin", func(c tele.Context) error {
