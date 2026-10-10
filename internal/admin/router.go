@@ -145,6 +145,7 @@ func (a *AdminBot) registerRoutes() {
 		}
 		return nil
 	})
+	a.bot.Handle(&tele.Btn{Unique: "btn_restart_g3a"}, a.handleRestartG3A)
 	a.bot.Handle(&tele.Btn{Unique: "menu_topic"}, a.topicUI.HandleTopicDashboard)
 	a.bot.Handle(&tele.Btn{Unique: "menu_status"}, a.handleStatus)
 	a.bot.Handle(&tele.Btn{Unique: "btn_refresh_status"}, func(c tele.Context) error {
@@ -991,6 +992,7 @@ func (a *AdminBot) registerCommands() {
 		{Text: "logs", Description: "Lihat log aktivitas request & payload"},
 		{Text: "backup", Description: "Unduh file backup SQLite & Markdown"},
 		{Text: "update", Description: "Cek & pasang update binary dari GitHub"},
+		{Text: "restartg3a", Description: "Restart g3a MCP service (DuckDB & SOP GraPARI)"},
 	}
 
 	if err := a.bot.SetCommands(adminCommands); err != nil {
