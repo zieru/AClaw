@@ -563,8 +563,71 @@ func (m *Manager) ListAll() []Provider {
 	return list
 }
 
+func isNativeScraper(p Provider) bool {
+	if p == nil {
+		return false
+	}
+	typ := strings.ToLower(p.Type())
+	return typ == "gemini_web" || typ == "gemini_scrape"
+}
+
+// findNativeScraperLocked finds an active web scraper provider if requested by preferredName or model
+func (m *Manager) findNativeScraperLocked(preferredName, model string) (Provider, string) {
+	// 1. If preferredName is given, check if it matches a native scraper provider
+	if preferredName != "" {
+		if p, ok := m.getLocked(preferredName); ok && isNativeScraper(p) {
+			cleanModel := model
+			if strings.Contains(cleanModel, ":") {
+				parts := strings.SplitN(cleanModel, ":", 2)
+				cleanModel = parts[1]
+			}
+			return p, cleanModel
+		}
+	}
+
+	// 2. If model contains "provider:model" e.g. "gemini_web:gemini-web-pro" or "Gemini Web (Google Auth):gemini-web-pro"
+	if strings.Contains(model, ":") {
+		parts := strings.SplitN(model, ":", 2)
+		provPart := strings.TrimSpace(parts[0])
+		modelPart := strings.TrimSpace(parts[1])
+		if p, ok := m.getLocked(provPart); ok && isNativeScraper(p) {
+			return p, modelPart
+		}
+	}
+
+	// 3. By model name matching native scraper's supported models or default model
+	cleanModel := strings.ToLower(strings.TrimSpace(model))
+	if cleanModel != "" {
+		for _, p := range m.providers {
+			if !isNativeScraper(p) {
+				continue
+			}
+			if strings.EqualFold(p.DefaultModel(), model) {
+				return p, p.DefaultModel()
+			}
+			for _, mName := range p.Models() {
+				if strings.EqualFold(mName, model) {
+					return p, mName
+				}
+			}
+		}
+	}
+
+	return nil, model
+}
+
 // GenerateWithFallback executes chat with 9Router Smart Routing, Combo resolution, and Failsafe Fallbacks
 func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string, req ChatRequest) (*ChatResponse, error) {
+	// Native scrapers (like GeminiWebProvider) must be executed directly by the manager
+	// because external API gateways (Bifrost) do not support web session scraping.
+	m.mu.RLock()
+	if scraper, targetModel := m.findNativeScraperLocked(preferredName, req.Model); scraper != nil {
+		m.mu.RUnlock()
+		req.Model = targetModel
+		return scraper.GenerateChat(ctx, req)
+	}
+	m.mu.RUnlock()
+
 	// When an external router (Bifrost) is attached, delegate the entire routing,
 	// fallback and streaming handling to it.
 	if m.router != nil {

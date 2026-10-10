@@ -52,6 +52,9 @@ func (a *Account) GetConfiguredProviders() ([]schemas.ModelProvider, error) {
 		if !p.IsActive {
 			continue
 		}
+		if p.Type == "gemini_web" || p.Type == "gemini_scrape" {
+			continue
+		}
 		k := providerKey(p)
 		if seen[string(k)] {
 			continue

@@ -414,12 +414,22 @@ func (c *ModelCatalog) loadBuiltInSeeds() {
 			{ModelID: "o3-mini", DisplayName: "OpenAI o3-mini Reasoning", ProviderFamily: "openai", SupportsVision: false, SupportsReasoning: true, SupportsTools: true},
 
 			// Google Gemini Models (Multimodal / Vision + Audio)
+			{ModelID: "gemini-3.8-flash", DisplayName: "Gemini 3.8 Flash", ProviderFamily: "google", SupportsVision: true, SupportsAudioIn: true, SupportsAudioOut: true, SupportsTools: true},
+			{ModelID: "gemini-3.5-flash", DisplayName: "Gemini 3.5 Flash", ProviderFamily: "google", SupportsVision: true, SupportsAudioIn: true, SupportsAudioOut: true, SupportsTools: true},
+			{ModelID: "gemini-3.5-flash-lite", DisplayName: "Gemini 3.5 Flash Lite", ProviderFamily: "google", SupportsVision: true, SupportsAudioIn: true, SupportsAudioOut: true, SupportsTools: true},
+			{ModelID: "gemini-2.5-flash", DisplayName: "Gemini 2.5 Flash", ProviderFamily: "google", SupportsVision: true, SupportsAudioIn: true, SupportsAudioOut: true, SupportsTools: true},
+			{ModelID: "gemini-2.5-flash-lite", DisplayName: "Gemini 2.5 Flash Lite", ProviderFamily: "google", SupportsVision: true, SupportsAudioIn: true, SupportsAudioOut: true, SupportsTools: true},
 			{ModelID: "gemini-2.0-flash", DisplayName: "Gemini 2.0 Flash", ProviderFamily: "google", SupportsVision: true, SupportsAudioIn: true, SupportsAudioOut: true, SupportsTools: true},
 			{ModelID: "gemini-2.0-flash-exp", DisplayName: "Gemini 2.0 Flash Exp", ProviderFamily: "google", SupportsVision: true, SupportsAudioIn: true, SupportsAudioOut: true, SupportsTools: true},
 			{ModelID: "gemini-2.0-flash-lite", DisplayName: "Gemini 2.0 Flash Lite", ProviderFamily: "google", SupportsVision: true, SupportsTools: true},
 			{ModelID: "gemini-2.0-pro-exp", DisplayName: "Gemini 2.0 Pro Exp", ProviderFamily: "google", SupportsVision: true, SupportsTools: true},
 			{ModelID: "gemini-1.5-pro", DisplayName: "Gemini 1.5 Pro", ProviderFamily: "google", SupportsVision: true, SupportsAudioIn: true, SupportsTools: true},
 			{ModelID: "gemini-1.5-flash", DisplayName: "Gemini 1.5 Flash", ProviderFamily: "google", SupportsVision: true, SupportsAudioIn: true, SupportsTools: true},
+
+			// Google Gemini Web Scrape Models
+			{ModelID: "gemini-web-pro", DisplayName: "Gemini Web Pro (Google Scrape)", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
+			{ModelID: "gemini-web-flash", DisplayName: "Gemini Web Flash (Google Scrape)", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
+			{ModelID: "gemini-web-ultra", DisplayName: "Gemini Web Ultra (Google Scrape)", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
 
 			// Anthropic Claude Models (Vision)
 			{ModelID: "claude-3-5-sonnet", DisplayName: "Claude 3.5 Sonnet", ProviderFamily: "anthropic", SupportsVision: true, SupportsTools: true},

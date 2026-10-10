@@ -209,28 +209,28 @@ type EmbeddingConfig struct {
 
 // SearchConfig defines configuration for GoAssistant's multi-provider search engine
 type SearchConfig struct {
-	Enabled         bool            `yaml:"enabled"`
-	Provider        string          `yaml:"provider"` // "auto", "tavily", "firecrawl", "duckduckgo"
-	Strategy        string          `yaml:"strategy"` // "fallback", "roundrobin"
-	MaxResults      int             `yaml:"max_results"`
-	FallbackEnabled bool            `yaml:"fallback_enabled"`
-	TimeoutSeconds  int             `yaml:"timeout_seconds"`
-	Tavily          TavilyConfig    `yaml:"tavily"`
-	Firecrawl       FirecrawlConfig `yaml:"firecrawl"`
+	Enabled         bool            `yaml:"enabled" json:"enabled"`
+	Provider        string          `yaml:"provider" json:"provider"` // "auto", "tavily", "firecrawl", "duckduckgo"
+	Strategy        string          `yaml:"strategy" json:"strategy"` // "fallback", "roundrobin"
+	MaxResults      int             `yaml:"max_results" json:"max_results"`
+	FallbackEnabled bool            `yaml:"fallback_enabled" json:"fallback_enabled"`
+	TimeoutSeconds  int             `yaml:"timeout_seconds" json:"timeout_seconds"`
+	Tavily          TavilyConfig    `yaml:"tavily" json:"tavily"`
+	Firecrawl       FirecrawlConfig `yaml:"firecrawl" json:"firecrawl"`
 }
 
 // TavilyConfig defines configuration for Tavily Search API
 type TavilyConfig struct {
-	APIKey        string `yaml:"api_key"`
-	BaseURL       string `yaml:"base_url"`
-	SearchDepth   string `yaml:"search_depth"`   // "basic" or "advanced"
-	IncludeAnswer bool   `yaml:"include_answer"` // include quick AI answer
+	APIKey        string `yaml:"api_key" json:"api_key"`
+	BaseURL       string `yaml:"base_url" json:"base_url"`
+	SearchDepth   string `yaml:"search_depth" json:"search_depth"`   // "basic" or "advanced"
+	IncludeAnswer bool   `yaml:"include_answer" json:"include_answer"` // include quick AI answer
 }
 
 // FirecrawlConfig defines configuration for Firecrawl Search API
 type FirecrawlConfig struct {
-	APIKey  string `yaml:"api_key"`
-	BaseURL string `yaml:"base_url"`
+	APIKey  string `yaml:"api_key" json:"api_key"`
+	BaseURL string `yaml:"base_url" json:"base_url"`
 }
 
 // OmniRouteConfig defines configuration for co-located OmniRoute gateway collaboration

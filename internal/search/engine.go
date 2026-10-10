@@ -175,6 +175,61 @@ func (e *Engine) SetFirecrawlKey(key string) {
 	e.providers["firecrawl"] = NewFirecrawlProvider(e.cfg.Firecrawl, timeout)
 }
 
+// SetTavilyDepth updates Tavily search depth ("basic" or "advanced")
+func (e *Engine) SetTavilyDepth(depth string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	d := strings.ToLower(strings.TrimSpace(depth))
+	if d == "advanced" {
+		e.cfg.Tavily.SearchDepth = "advanced"
+	} else {
+		e.cfg.Tavily.SearchDepth = "basic"
+	}
+	timeout := time.Duration(e.cfg.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	e.providers["tavily"] = NewTavilyProvider(e.cfg.Tavily, timeout)
+}
+
+// SetTavilyIncludeAnswer updates whether Tavily includes quick AI answer
+func (e *Engine) SetTavilyIncludeAnswer(include bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cfg.Tavily.IncludeAnswer = include
+	timeout := time.Duration(e.cfg.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	e.providers["tavily"] = NewTavilyProvider(e.cfg.Tavily, timeout)
+}
+
+// SetFirecrawlBaseURL updates Firecrawl Base URL (e.g. self-hosted)
+func (e *Engine) SetFirecrawlBaseURL(baseURL string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	b := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if b == "" {
+		b = "https://api.firecrawl.dev"
+	}
+	e.cfg.Firecrawl.BaseURL = b
+	timeout := time.Duration(e.cfg.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	e.providers["firecrawl"] = NewFirecrawlProvider(e.cfg.Firecrawl, timeout)
+}
+
+// SetMaxResults updates default max search results per query
+func (e *Engine) SetMaxResults(limit int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if limit <= 0 {
+		limit = 5
+	}
+	e.cfg.MaxResults = limit
+}
+
 // UpdateConfig updates the full search configuration dynamically
 func (e *Engine) UpdateConfig(cfg config.SearchConfig) {
 	e.mu.Lock()

@@ -303,6 +303,24 @@ func (c *Client) Generate(ctx context.Context, preferredName string, req provide
 
 	provKey, model, fallbacks := c.resolve(preferredName, req)
 
+	// If resolved provider is a native scraper (gemini_web, gemini_scrape), delegate directly to Manager
+	pRec := c.findProviderByName(string(provKey))
+	if pRec == nil {
+		pRec = c.findProviderByID(string(provKey))
+	}
+	if pRec != nil && (pRec.Type == "gemini_web" || pRec.Type == "gemini_scrape") {
+		if pMgr := provider.GetManager(); pMgr != nil {
+			if p, ok := pMgr.Get(string(providerKey(pRec))); ok && p != nil {
+				req.Model = model
+				return p.GenerateChat(ctx, req)
+			}
+			if p, ok := pMgr.Get(pRec.ID); ok && p != nil {
+				req.Model = model
+				return p.GenerateChat(ctx, req)
+			}
+		}
+	}
+
 	bfReq := &schemas.BifrostChatRequest{
 		Provider:  schemas.ModelProvider(provKey),
 		Model:     model,

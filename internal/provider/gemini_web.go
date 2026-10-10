@@ -33,12 +33,15 @@ type GeminiWebProvider struct {
 	conversationID string
 	responseID     string
 	choiceID       string
+	buildLabel     string
 	client         *http.Client
 	onCookieUpdate CookieUpdateCallback
 }
 
 var (
-	snlm0eRegex = regexp.MustCompile(`"SNlM0e":"([^"]+)"`)
+	snlm0eRegex    = regexp.MustCompile(`"SNlM0e"\s*:\s*"([^"]+)"`)
+	snlm0eAltRegex = regexp.MustCompile(`"SNlM0e"\s*,\s*null\s*,\s*"([^"]+)"`)
+	cfb2hRegex     = regexp.MustCompile(`"cfb2h"\s*:\s*"([^"]+)"`)
 )
 
 // NewGeminiWebProvider creates a new Gemini Web Scrape provider instance
@@ -323,19 +326,18 @@ func (p *GeminiWebProvider) FetchSNlM0e(ctx context.Context) (string, error) {
 	}
 
 	bodyStr := string(body)
+	if m := cfb2hRegex.FindStringSubmatch(bodyStr); len(m) >= 2 {
+		p.mu.Lock()
+		p.buildLabel = m[1]
+		p.mu.Unlock()
+	}
+
 	matches := snlm0eRegex.FindStringSubmatch(bodyStr)
 	if len(matches) < 2 {
 		// Try alternative pattern for WIZ_global_data SNlM0e
-		altRe := regexp.MustCompile(`"SNlM0e",null,"([^"]+)"`)
-		altMatches := altRe.FindStringSubmatch(bodyStr)
-		if len(altMatches) >= 2 {
-			p.mu.Lock()
-			p.snlm0e = altMatches[1]
-			p.snlm0eFetched = time.Now()
-			p.mu.Unlock()
-			log.Printf("🔄 [GeminiWeb] Session token SNlM0e (%s) berhasil diperbarui", provName)
-			return altMatches[1], nil
-		}
+		matches = snlm0eAltRegex.FindStringSubmatch(bodyStr)
+	}
+	if len(matches) < 2 {
 		extractErr := errors.New("gagal mengekstrak session token SNlM0e dari Gemini Web. Pastikan cookie __Secure-1PSID sudah benar dan akun sudah login")
 		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, extractErr)
 		return "", extractErr
@@ -411,7 +413,13 @@ func (p *GeminiWebProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 	formData.Set("at", snlm0e)
 
 	randReqID := rand.Intn(900000) + 100000
-	apiURL := fmt.Sprintf("https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=boq_assistant-bard-web-server_20240519.16_p0&_reqid=%d&rt=c", randReqID)
+	buildLabel := "boq_gemini-web-uiserver_20261008.15_p0"
+	p.mu.Lock()
+	if p.buildLabel != "" {
+		buildLabel = p.buildLabel
+	}
+	p.mu.Unlock()
+	apiURL := fmt.Sprintf("https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=%s&_reqid=%d&rt=c", buildLabel, randReqID)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", apiURL, strings.NewReader(formData.Encode()))
 	if err != nil {
