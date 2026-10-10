@@ -10,22 +10,34 @@ import (
 
 	"goassistant/internal/config"
 	"goassistant/internal/search"
+	"goassistant/internal/storage"
 	tele "gopkg.in/telebot.v3"
 )
 
 // SearchUIHandler manages Telegram interactive controls for the multi-provider search engine
 type SearchUIHandler struct {
 	cfg                 *config.AppConfig
+	db                  *storage.DB
 	waitingTavilyKey    sync.Map
 	waitingFirecrawlKey sync.Map
+	waitingFirecrawlURL sync.Map
 	waitingTestQuery    sync.Map
 }
 
 // NewSearchUIHandler creates a new SearchUIHandler instance
-func NewSearchUIHandler(cfg *config.AppConfig) *SearchUIHandler {
+func NewSearchUIHandler(cfg *config.AppConfig, db *storage.DB) *SearchUIHandler {
 	return &SearchUIHandler{
 		cfg: cfg,
+		db:  db,
 	}
+}
+
+func (h *SearchUIHandler) persistConfig() {
+	if h.db == nil {
+		return
+	}
+	eng := search.GetGlobalEngine()
+	_ = search.SaveDynamicConfig(h.db, eng.Config())
 }
 
 // HandleSearchDashboard renders the Search Engine Control Plane dashboard
@@ -52,12 +64,17 @@ func (h *SearchUIHandler) HandleSearchDashboard(c tele.Context) error {
 	if sCfg.FallbackEnabled {
 		failoverLabel = "✅ Aktif (Otomatis beralih jika limit/error)"
 	}
-	sb.WriteString(fmt.Sprintf("• Failover Cadangan: <b>%s</b>\n\n", failoverLabel))
+	sb.WriteString(fmt.Sprintf("• Failover Cadangan: <b>%s</b>\n", failoverLabel))
+	sb.WriteString(fmt.Sprintf("• Batas Dokumen Hasil: <b>%d dokumen</b>\n\n", sCfg.MaxResults))
 
 	sb.WriteString("<b>Status Ketersediaan Provider:</b>\n")
 	tavilyStatus := "⚪ Belum diset"
 	if sCfg.Tavily.APIKey != "" {
-		tavilyStatus = fmt.Sprintf("🟢 Terkonfigurasi (<code>%s</code>)", maskAPIKey(sCfg.Tavily.APIKey))
+		depthBadge := "⚡ Basic"
+		if strings.ToLower(sCfg.Tavily.SearchDepth) == "advanced" {
+			depthBadge = "🔬 Advanced"
+		}
+		tavilyStatus = fmt.Sprintf("🟢 Terkonfigurasi (<code>%s</code> | %s)", maskAPIKey(sCfg.Tavily.APIKey), depthBadge)
 	}
 	sb.WriteString(fmt.Sprintf("• <b>Tavily AI Search</b>: %s\n", tavilyStatus))
 
@@ -66,9 +83,12 @@ func (h *SearchUIHandler) HandleSearchDashboard(c tele.Context) error {
 		firecrawlStatus = fmt.Sprintf("🟢 Terkonfigurasi (<code>%s</code>)", maskAPIKey(sCfg.Firecrawl.APIKey))
 	}
 	sb.WriteString(fmt.Sprintf("• <b>Firecrawl Web</b>: %s\n", firecrawlStatus))
+	if sCfg.Firecrawl.BaseURL != "" && sCfg.Firecrawl.BaseURL != "https://api.firecrawl.dev" {
+		sb.WriteString(fmt.Sprintf("  └ <i>Custom URL: <code>%s</code></i>\n", html.EscapeString(sCfg.Firecrawl.BaseURL)))
+	}
 	sb.WriteString("• <b>DuckDuckGo</b>: 🟢 Siap (Fallback Zero-Auth)\n\n")
 
-	sb.WriteString("💡 <i>Pilih provider, ubah strategi, atau atur API key menggunakan tombol di bawah:</i>")
+	sb.WriteString("💡 <i>Pilih provider, ubah strategi, atau atur API key & pengaturan lanjutan menggunakan tombol di bawah:</i>")
 
 	menu := h.BuildKeyboard(sCfg)
 	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
@@ -111,6 +131,7 @@ func (h *SearchUIHandler) BuildKeyboard(sCfg config.SearchConfig) *tele.ReplyMar
 
 	btnSetTavily := menu.Data("🔑 Set Tavily Key", "search_set_tavily")
 	btnSetFirecrawl := menu.Data("🔑 Set Firecrawl Key", "search_set_firecrawl")
+	btnAdv := menu.Data("⚙️ Pengaturan Lanjutan", "search_adv_menu")
 	btnTest := menu.Data("🧪 Test Search Query", "search_test_prompt")
 	btnBack := menu.Data("⬅️ Kembali ke Menu Utama", "menu_main")
 
@@ -119,11 +140,134 @@ func (h *SearchUIHandler) BuildKeyboard(sCfg config.SearchConfig) *tele.ReplyMar
 		menu.Row(btnFirecrawl, btnDDG),
 		menu.Row(btnToggleStrat, btnToggleFB),
 		menu.Row(btnSetTavily, btnSetFirecrawl),
-		menu.Row(btnTest),
+		menu.Row(btnAdv, btnTest),
 		menu.Row(btnBack),
 	)
 
 	return menu
+}
+
+// HandleAdvancedSearchMenu displays advanced settings for Tavily and Firecrawl
+func (h *SearchUIHandler) HandleAdvancedSearchMenu(c tele.Context) error {
+	eng := search.GetGlobalEngine()
+	sCfg := eng.Config()
+
+	var sb strings.Builder
+	sb.WriteString("⚙️ <b>Pengaturan Lanjutan Web Search</b>\n\n")
+
+	depthStr := "⚡ Basic (Cepat)"
+	if strings.ToLower(sCfg.Tavily.SearchDepth) == "advanced" {
+		depthStr = "🔬 Advanced (Riset Mendalam)"
+	}
+	sb.WriteString(fmt.Sprintf("• <b>Tavily Search Depth</b>: %s\n", depthStr))
+
+	ansStr := "❌ OFF"
+	if sCfg.Tavily.IncludeAnswer {
+		ansStr = "✅ ON (Ringkasan AI instan)"
+	}
+	sb.WriteString(fmt.Sprintf("• <b>Tavily Instant AI Answer</b>: %s\n", ansStr))
+
+	fcURL := sCfg.Firecrawl.BaseURL
+	if fcURL == "" {
+		fcURL = "https://api.firecrawl.dev (Official)"
+	}
+	sb.WriteString(fmt.Sprintf("• <b>Firecrawl Base URL</b>: <code>%s</code>\n", html.EscapeString(fcURL)))
+	sb.WriteString(fmt.Sprintf("• <b>Batas Dokumen Hasil</b>: <b>%d</b> dokumen\n\n", sCfg.MaxResults))
+
+	sb.WriteString("<i>Gunakan tombol di bawah untuk mengubah parameter spesifik:</i>")
+
+	menu := &tele.ReplyMarkup{}
+
+	depthBtnLabel := "🔬 Ubah Depth: Advanced"
+	if strings.ToLower(sCfg.Tavily.SearchDepth) == "advanced" {
+		depthBtnLabel = "⚡ Ubah Depth: Basic"
+	}
+	btnToggleDepth := menu.Data(depthBtnLabel, "search_adv_toggle_depth")
+
+	ansBtnLabel := "💡 AI Answer: ❌ OFF"
+	if !sCfg.Tavily.IncludeAnswer {
+		ansBtnLabel = "💡 AI Answer: ✅ ON"
+	}
+	btnToggleAns := menu.Data(ansBtnLabel, "search_adv_toggle_answer")
+
+	btnSetFCURL := menu.Data("🌐 Ganti Firecrawl URL", "search_adv_set_fc_url")
+
+	formatLimit := func(n int) string {
+		if sCfg.MaxResults == n {
+			return fmt.Sprintf("🔘 Limit %d", n)
+		}
+		return fmt.Sprintf("Limit %d", n)
+	}
+	btnLim3 := menu.Data(formatLimit(3), "search_adv_lim_3")
+	btnLim5 := menu.Data(formatLimit(5), "search_adv_lim_5")
+	btnLim10 := menu.Data(formatLimit(10), "search_adv_lim_10")
+
+	btnBack := menu.Data("⬅️ Kembali ke Menu Search", "menu_search")
+
+	menu.Inline(
+		menu.Row(btnToggleDepth, btnToggleAns),
+		menu.Row(btnSetFCURL),
+		menu.Row(btnLim3, btnLim5, btnLim10),
+		menu.Row(btnBack),
+	)
+
+	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
+}
+
+// HandleToggleTavilyDepthCallback switches between basic and advanced search depth
+func (h *SearchUIHandler) HandleToggleTavilyDepthCallback(c tele.Context) error {
+	eng := search.GetGlobalEngine()
+	curr := strings.ToLower(eng.Config().Tavily.SearchDepth)
+	newDepth := "advanced"
+	if curr == "advanced" {
+		newDepth = "basic"
+	}
+	eng.SetTavilyDepth(newDepth)
+	if h.cfg != nil {
+		h.cfg.Search.Tavily.SearchDepth = newDepth
+	}
+	h.persistConfig()
+	_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("Tavily Depth diubah ke: %s", strings.ToUpper(newDepth))})
+	return h.HandleAdvancedSearchMenu(c)
+}
+
+// HandleToggleTavilyAnswerCallback toggles Tavily instant AI answer inclusion
+func (h *SearchUIHandler) HandleToggleTavilyAnswerCallback(c tele.Context) error {
+	eng := search.GetGlobalEngine()
+	newVal := !eng.Config().Tavily.IncludeAnswer
+	eng.SetTavilyIncludeAnswer(newVal)
+	if h.cfg != nil {
+		h.cfg.Search.Tavily.IncludeAnswer = newVal
+	}
+	h.persistConfig()
+	status := "DINONAKTIFKAN"
+	if newVal {
+		status = "DIAKTIFKAN"
+	}
+	_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("Tavily AI Answer %s", status)})
+	return h.HandleAdvancedSearchMenu(c)
+}
+
+// HandlePromptFirecrawlURL prompts user for custom Firecrawl Base URL
+func (h *SearchUIHandler) HandlePromptFirecrawlURL(c tele.Context) error {
+	_ = c.Respond()
+	h.waitingFirecrawlURL.Store(c.Sender().ID, true)
+	return c.Send("🌐 <b>PENGATURAN FIRECRAWL BASE URL</b>\n\n"+
+		"Silakan reply pesan ini dengan Base URL Firecrawl (contoh: <code>https://api.firecrawl.dev</code> atau <code>http://localhost:3002</code> jika self-hosted).\n"+
+		"Ketik <code>reset</code> atau <code>default</code> untuk kembali ke official endpoint.\n\n"+
+		"💡 <i>Kirim /cancel untuk membatalkan.</i>", tele.ModeHTML)
+}
+
+// HandleSetMaxResultsCallback updates max results limit
+func (h *SearchUIHandler) HandleSetMaxResultsCallback(c tele.Context, limit int) error {
+	eng := search.GetGlobalEngine()
+	eng.SetMaxResults(limit)
+	if h.cfg != nil {
+		h.cfg.Search.MaxResults = limit
+	}
+	h.persistConfig()
+	_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("Batas dokumen diubah ke: %d", limit)})
+	return h.HandleAdvancedSearchMenu(c)
 }
 
 // HandleSwitchProviderCallback switches active search provider
@@ -134,6 +278,7 @@ func (h *SearchUIHandler) HandleSwitchProviderCallback(c tele.Context, prov stri
 	if h.cfg != nil {
 		h.cfg.Search.Provider = prov
 	}
+	h.persistConfig()
 	return h.HandleSearchDashboard(c)
 }
 
@@ -150,6 +295,7 @@ func (h *SearchUIHandler) HandleToggleStrategyCallback(c tele.Context) error {
 	if h.cfg != nil {
 		h.cfg.Search.Strategy = newStrat
 	}
+	h.persistConfig()
 
 	_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("Strategi diubah ke: %s", strings.ToUpper(newStrat))})
 	return h.HandleSearchDashboard(c)
@@ -163,6 +309,7 @@ func (h *SearchUIHandler) HandleToggleFallbackCallback(c tele.Context) error {
 	if h.cfg != nil {
 		h.cfg.Search.FallbackEnabled = newVal
 	}
+	h.persistConfig()
 
 	statusText := "Failover DIAKTIFKAN"
 	if !newVal {
@@ -202,7 +349,7 @@ func (h *SearchUIHandler) HandlePromptTestQuery(c tele.Context) error {
 		"💡 <i>Kirim /cancel untuk membatalkan.</i>", tele.ModeHTML)
 }
 
-// HandleTextMessage intercepts input for Tavily key, Firecrawl key, or test queries
+// HandleTextMessage intercepts input for Tavily key, Firecrawl key, Firecrawl URL, or test queries
 func (h *SearchUIHandler) HandleTextMessage(c tele.Context) (bool, error) {
 	senderID := c.Sender().ID
 	txt := strings.TrimSpace(c.Text())
@@ -215,6 +362,10 @@ func (h *SearchUIHandler) HandleTextMessage(c tele.Context) (bool, error) {
 		if _, ok := h.waitingFirecrawlKey.Load(senderID); ok {
 			h.waitingFirecrawlKey.Delete(senderID)
 			return true, c.Send("🛑 Pengaturan Firecrawl API Key dibatalkan.", tele.ModeHTML)
+		}
+		if _, ok := h.waitingFirecrawlURL.Load(senderID); ok {
+			h.waitingFirecrawlURL.Delete(senderID)
+			return true, c.Send("🛑 Pengaturan Firecrawl Base URL dibatalkan.", tele.ModeHTML)
 		}
 		if _, ok := h.waitingTestQuery.Load(senderID); ok {
 			h.waitingTestQuery.Delete(senderID)
@@ -231,12 +382,14 @@ func (h *SearchUIHandler) HandleTextMessage(c tele.Context) (bool, error) {
 			if h.cfg != nil {
 				h.cfg.Search.Tavily.APIKey = ""
 			}
+			h.persistConfig()
 			return true, c.Send("🗑️ Tavily API Key berhasil dihapus/dikosongkan.", tele.ModeHTML)
 		}
 		eng.SetTavilyKey(txt)
 		if h.cfg != nil {
 			h.cfg.Search.Tavily.APIKey = txt
 		}
+		h.persistConfig()
 		return true, c.Send(fmt.Sprintf("✅ <b>Tavily API Key berhasil disimpan!</b>\nKey: <code>%s</code>", maskAPIKey(txt)), tele.ModeHTML)
 	}
 
@@ -249,13 +402,31 @@ func (h *SearchUIHandler) HandleTextMessage(c tele.Context) (bool, error) {
 			if h.cfg != nil {
 				h.cfg.Search.Firecrawl.APIKey = ""
 			}
+			h.persistConfig()
 			return true, c.Send("🗑️ Firecrawl API Key berhasil dihapus/dikosongkan.", tele.ModeHTML)
 		}
 		eng.SetFirecrawlKey(txt)
 		if h.cfg != nil {
 			h.cfg.Search.Firecrawl.APIKey = txt
 		}
+		h.persistConfig()
 		return true, c.Send(fmt.Sprintf("✅ <b>Firecrawl API Key berhasil disimpan!</b>\nKey: <code>%s</code>", maskAPIKey(txt)), tele.ModeHTML)
+	}
+
+	// 2b. Firecrawl Base URL Input
+	if _, ok := h.waitingFirecrawlURL.Load(senderID); ok {
+		h.waitingFirecrawlURL.Delete(senderID)
+		eng := search.GetGlobalEngine()
+		targetURL := txt
+		if strings.EqualFold(txt, "reset") || strings.EqualFold(txt, "default") {
+			targetURL = "https://api.firecrawl.dev"
+		}
+		eng.SetFirecrawlBaseURL(targetURL)
+		if h.cfg != nil {
+			h.cfg.Search.Firecrawl.BaseURL = targetURL
+		}
+		h.persistConfig()
+		return true, c.Send(fmt.Sprintf("✅ <b>Firecrawl Base URL berhasil disimpan!</b>\nEndpoint: <code>%s</code>", html.EscapeString(targetURL)), tele.ModeHTML)
 	}
 
 	// 3. Test Search Query Input
@@ -324,6 +495,7 @@ func (h *SearchUIHandler) HandleSetProviderCommand(c tele.Context) error {
 	if h.cfg != nil {
 		h.cfg.Search.Provider = prov
 	}
+	h.persistConfig()
 	return c.Reply(fmt.Sprintf("✅ Provider web search diubah ke: <b>%s</b>", strings.ToUpper(prov)), tele.ModeHTML)
 }
 
@@ -338,6 +510,7 @@ func (h *SearchUIHandler) HandleSetStrategyCommand(c tele.Context) error {
 	if h.cfg != nil {
 		h.cfg.Search.Strategy = strat
 	}
+	h.persistConfig()
 	return c.Reply(fmt.Sprintf("✅ Strategi pencarian diubah ke: <b>%s</b>", strings.ToUpper(strat)), tele.ModeHTML)
 }
 

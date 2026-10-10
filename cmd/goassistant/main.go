@@ -178,9 +178,12 @@ func main() {
 	provider.InitCatalog(db)
 
 	// 3. Initialize Core Managers
-	search.InitGlobalEngine(cfg.Search)
-	log.Printf("🔍 Web Search Engine aktif (Provider: %s, Fallback: %t)", cfg.Search.Provider, cfg.Search.FallbackEnabled)
+	cfg.Search = search.LoadDynamicConfig(db, cfg.Search)
+	searchEng := search.InitGlobalEngine(cfg.Search)
+	log.Printf("🔍 Web Search Engine aktif (Provider: %s, Fallback: %t, Strategy: %s)", cfg.Search.Provider, cfg.Search.FallbackEnabled, cfg.Search.Strategy)
 	toolReg := tools.GetRegistry()
+	toolReg.Register(tools.NewWebSearchTool(searchEng))
+	log.Println("🌐 Web Search Tool ('web_search') didaftarkan ke AI Tool Registry.")
 	provMgr := provider.GetManager()
 	embedder := memory.NewEmbedder(cfg.Memory.GetEmbeddingConfig(), db)
 	memMgr := memory.NewManager(db, cfg.Memory, embedder, provMgr)

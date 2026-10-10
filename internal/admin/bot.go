@@ -124,7 +124,7 @@ func NewAdminBot(
 		updateUI:     NewUpdateUI(cfg, bot),
 		checkinUI:    NewCheckinUI(db, checkinSvc),
 		topicUI:      NewTopicUI(db, sm, bot),
-		searchUI:     NewSearchUIHandler(cfg),
+		searchUI:     NewSearchUIHandler(cfg, db),
 		bifrostUI:    NewBifrostUIHandler(db, bot),
 		promptManager: tgprompt.NewPromptManager(bot),
 	}

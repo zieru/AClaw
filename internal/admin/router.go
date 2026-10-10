@@ -238,6 +238,48 @@ func (a *AdminBot) registerRoutes() {
 		}
 		return nil
 	})
+	a.bot.Handle(&tele.Btn{Unique: "search_adv_menu"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleAdvancedSearchMenu(c)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_adv_toggle_depth"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleToggleTavilyDepthCallback(c)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_adv_toggle_answer"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleToggleTavilyAnswerCallback(c)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_adv_set_fc_url"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandlePromptFirecrawlURL(c)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_adv_lim_3"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleSetMaxResultsCallback(c, 3)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_adv_lim_5"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleSetMaxResultsCallback(c, 5)
+		}
+		return nil
+	})
+	a.bot.Handle(&tele.Btn{Unique: "search_adv_lim_10"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleSetMaxResultsCallback(c, 10)
+		}
+		return nil
+	})
 	a.bot.Handle(&tele.Btn{Unique: "menu_limits"}, func(c tele.Context) error {
 		return c.EditOrSend(a.limitsUI.RenderLimitsSummary(), a.limitsUI.LimitsKeyboard(), tele.ModeHTML)
 	})
