@@ -208,8 +208,19 @@ func TestNormalizeBaseURL(t *testing.T) {
 		"":                            "",
 	}
 	for input, expected := range tests {
-		if got := normalizeBaseURL(input); got != expected {
+		if got := normalizeBaseURL(input, "custom"); got != expected {
 			t.Errorf("normalizeBaseURL(%q) = %q; want %q", input, got, expected)
+		}
+	}
+
+	geminiTests := map[string]string{
+		"https://generativelanguage.googleapis.com":        "https://generativelanguage.googleapis.com/v1beta",
+		"https://generativelanguage.googleapis.com/v1beta": "https://generativelanguage.googleapis.com/v1beta",
+		"":                                                 "https://generativelanguage.googleapis.com/v1beta",
+	}
+	for input, expected := range geminiTests {
+		if got := normalizeBaseURL(input, "gemini"); got != expected {
+			t.Errorf("normalizeBaseURL(%q, gemini) = %q; want %q", input, got, expected)
 		}
 	}
 }

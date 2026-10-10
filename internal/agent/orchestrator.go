@@ -65,6 +65,7 @@ func (o *Orchestrator) MemoryManager() *memory.Manager {
 }
 
 const GrapariOutOfScopeRejection = "Mohon maaf, channel asisten ini beroperasi dalam mode khusus panduan SOP & operasional GraPARI. Pertanyaan atau permintaan Anda berada di luar konteks dokumen SOP GraPARI."
+const GrapariServerError = "Mohon maaf, server ngadat"
 
 func isObviousGrapariOutOfScope(prompt string) bool {
 	lower := strings.ToLower(strings.TrimSpace(prompt))
@@ -1207,8 +1208,20 @@ func formatThousands(n int) string {
 
 // FormatUserFriendlyError converts internal technical error traces into clean, polite messages for end-users
 func FormatUserFriendlyError(err error) string {
+	return FormatUserFriendlyErrorForChannel(err, false)
+}
+
+// FormatUserFriendlyErrorForChannel converts error traces with GrapariMode awareness
+func FormatUserFriendlyErrorForChannel(err error, isGrapariOnly bool) string {
 	if err == nil {
 		return ""
+	}
+	if isGrapariOnly {
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "canceled") {
+			return "🛑 **Proses Dibatalkan**\nEksekusi permintaan atau proses telah dihentikan oleh pengguna."
+		}
+		return GrapariServerError
 	}
 	errStr := strings.ToLower(err.Error())
 	switch {

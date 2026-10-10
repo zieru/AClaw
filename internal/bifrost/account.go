@@ -125,7 +125,7 @@ func (a *Account) GetConfigForProvider(providerKey schemas.ModelProvider) (*sche
 	dynCfg := LoadDynamicConfig(a.db)
 
 	nc := schemas.NetworkConfig{
-		BaseURL:                        normalizeBaseURL(rec.BaseURL),
+		BaseURL:                        normalizeBaseURL(rec.BaseURL, rec.Type),
 		DefaultRequestTimeoutInSeconds: dynCfg.TimeoutSeconds,
 		MaxRetries:                     dynCfg.MaxRetries,
 		RetryBackoffInitial:            500 * time.Millisecond,
@@ -172,8 +172,17 @@ func (a *Account) GetConfigForProvider(providerKey schemas.ModelProvider) (*sche
 // provider implementations append their own versioned endpoint paths (for
 // example /v1/chat/completions); retaining /v1 in the stored base URL causes
 // custom OpenAI-compatible endpoints to receive /v1/v1/... and return 404.
-func normalizeBaseURL(raw string) string {
+func normalizeBaseURL(raw string, provType string) string {
 	base := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if strings.EqualFold(provType, "gemini") {
+		if base == "" {
+			return "https://generativelanguage.googleapis.com/v1beta"
+		}
+		if !strings.HasSuffix(strings.ToLower(base), "/v1beta") {
+			return base + "/v1beta"
+		}
+		return base
+	}
 	if strings.HasSuffix(strings.ToLower(base), "/v1") {
 		base = strings.TrimRight(base[:len(base)-len("/v1")], "/")
 	}

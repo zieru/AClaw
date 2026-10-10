@@ -687,7 +687,13 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 			if ctx.Err() == context.Canceled {
 				return
 			}
-			friendlyErr := agent.FormatUserFriendlyError(err)
+			isGrapari := a.settings.GrapariOnly
+			if a.db != nil {
+				if chRec, errDb := a.db.GetChannel(a.channelID); errDb == nil && chRec != nil {
+					isGrapari = chRec.IsGrapariOnly()
+				}
+			}
+			friendlyErr := agent.FormatUserFriendlyErrorForChannel(err, isGrapari)
 			_ = a.SendMessage(chatID, friendlyErr)
 			return
 		}
