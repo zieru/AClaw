@@ -12,4 +12,6 @@ dependencies = [
     "langchain-google-genai>=2.0.0",
     "python-dotenv>=1.0.0",
     "pillow>=10.0.0",
+    "anyio>=4.14.2",
+    "pypdf>=6.19.0",
 ]
