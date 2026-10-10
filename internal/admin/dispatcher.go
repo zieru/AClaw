@@ -567,6 +567,38 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		}
 		return a.channelUI.RenderChannelDashboard(c, ch)
 	}
+	if data == "chan_wiz_grp_y" || data == "chan_wiz_grp_n" {
+		sess, ok := a.channelUI.GetSession(c.Sender().ID)
+		if !ok || sess.Step != ChannelStepGrapariChoice {
+			return a.channelUI.StartChannelWizard(c)
+		}
+		grapariOnly := (data == "chan_wiz_grp_y")
+		return a.channelUI.FinalizeCreateChannel(c, sess, grapariOnly)
+	}
+	if strings.HasPrefix(data, "chan_tgl_grp_") {
+		chID := strings.TrimPrefix(data, "chan_tgl_grp_")
+		ch, err := a.db.GetChannel(chID)
+		if err != nil || ch == nil {
+			return c.Reply("❌ Channel tidak ditemukan.")
+		}
+		newVal := !ch.IsGrapariOnly()
+		ch.SetGrapariOnly(newVal)
+		_ = a.db.SaveChannel(ch)
+
+		if newVal {
+			for _, t := range a.toolRegistry.ListAll() {
+				allowed := (t.Name() == "g3a_search_grapari_knowledge")
+				_ = a.db.SetChannelToolPerm(ch.ID, t.Name(), allowed)
+			}
+		}
+
+		statusMsg := "Mode Khusus GraPARI diaktifkan!"
+		if !newVal {
+			statusMsg = "Mode Khusus GraPARI dinonaktifkan."
+		}
+		_ = c.Respond(&tele.CallbackResponse{Text: statusMsg})
+		return a.channelUI.RenderChannelDashboard(c, ch)
+	}
 	if strings.HasPrefix(data, "chan_tgl_") {
 		chID := strings.TrimPrefix(data, "chan_tgl_")
 		ch, err := a.db.GetChannel(chID)

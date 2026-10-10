@@ -80,6 +80,13 @@ func (ui *WhatsAppUI) RenderWADashboard(c tele.Context, ch *storage.ChannelRecor
 		mentionBadge = "📢 Semua Pesan Grup"
 	}
 
+	grapariStatus := "🔴 <b>Tidak (Umum)</b>"
+	grapariBtnText := "🏢 Khusus GraPARI: OFF"
+	if ch.IsGrapariOnly() {
+		grapariStatus = "🟢 <b>Ya (SOP GraPARI Sahaja)</b>"
+		grapariBtnText = "🏢 Khusus GraPARI: ON"
+	}
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("📱 <b>MANAJEMEN WHATSAPP: %s</b>\n\n", html.EscapeString(ch.Name)))
 	sb.WriteString(fmt.Sprintf("• <b>Status Sinyal:</b> %s\n", connStatus))
@@ -88,7 +95,8 @@ func (ui *WhatsAppUI) RenderWADashboard(c tele.Context, ch *storage.ChannelRecor
 	sb.WriteString("🛡️ <b>Kebijakan Privasi & Chat:</b>\n")
 	sb.WriteString(fmt.Sprintf("• <b>Direct Message (DM):</b> %s\n", dmBadge))
 	sb.WriteString(fmt.Sprintf("• <b>Akses Grup:</b> %s\n", grpBadge))
-	sb.WriteString(fmt.Sprintf("• <b>Respon Grup:</b> %s\n\n", mentionBadge))
+	sb.WriteString(fmt.Sprintf("• <b>Respon Grup:</b> %s\n", mentionBadge))
+	sb.WriteString(fmt.Sprintf("• <b>Mode Khusus GraPARI:</b> %s\n\n", grapariStatus))
 	sb.WriteString("Pilih menu konfigurasi di bawah:")
 
 	menu := &tele.ReplyMarkup{}
@@ -98,6 +106,7 @@ func (ui *WhatsAppUI) RenderWADashboard(c tele.Context, ch *storage.ChannelRecor
 	btnGrp := menu.Data("👥 Group Policy", fmt.Sprintf("chan_wa_grp_menu_%s", ch.ID))
 	btnMen := menu.Data("🎯 Mention Mode", fmt.Sprintf("chan_wa_men_menu_%s", ch.ID))
 	btnLists := menu.Data("📋 Kelola Whitelist", fmt.Sprintf("chan_wa_list_menu_%s", ch.ID))
+	btnGrapari := menu.Data(grapariBtnText, fmt.Sprintf("chan_tgl_grp_%s", ch.ID))
 	btnTools := menu.Data("🧰 Permissions Tool", fmt.Sprintf("tool_wiz_ch_%s", ch.ID))
 	btnPol := menu.Data("⚙️ Limit & Model Policy", fmt.Sprintf("pol_wiz_ch_%s", ch.ID))
 	btnDel := menu.Data("🗑️ Hapus Channel", fmt.Sprintf("chan_del_%s", ch.ID))
@@ -107,8 +116,9 @@ func (ui *WhatsAppUI) RenderWADashboard(c tele.Context, ch *storage.ChannelRecor
 		menu.Row(btnQR, btnPairCode),
 		menu.Row(btnDM, btnGrp),
 		menu.Row(btnMen, btnLists),
-		menu.Row(btnTools, btnPol),
-		menu.Row(btnDel, btnBack),
+		menu.Row(btnGrapari, btnTools),
+		menu.Row(btnPol, btnDel),
+		menu.Row(btnBack),
 	)
 
 	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)

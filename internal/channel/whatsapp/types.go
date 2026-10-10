@@ -9,6 +9,7 @@ type WhatsAppSettings struct {
 	GroupPolicy    string   `json:"group_policy"`    // "allow_all" (default), "whitelist", "block"
 	AllowedGroups  []string `json:"allowed_groups"`  // List of group JIDs e.g. "120363xxx@g.us"
 	MentionPolicy  string   `json:"mention_policy"`  // "require_mention" (default), "all"
+	GrapariOnly    bool     `json:"grapari_only,omitempty"`
 }
 
 const (

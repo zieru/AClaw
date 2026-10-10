@@ -64,6 +64,45 @@ func (o *Orchestrator) MemoryManager() *memory.Manager {
 	return o.memoryManager
 }
 
+const GrapariOutOfScopeRejection = "Mohon maaf, channel asisten ini beroperasi dalam mode khusus panduan SOP & operasional GraPARI. Pertanyaan atau permintaan Anda berada di luar konteks dokumen SOP GraPARI."
+
+func isObviousGrapariOutOfScope(prompt string) bool {
+	lower := strings.ToLower(strings.TrimSpace(prompt))
+	if lower == "" {
+		return false
+	}
+
+	// Keywords indicating telecom / GraPARI domain
+	telecomKeywords := []string{
+		"grapari", "telkomsel", "kartu", "simcard", "esim", "msisdn", "kuota", "pulsa",
+		"paket", "jaringan", "sinyal", "roaming", "byu", "orbit", "pascabayar", "prabayar",
+		"indihome", "mytelkomsel", "ktp", "nik", "kk", "dukcapil", "antrean", "loket",
+		"customer service", "cs", "tagihan", "billing", "sop", "operasional", "tsel",
+		"nomor", "hangus", "upgrade", "migrasi", "registrasi", "unreg", "blokir",
+	}
+	for _, kw := range telecomKeywords {
+		if strings.Contains(lower, kw) {
+			return false
+		}
+	}
+
+	// Keywords indicating obviously out-of-scope non-telecom tasks
+	outOfScopeTriggers := []string{
+		"script", "program", "koding", "coding", "python", "javascript", "golang", "source code", "html", "css",
+		"puisi", "cerpen", "dongeng", "pantun", "lirik lagu", "chord gitar",
+		"resep masakan", "cara masak", "bumbu", "resep kue",
+		"integral", "trigonometri", "rumus fisika", "rumus kimia", "rumus matematika",
+		"siapa presiden", "ibukota", "jarak bumi",
+	}
+	for _, trg := range outOfScopeTriggers {
+		if strings.Contains(lower, trg) {
+			return true
+		}
+	}
+
+	return false
+}
+
 type UserRequest struct {
 	ChannelType    string
 	ChannelID      string
@@ -296,6 +335,22 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		return localResp, nil
 	}
 
+	// 0b. Resolve Mode Khusus GraPARI & Zero-Token Pre-Check Guard
+	isGrapariOnly := false
+	if o.db != nil && req.ChannelID != "" {
+		if ch, err := o.db.GetChannel(req.ChannelID); err == nil && ch != nil {
+			isGrapariOnly = ch.IsGrapariOnly()
+		}
+	}
+	if isGrapariOnly && isObviousGrapariOutOfScope(req.UserPrompt) {
+		return &AgentResponse{
+			Text:         GrapariOutOfScopeRejection,
+			Latency:      1 * time.Millisecond,
+			ProviderUsed: "grapari_guard",
+			ModelUsed:    "deterministic",
+		}, nil
+	}
+
 	// 1. Resolve Governance Policy (Hierarchical: Chat -> Channel -> Global -> Default)
 	policy := o.db.GetResolvedPolicy(req.ChannelID, req.ChatID)
 
@@ -470,6 +525,16 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		effectivePerms["capture_visit_performance"] = false
 	}
 	allowedTools := o.toolRegistry.ListAllowed(effectivePerms)
+	if isGrapariOnly {
+		var grapariTools []tools.Tool
+		for _, t := range o.toolRegistry.ListAll() {
+			if t.Name() == "g3a_search_grapari_knowledge" {
+				grapariTools = append(grapariTools, t)
+				break
+			}
+		}
+		allowedTools = grapariTools
+	}
 
 	// 7. Build Memory & System Prompt
 	memContext, _ := o.memoryManager.GetContextMemory(req.ChannelID, req.UserID, req.UserPrompt)
@@ -488,6 +553,7 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		ThinkingEnabled: policy.ThinkingEnabled,
 		StreamMode:      policy.StreamingEnabled,
 		AllowedTools:    allowedTools,
+		IsGrapariOnly:   isGrapariOnly,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("gagal membangun prompt: %w", err)
@@ -805,9 +871,16 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				}
 				BrowserSessionArg(toolCtx, tc.Arguments)
 			}
-			toolOut, toolErr := o.toolRegistry.Execute(toolCtx, tc.Name, tc.Arguments)
-			if toolErr != nil {
-				toolOut = fmt.Sprintf("Error eksekusi tool %s: %v", tc.Name, toolErr)
+			var toolOut string
+			var toolErr error
+			if isGrapariOnly && tc.Name != "g3a_search_grapari_knowledge" {
+				toolOut = fmt.Sprintf("Error: Akses tool '%s' ditolak. Channel ini dalam mode khusus GraPARI dan hanya diizinkan memanggil 'g3a_search_grapari_knowledge'.", tc.Name)
+				toolErr = fmt.Errorf("tool '%s' diblokir pada channel khusus GraPARI", tc.Name)
+			} else {
+				toolOut, toolErr = o.toolRegistry.Execute(toolCtx, tc.Name, tc.Arguments)
+				if toolErr != nil {
+					toolOut = fmt.Sprintf("Error eksekusi tool %s: %v", tc.Name, toolErr)
+				}
 			}
 
 			tracker.CompleteStep(toolDesc, toolErr)
@@ -901,6 +974,12 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 	}
 	// Bersihkan tag internal [ATTACH_FILE:...] dari teks agar pengguna tidak melihat format bracket teknis
 	finalCleanContent := stripAttachmentTags(finalContent)
+
+	// Intersepsi tag [OUT_OF_SCOPE] pada channel khusus GraPARI ke pesan penolakan resmi hardcoded
+	if isGrapariOnly && (strings.Contains(finalCleanContent, "[OUT_OF_SCOPE]") || strings.EqualFold(strings.TrimSpace(finalCleanContent), "[OUT_OF_SCOPE]")) {
+		finalCleanContent = GrapariOutOfScopeRejection
+	}
+
 	if strings.TrimSpace(finalCleanContent) == "" {
 		if strings.TrimSpace(finalThinking) != "" {
 			// Fallback: use thinking/reasoning content as the main text

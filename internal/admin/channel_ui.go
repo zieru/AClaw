@@ -20,6 +20,7 @@ const (
 	ChannelStepNone ChannelStep = iota
 	ChannelStepIDAndName
 	ChannelStepIdentifier
+	ChannelStepGrapariChoice
 	ChannelStepEditIdentifier
 	ChannelStepAddTrustedNumbers
 	ChannelStepAddAllowedGroups
@@ -34,6 +35,7 @@ type ChannelSession struct {
 	ID               string
 	Name             string
 	Identifier       string
+	GrapariOnly      bool
 	UpdatedAt        time.Time
 }
 
@@ -82,8 +84,14 @@ func (ui *ChannelUI) RenderChannelsList() string {
 				typeIcon = "🟢 WA"
 			}
 
+			grpBadge := "🔴 Umum"
+			if ch.IsGrapariOnly() {
+				grpBadge = "🟢 Khusus GraPARI"
+			}
+
 			sb.WriteString(fmt.Sprintf("%d. %s [%s] <b>%s</b>\n", i+1, statusIcon, typeIcon, html.EscapeString(ch.Name)))
 			sb.WriteString(fmt.Sprintf("   • Channel ID: <code>%s</code>\n", html.EscapeString(ch.ID)))
+			sb.WriteString(fmt.Sprintf("   • Mode Khusus GraPARI: <code>%s</code>\n", grpBadge))
 			sb.WriteString(fmt.Sprintf("   • Default Agent: <code>%s</code>\n", html.EscapeString(ch.DefaultAgent)))
 
 			// Check tool permissions for this channel
@@ -101,7 +109,7 @@ func (ui *ChannelUI) RenderChannelsList() string {
 	sb.WriteString("📋 <b>Perintah Manajemen Channel:</b>\n")
 	sb.WriteString("• <code>/channelwizard</code> - Wizard interaktif kelola & tambah channel\n")
 	sb.WriteString("• <code>/toolwizard</code> - Wizard matriks izin tool AI per channel\n")
-	sb.WriteString("• <code>/addchannel &lt;id&gt; &lt;telegram|whatsapp&gt; &lt;name&gt; &lt;token_atau_webhook&gt;</code>\n")
+	sb.WriteString("• <code>/addchannel &lt;id&gt; &lt;telegram|whatsapp&gt; &lt;name&gt; &lt;token_atau_webhook&gt; [grapari:y|n]</code>\n")
 	sb.WriteString("• <code>/delchannel &lt;channel_id&gt;</code>\n")
 	sb.WriteString("• <code>/toolperms &lt;channel_id&gt; &lt;tool_name&gt; &lt;allow|deny&gt;</code>\n")
 
@@ -127,7 +135,8 @@ func (ui *ChannelUI) StartChannelWizard(c tele.Context) error {
 	channels, _ := ui.db.ListChannels()
 
 	text := "📱 <b>WIZARD MANAJEMEN CHANNEL (TELEGRAM & WHATSAPP)</b>\n\n" +
-		"Pilih aksi untuk channel komunikasi GoAssistant:"
+		"Pilih aksi untuk channel komunikasi GoAssistant:\n" +
+		"<i>Klik nama channel di bawah untuk membuka dashboard & toggle Mode Khusus GraPARI.</i>"
 
 	menu := &tele.ReplyMarkup{}
 	var rows []tele.Row
@@ -142,7 +151,11 @@ func (ui *ChannelUI) StartChannelWizard(c tele.Context) error {
 			if !chCopy.IsActive {
 				statusIcon = "🔴"
 			}
-			btn := menu.Data(fmt.Sprintf("%s %s (%s)", statusIcon, chCopy.Name, chCopy.ID), fmt.Sprintf("chan_ed_pick_%s", chCopy.ID))
+			grpTag := ""
+			if chCopy.IsGrapariOnly() {
+				grpTag = " [GraPARI]"
+			}
+			btn := menu.Data(fmt.Sprintf("%s %s%s (%s)", statusIcon, chCopy.Name, grpTag, chCopy.ID), fmt.Sprintf("chan_ed_pick_%s", chCopy.ID))
 			rows = append(rows, menu.Row(btn))
 		}
 	}
@@ -201,6 +214,86 @@ func (ui *ChannelUI) PromptChannelIDAndName(c tele.Context, chType string) error
 	return c.EditOrSend(text, menu, tele.ModeHTML)
 }
 
+// GetSession returns the active wizard session for a user
+func (ui *ChannelUI) GetSession(userID int64) (*ChannelSession, bool) {
+	ui.mu.RLock()
+	defer ui.mu.RUnlock()
+	sess, ok := ui.sessions[userID]
+	return sess, ok
+}
+
+// PromptGrapariOnly displays the interactive Y/N prompt for GraPARI-only mode
+func (ui *ChannelUI) PromptGrapariOnly(c tele.Context, sess *ChannelSession) error {
+	sess.Step = ChannelStepGrapariChoice
+	sess.UpdatedAt = time.Now()
+
+	text := fmt.Sprintf("🏢 <b>KHUSUS GRAPARI? (Y/N)</b>\n\n"+
+		"Apakah channel <b>%s</b> (<code>%s</code>) ini khusus operasional SOP GraPARI?\n\n"+
+		"• <b>Jika YA (Y):</b> Bot HANYA dapat mengeksekusi tool <code>g3a_search_grapari_knowledge</code>. Pertanyaan di luar SOP GraPARI otomatis ditolak langsung.\n"+
+		"• <b>Jika TIDAK (N):</b> Bot berjalan normal sebagai asisten umum dengan seluruh tools yang diizinkan.\n\n"+
+		"<i>Silakan klik tombol di bawah atau ketik Y / N:</i>",
+		html.EscapeString(sess.Name), html.EscapeString(sess.ID))
+
+	menu := &tele.ReplyMarkup{}
+	btnYes := menu.Data("✅ Ya (Khusus GraPARI)", "chan_wiz_grp_y")
+	btnNo := menu.Data("❌ Tidak (General Bot)", "chan_wiz_grp_n")
+	btnCancel := menu.Data("⬅️ Batal", "chan_wiz_start")
+
+	menu.Inline(
+		menu.Row(btnYes, btnNo),
+		menu.Row(btnCancel),
+	)
+
+	return c.EditOrSend(text, menu, tele.ModeHTML)
+}
+
+// FinalizeCreateChannel completes channel creation with chosen GraPARI mode
+func (ui *ChannelUI) FinalizeCreateChannel(c tele.Context, sess *ChannelSession, grapariOnly bool) error {
+	rec := &storage.ChannelRecord{
+		ID:           sess.ID,
+		Type:         sess.Type,
+		Name:         sess.Name,
+		Identifier:   sess.Identifier,
+		IsActive:     true,
+		SettingsJSON: "{}",
+	}
+	rec.SetGrapariOnly(grapariOnly)
+
+	if err := ui.db.SaveChannel(rec); err != nil {
+		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan channel: %v", html.EscapeString(err.Error())))
+	}
+
+	// Jika GraPARI-only, otomatis konfigurasi permissions agar hanya tool g3a_search_grapari_knowledge yang diizinkan
+	if grapariOnly {
+		for _, t := range ui.toolRegistry.ListAll() {
+			allowed := (t.Name() == "g3a_search_grapari_knowledge")
+			_ = ui.db.SetChannelToolPerm(rec.ID, t.Name(), allowed)
+		}
+	}
+
+	userID := int64(0)
+	if c.Sender() != nil {
+		userID = c.Sender().ID
+	}
+	ui.CancelWizard(userID)
+
+	modeDesc := "Umum (General Assistant)"
+	if grapariOnly {
+		modeDesc = "Khusus SOP & Operasional GraPARI (g3a_search_grapari_knowledge)"
+	}
+
+	if sess.Type == "whatsapp" {
+		_ = c.Reply(fmt.Sprintf("🎉 <b>CHANNEL WHATSAPP DIBUAT!</b>\n\n• Nama: <b>%s</b>\n• ID: <code>%s</code>\n• Mode: <b>%s</b>\n\nMenyiapkan QR Code...",
+			html.EscapeString(rec.Name), html.EscapeString(rec.ID), modeDesc), tele.ModeHTML)
+		_ = ui.waUI.SendQRCodePhoto(c, rec.ID)
+		return nil
+	}
+
+	_ = c.Reply(fmt.Sprintf("🎉 <b>CHANNEL BERHASIL DITAMBAHKAN!</b>\n\n• Nama: <b>%s</b>\n• ID: <code>%s</code>\n• Tipe: <code>%s</code>\n• Mode: <b>%s</b>\n\n<i>Channel siap menerima pesan saat sistem dijalankan!</i>",
+		html.EscapeString(rec.Name), html.EscapeString(rec.ID), html.EscapeString(rec.Type), modeDesc), tele.ModeHTML)
+	return ui.RenderChannelDashboard(c, rec)
+}
+
 // RenderChannelDashboard displays channel details and management options
 func (ui *ChannelUI) RenderChannelDashboard(c tele.Context, ch *storage.ChannelRecord) error {
 	if ch.Type == "whatsapp" {
@@ -212,17 +305,26 @@ func (ui *ChannelUI) RenderChannelDashboard(c tele.Context, ch *storage.ChannelR
 		statusText = "🔴 <b>Nonaktif</b>"
 	}
 
+	grapariStatus := "🔴 <b>Tidak (Umum)</b>"
+	grapariBtnText := "🏢 Khusus GraPARI: OFF"
+	if ch.IsGrapariOnly() {
+		grapariStatus = "🟢 <b>Ya (SOP GraPARI Sahaja)</b>"
+		grapariBtnText = "🏢 Khusus GraPARI: ON"
+	}
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("📱 <b>MANAJEMEN CHANNEL TELEGRAM: %s</b>\n\n", html.EscapeString(ch.Name)))
 	sb.WriteString(fmt.Sprintf("• <b>Status:</b> %s\n", statusText))
 	sb.WriteString(fmt.Sprintf("• <b>Channel ID:</b> <code>%s</code>\n", html.EscapeString(ch.ID)))
 	sb.WriteString(fmt.Sprintf("• <b>Tipe:</b> <code>%s</code>\n", html.EscapeString(ch.Type)))
+	sb.WriteString(fmt.Sprintf("• <b>Mode Khusus GraPARI:</b> %s\n", grapariStatus))
 	sb.WriteString(fmt.Sprintf("• <b>Bot Token:</b> <code>%s</code>\n\n", html.EscapeString(ch.Identifier)))
 	sb.WriteString("Pilih aksi untuk channel ini:")
 
 	menu := &tele.ReplyMarkup{}
 	btnToggle := menu.Data("🔘 Toggle Status", fmt.Sprintf("chan_tgl_%s", ch.ID))
 	btnEditToken := menu.Data("🔑 Ganti Token", fmt.Sprintf("chan_ed_tok_%s", ch.ID))
+	btnGrapari := menu.Data(grapariBtnText, fmt.Sprintf("chan_tgl_grp_%s", ch.ID))
 	btnToolPerms := menu.Data("🧰 Atur Permissions Tool", fmt.Sprintf("tool_wiz_ch_%s", ch.ID))
 	btnPol := menu.Data("⚙️ Limit & Model Policy", fmt.Sprintf("pol_wiz_ch_%s", ch.ID))
 	btnDel := menu.Data("🗑️ Hapus Channel", fmt.Sprintf("chan_del_%s", ch.ID))
@@ -230,8 +332,9 @@ func (ui *ChannelUI) RenderChannelDashboard(c tele.Context, ch *storage.ChannelR
 
 	menu.Inline(
 		menu.Row(btnToggle, btnEditToken),
-		menu.Row(btnToolPerms, btnPol),
-		menu.Row(btnDel, btnBack),
+		menu.Row(btnGrapari, btnToolPerms),
+		menu.Row(btnPol, btnDel),
+		menu.Row(btnBack),
 	)
 
 	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
@@ -345,21 +448,8 @@ func (ui *ChannelUI) HandleTextMessage(c tele.Context) (bool, error) {
 		sess.Name = strings.TrimSpace(parts[1])
 
 		if sess.Type == "whatsapp" {
-			rec := &storage.ChannelRecord{
-				ID:           sess.ID,
-				Type:         "whatsapp",
-				Name:         sess.Name,
-				Identifier:   "",
-				IsActive:     true,
-				SettingsJSON: "{}",
-			}
-			if err := ui.db.SaveChannel(rec); err != nil {
-				return true, c.Reply(fmt.Sprintf("❌ Gagal menyimpan channel: %v", html.EscapeString(err.Error())))
-			}
-			ui.CancelWizard(userID)
-			_ = c.Reply(fmt.Sprintf("🎉 <b>CHANNEL WHATSAPP DIBUAT!</b>\n\n• Nama: <b>%s</b>\n• ID: <code>%s</code>\n\nMenyiapkan QR Code...", html.EscapeString(rec.Name), html.EscapeString(rec.ID)), tele.ModeHTML)
-			_ = ui.waUI.SendQRCodePhoto(c, rec.ID)
-			return true, nil
+			sess.Identifier = ""
+			return true, ui.PromptGrapariOnly(c, sess)
 		}
 
 		sess.Step = ChannelStepIdentifier
@@ -373,19 +463,19 @@ func (ui *ChannelUI) HandleTextMessage(c tele.Context) (bool, error) {
 
 	case ChannelStepIdentifier:
 		sess.Identifier = msgText
-		rec := &storage.ChannelRecord{
-			ID:         sess.ID,
-			Type:       sess.Type,
-			Name:       sess.Name,
-			Identifier: sess.Identifier,
-			IsActive:   true,
+		return true, ui.PromptGrapariOnly(c, sess)
+
+	case ChannelStepGrapariChoice:
+		lower := strings.ToLower(msgText)
+		var grapariOnly bool
+		if lower == "y" || lower == "yes" || lower == "ya" || lower == "1" || strings.HasPrefix(lower, "y") {
+			grapariOnly = true
+		} else if lower == "n" || lower == "no" || lower == "tidak" || lower == "0" || strings.HasPrefix(lower, "n") {
+			grapariOnly = false
+		} else {
+			return true, c.Reply("⚠️ Mohon ketik <b>Y</b> (Ya) atau <b>N</b> (Tidak), atau klik tombol di atas.", tele.ModeHTML)
 		}
-		if err := ui.db.SaveChannel(rec); err != nil {
-			return true, c.Reply(fmt.Sprintf("❌ Gagal menyimpan channel: %v", html.EscapeString(err.Error())))
-		}
-		ui.CancelWizard(userID)
-		_ = c.Reply(fmt.Sprintf("🎉 <b>CHANNEL BERHASIL DITAMBAHKAN!</b>\n\n• Nama: <b>%s</b>\n• ID: <code>%s</code>\n• Tipe: <code>%s</code>\n\n<i>Channel siap menerima pesan saat sistem dijalankan!</i>", html.EscapeString(rec.Name), html.EscapeString(rec.ID), html.EscapeString(rec.Type)), tele.ModeHTML)
-		return true, ui.RenderChannelDashboard(c, rec)
+		return true, ui.FinalizeCreateChannel(c, sess, grapariOnly)
 
 	case ChannelStepEditIdentifier:
 		ch, err := ui.db.GetChannel(sess.EditingChannelID)
@@ -594,18 +684,40 @@ func (ui *ChannelUI) HandleAddChannel(c tele.Context) error {
 	}
 
 	rec := &storage.ChannelRecord{
-		ID:         id,
-		Type:       chType,
-		Name:       name,
-		Identifier: identifier,
-		IsActive:   true,
+		ID:           id,
+		Type:         chType,
+		Name:         name,
+		Identifier:   identifier,
+		IsActive:     true,
+		SettingsJSON: "{}",
 	}
+
+	grapariOnly := false
+	if len(args) >= 5 {
+		opt := strings.ToLower(args[4])
+		if opt == "y" || opt == "yes" || opt == "ya" || opt == "1" || opt == "grapari" {
+			grapariOnly = true
+		}
+	}
+	rec.SetGrapariOnly(grapariOnly)
 
 	if err := ui.db.SaveChannel(rec); err != nil {
 		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan channel: %v", html.EscapeString(err.Error())))
 	}
 
-	return c.Reply(fmt.Sprintf("✅ Channel <b>%s</b> (<code>%s</code>) berhasil ditambahkan!\nSistem akan memuat channel saat startup.", html.EscapeString(name), html.EscapeString(id)), tele.ModeHTML)
+	if grapariOnly {
+		for _, t := range ui.toolRegistry.ListAll() {
+			allowed := (t.Name() == "g3a_search_grapari_knowledge")
+			_ = ui.db.SetChannelToolPerm(rec.ID, t.Name(), allowed)
+		}
+	}
+
+	modeStr := ""
+	if grapariOnly {
+		modeStr = " (Mode: Khusus GraPARI)"
+	}
+
+	return c.Reply(fmt.Sprintf("✅ Channel <b>%s</b> (<code>%s</code>)%s berhasil ditambahkan!\nSistem akan memuat channel saat startup.", html.EscapeString(name), html.EscapeString(id), modeStr), tele.ModeHTML)
 }
 
 // HandleToolPerms processes `/toolperms`

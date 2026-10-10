@@ -48,8 +48,12 @@ func TestServer_StartRestartStop(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
+	client := &http.Client{
+		Transport: &http.Transport{DisableKeepAlives: true},
+		Timeout:   1 * time.Second,
+	}
 	// Old port should no longer accept connections
-	_, oldErr := http.Get("http://localhost:12981/api/auth/me")
+	_, oldErr := client.Get("http://localhost:12981/api/auth/me")
 	if oldErr == nil {
 		t.Fatalf("expected old port 12981 to be closed")
 	}

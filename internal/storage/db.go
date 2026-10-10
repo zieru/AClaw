@@ -345,6 +345,41 @@ type ChannelRecord struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// IsGrapariOnly returns true if the channel is dedicated exclusively to GraPARI SOP & operations
+func (c *ChannelRecord) IsGrapariOnly() bool {
+	if c == nil || c.SettingsJSON == "" || c.SettingsJSON == "{}" {
+		return false
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(c.SettingsJSON), &m); err != nil {
+		return false
+	}
+	if val, ok := m["grapari_only"]; ok {
+		if b, ok := val.(bool); ok {
+			return b
+		}
+	}
+	return false
+}
+
+// SetGrapariOnly toggles the GraPARI-only mode in SettingsJSON
+func (c *ChannelRecord) SetGrapariOnly(val bool) {
+	if c == nil {
+		return
+	}
+	var m map[string]interface{}
+	if c.SettingsJSON != "" && c.SettingsJSON != "{}" {
+		_ = json.Unmarshal([]byte(c.SettingsJSON), &m)
+	}
+	if m == nil {
+		m = make(map[string]interface{})
+	}
+	m["grapari_only"] = val
+	data, _ := json.Marshal(m)
+	c.SettingsJSON = string(data)
+}
+
+
 type CronJobRecord struct {
 	ID            string     `json:"id"`
 	Name          string     `json:"name"`

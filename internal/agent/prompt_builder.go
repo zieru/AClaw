@@ -32,6 +32,7 @@ type PromptContext struct {
 	ThinkingEnabled bool
 	StreamMode      bool
 	AllowedTools    []tools.Tool
+	IsGrapariOnly   bool
 }
 
 var (
@@ -147,7 +148,16 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 		}
 	}
 
-	// 5. Injected Dynamic Context & Memory (Placed at suffix to maximize static prefix prompt caching)
+	// 5. Mode Khusus GraPARI Compliance Policy (if enabled)
+	if ctx.IsGrapariOnly {
+		sb.WriteString("## MODE KHUSUS OPERASIONAL & SOP GRAPARI (STRICT COMPLIANCE POLICY):\n")
+		sb.WriteString("1. **Fokus Eksklusif:** Channel ini beroperasi dalam mode KHUSUS SOP, PANDUAN KERJA, DAN OPERASIONAL LAYANAN GRAPARI / TELKOMSEL.\n")
+		sb.WriteString("2. **Akses Tools:** Kamu HANYA memiliki akses ke tool `g3a_search_grapari_knowledge`. Gunakan tool ini untuk mencari informasi resmi, prosedur penanganan, link/spreadsheet, petunjuk MSISDN, dan email PIC/eskalasi.\n")
+		sb.WriteString("3. **ATURAN PENOLAKAN SINGKAT (1-TOKEN MINIMIZER):** Jika pengguna mengajukan pertanyaan, tugas, atau obrolan DI LUAR konteks dokumen SOP GraPARI (seperti permintaan coding/program, matematika umum, dongeng/puisi, trivia acak, atau topik umum non-GraPARI), kamu DILARANG membuat penjelasan panjang. Kamu WAJIB menjawab HANYA dengan satu kata persis: `[OUT_OF_SCOPE]`. Sistem akan secara otomatis menggantinya dengan template penolakan resmi bagi pengguna.\n")
+		sb.WriteString("4. **INTEGRITAS DATA & ANTI-HALUSINASI:** Berikan jawaban HANYA berdasarkan referensi yang ditemukan dari knowledge base GraPARI via `g3a_search_grapari_knowledge`. Jika informasi tidak ditemukan di dokumen SOP setelah dilakukan pencarian, sampaikan dengan jujur bahwa informasi tersebut belum tercantum dalam dokumen SOP yang tersedia dan sarankan eskalasi ke Team Leader / PIC terkait.\n\n")
+	}
+
+	// 6. Injected Dynamic Context & Memory (Placed at suffix to maximize static prefix prompt caching)
 	sb.WriteString("## Environment & Session Context:\n")
 	sb.WriteString(fmt.Sprintf("- Channel: %s (%s)\n", ctx.ChannelName, ctx.ChannelType))
 	if ctx.UserName != "" {
