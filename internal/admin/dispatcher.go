@@ -587,7 +587,7 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 
 		if newVal {
 			for _, t := range a.toolRegistry.ListAll() {
-				allowed := (t.Name() == "g3a_search_grapari_knowledge")
+				allowed := (t.Name() == "g3a_search_grapari_knowledge" || t.Name() == "search_telkomsel_web")
 				_ = a.db.SetChannelToolPerm(ch.ID, t.Name(), allowed)
 			}
 		}

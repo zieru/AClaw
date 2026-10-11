@@ -229,7 +229,7 @@ func (ui *ChannelUI) PromptGrapariOnly(c tele.Context, sess *ChannelSession) err
 
 	text := fmt.Sprintf("🏢 <b>KHUSUS GRAPARI? (Y/N)</b>\n\n"+
 		"Apakah channel <b>%s</b> (<code>%s</code>) ini khusus operasional SOP GraPARI?\n\n"+
-		"• <b>Jika YA (Y):</b> Bot HANYA dapat mengeksekusi tool <code>g3a_search_grapari_knowledge</code>. Pertanyaan di luar SOP GraPARI otomatis ditolak langsung.\n"+
+		"• <b>Jika YA (Y):</b> Bot HANYA dapat mengeksekusi tool SOP <code>g3a_search_grapari_knowledge</code> dan pencarian situs resmi <code>search_telkomsel_web</code>. Pertanyaan di luar ranah Telkomsel otomatis ditolak langsung.\n"+
 		"• <b>Jika TIDAK (N):</b> Bot berjalan normal sebagai asisten umum dengan seluruh tools yang diizinkan.\n\n"+
 		"<i>Silakan klik tombol di bawah atau ketik Y / N:</i>",
 		html.EscapeString(sess.Name), html.EscapeString(sess.ID))
@@ -263,10 +263,10 @@ func (ui *ChannelUI) FinalizeCreateChannel(c tele.Context, sess *ChannelSession,
 		return c.Reply(fmt.Sprintf("❌ Gagal menyimpan channel: %v", html.EscapeString(err.Error())))
 	}
 
-	// Jika GraPARI-only, otomatis konfigurasi permissions agar hanya tool g3a_search_grapari_knowledge yang diizinkan
+	// Jika GraPARI-only, otomatis konfigurasi permissions agar tool GraPARI diizinkan
 	if grapariOnly {
 		for _, t := range ui.toolRegistry.ListAll() {
-			allowed := (t.Name() == "g3a_search_grapari_knowledge")
+			allowed := (t.Name() == "g3a_search_grapari_knowledge" || t.Name() == "search_telkomsel_web")
 			_ = ui.db.SetChannelToolPerm(rec.ID, t.Name(), allowed)
 		}
 	}
@@ -707,7 +707,7 @@ func (ui *ChannelUI) HandleAddChannel(c tele.Context) error {
 
 	if grapariOnly {
 		for _, t := range ui.toolRegistry.ListAll() {
-			allowed := (t.Name() == "g3a_search_grapari_knowledge")
+			allowed := (t.Name() == "g3a_search_grapari_knowledge" || t.Name() == "search_telkomsel_web")
 			_ = ui.db.SetChannelToolPerm(rec.ID, t.Name(), allowed)
 		}
 	}

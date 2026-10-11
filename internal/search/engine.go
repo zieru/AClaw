@@ -46,7 +46,6 @@ func InitGlobalEngine(cfg config.SearchConfig) *Engine {
 	// Register core providers
 	eng.RegisterProvider(NewTavilyProvider(cfg.Tavily, timeout))
 	eng.RegisterProvider(NewFirecrawlProvider(cfg.Firecrawl, timeout))
-	eng.RegisterProvider(NewDuckDuckGoProvider(timeout))
 
 	globalEngine = eng
 	return eng
@@ -137,7 +136,7 @@ func (e *Engine) SetStrategy(strategy string) {
 	}
 }
 
-// SetProvider updates active provider selection ("auto", "tavily", "firecrawl", "duckduckgo")
+// SetProvider updates active provider selection ("auto", "tavily", "firecrawl")
 func (e *Engine) SetProvider(provider string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -241,7 +240,6 @@ func (e *Engine) UpdateConfig(cfg config.SearchConfig) {
 	}
 	e.providers["tavily"] = NewTavilyProvider(cfg.Tavily, timeout)
 	e.providers["firecrawl"] = NewFirecrawlProvider(cfg.Firecrawl, timeout)
-	e.providers["duckduckgo"] = NewDuckDuckGoProvider(timeout)
 }
 
 // Config returns a copy of current search configuration
@@ -320,16 +318,12 @@ func (e *Engine) buildProviderPlan() []Provider {
 		addProvider("tavily")
 		if e.cfg.FallbackEnabled {
 			addProvider("firecrawl")
-			addProvider("duckduckgo")
 		}
 	case "firecrawl":
 		addProvider("firecrawl")
 		if e.cfg.FallbackEnabled {
 			addProvider("tavily")
-			addProvider("duckduckgo")
 		}
-	case "duckduckgo":
-		addProvider("duckduckgo")
 	case "auto":
 		fallthrough
 	default:
@@ -350,17 +344,13 @@ func (e *Engine) buildProviderPlan() []Provider {
 					currName := availPrimaries[(idx+i)%len(availPrimaries)]
 					addProvider(currName)
 				}
-				if e.cfg.FallbackEnabled {
-					addProvider("duckduckgo")
-				}
 				break
 			}
 		}
 
-		// Fallback strategy: Priority Tavily -> Firecrawl -> DuckDuckGo
+		// Fallback strategy: Priority Tavily -> Firecrawl
 		addProvider("tavily")
 		addProvider("firecrawl")
-		addProvider("duckduckgo")
 	}
 
 	return plan

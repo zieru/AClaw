@@ -30,6 +30,7 @@ func GetRegistry() *Registry {
 		defaultRegistry.Register(&AskPasswordTool{})
 		defaultRegistry.Register(&SendFileTool{})
 		defaultRegistry.Register(&VisitPerformanceTool{})
+		defaultRegistry.Register(&TelkomselSearchTool{})
 	})
 	return defaultRegistry
 }

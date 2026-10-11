@@ -61,20 +61,8 @@ func TestEngine_AutoPrioritizationAndFallback(t *testing.T) {
 			},
 		},
 	}
-	// 3. DDG as backup
-	ddgMock := &mockProvider{
-		name:      "duckduckgo",
-		available: true,
-		res: &Response{
-			Query:    "golang",
-			Provider: "duckduckgo",
-			Results:  []SearchItem{},
-		},
-	}
-
 	eng.RegisterProvider(tavilyMock)
 	eng.RegisterProvider(firecrawlMock)
-	eng.RegisterProvider(ddgMock)
 
 	res, err := eng.Search(context.Background(), "golang")
 	if err != nil {

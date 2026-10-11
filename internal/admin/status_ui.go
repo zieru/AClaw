@@ -133,7 +133,6 @@ func (a *AdminBot) RenderStatusSummary(c tele.Context) string {
 		if a.cfg.Search.Firecrawl.APIKey != "" {
 			provList = append(provList, "Firecrawl")
 		}
-		provList = append(provList, "DuckDuckGo")
 		searchStatus = fmt.Sprintf("🟢 <b>Aktif</b> (Mode: <code>%s</code> | Providers: <code>%s</code>)",
 			html.EscapeString(a.cfg.Search.Provider), strings.Join(provList, ", "))
 	}

@@ -26,7 +26,7 @@ func (t *WebSearchTool) Name() string {
 }
 
 func (t *WebSearchTool) Description() string {
-	return "Mencari informasi terkini dari internet menggunakan multi-provider search engine (Tavily, Firecrawl, DuckDuckGo)."
+	return "Mencari informasi terkini dari internet menggunakan multi-provider search engine (Tavily, Firecrawl)."
 }
 
 func (t *WebSearchTool) Parameters() ParametersSchema {

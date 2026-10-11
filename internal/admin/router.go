@@ -202,12 +202,6 @@ func (a *AdminBot) registerRoutes() {
 		}
 		return nil
 	})
-	a.bot.Handle(&tele.Btn{Unique: "search_prov_duckduckgo"}, func(c tele.Context) error {
-		if a.searchUI != nil {
-			return a.searchUI.HandleSwitchProviderCallback(c, "duckduckgo")
-		}
-		return nil
-	})
 	a.bot.Handle(&tele.Btn{Unique: "search_toggle_strategy"}, func(c tele.Context) error {
 		if a.searchUI != nil {
 			return a.searchUI.HandleToggleStrategyCallback(c)

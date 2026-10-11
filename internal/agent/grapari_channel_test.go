@@ -104,6 +104,7 @@ func TestPromptBuilderGrapariOnly(t *testing.T) {
 	expectedSnippets := []string{
 		"MODE KHUSUS OPERASIONAL & SOP GRAPARI",
 		"g3a_search_grapari_knowledge",
+		"search_telkomsel_web",
 		"[OUT_OF_SCOPE]",
 		"ANTI-HALUSINASI",
 	}

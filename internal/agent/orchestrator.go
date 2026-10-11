@@ -540,9 +540,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 	if isGrapariOnly {
 		var grapariTools []tools.Tool
 		for _, t := range o.toolRegistry.ListAll() {
-			if t.Name() == "g3a_search_grapari_knowledge" {
+			if t.Name() == "g3a_search_grapari_knowledge" || t.Name() == "search_telkomsel_web" {
 				grapariTools = append(grapariTools, t)
-				break
 			}
 		}
 		allowedTools = grapariTools
@@ -890,8 +889,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			}
 			var toolOut string
 			var toolErr error
-			if isGrapariOnly && tc.Name != "g3a_search_grapari_knowledge" {
-				toolOut = fmt.Sprintf("Error: Akses tool '%s' ditolak. Channel ini dalam mode khusus GraPARI dan hanya diizinkan memanggil 'g3a_search_grapari_knowledge'.", tc.Name)
+			if isGrapariOnly && tc.Name != "g3a_search_grapari_knowledge" && tc.Name != "search_telkomsel_web" {
+				toolOut = fmt.Sprintf("Error: Akses tool '%s' ditolak. Channel ini dalam mode khusus GraPARI dan hanya diizinkan memanggil 'g3a_search_grapari_knowledge' dan 'search_telkomsel_web'.", tc.Name)
 				toolErr = fmt.Errorf("tool '%s' diblokir pada channel khusus GraPARI", tc.Name)
 			} else {
 				toolOut, toolErr = o.toolRegistry.Execute(toolCtx, tc.Name, tc.Arguments)
