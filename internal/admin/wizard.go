@@ -983,6 +983,47 @@ func (w *ProviderWizard) PromptEditStep(c tele.Context, providerID string, step 
 }
 
 func (w *ProviderWizard) syncProviderToManager(p *storage.ProviderRecord) {
+	if p.Type == "gemini_web" || p.Type == "gemini_scrape" {
+		if !p.IsActive {
+			w.providerManager.Unregister(p.Name)
+			w.providerManager.Unregister(p.ID)
+			return
+		}
+		keys := p.APIKeys
+		if len(keys) == 0 && p.APIKey != "" {
+			keys = []string{p.APIKey}
+		}
+		models := p.EnabledModels()
+		if len(models) == 0 && p.DefaultModel != "" {
+			models = []string{p.DefaultModel}
+		}
+		authData := p.APIKey
+		if len(keys) > 0 {
+			authData = strings.Join(keys, "; ")
+		}
+		webInst := provider.NewGeminiWebProvider(p.Name, authData, p.DefaultModel, models)
+		if w.db != nil {
+			provID := p.ID
+			webInst.SetOnCookieUpdate(func(provName, newCookies string, cookieMap map[string]string) {
+				pRec, err := w.db.GetProvider(provID)
+				if err != nil || pRec == nil {
+					pRec, _ = w.db.GetProvider(provName)
+				}
+				if pRec != nil {
+					pRec.APIKey = newCookies
+					pRec.APIKeys = []string{newCookies}
+					_ = w.db.SaveProvider(pRec)
+				}
+			})
+		}
+		if p.ProxyEnabled && w.proxyPool != nil {
+			proxyClient := w.proxyPool.NewHTTPClientForGroup(p.ProxyGroup, 90*time.Second)
+			webInst.SetHTTPClient(proxyClient)
+		}
+		w.providerManager.RegisterWithID(p.ID, webInst, p.Priority)
+		return
+	}
+
 	// When the Bifrost gateway owns routing, just notify it to re-read the DB
 	// instead of registering into the legacy manager.
 	if bf.Enabled() {
@@ -1008,33 +1049,6 @@ func (w *ProviderWizard) syncProviderToManager(p *storage.ProviderRecord) {
 	models := p.EnabledModels()
 	if len(models) == 0 && p.DefaultModel != "" {
 		models = []string{p.DefaultModel}
-	}
-
-	if p.Type == "gemini_web" || p.Type == "gemini_scrape" {
-		authData := p.APIKey
-		if len(keys) > 0 {
-			authData = strings.Join(keys, "; ")
-		}
-		webInst := provider.NewGeminiWebProvider(p.Name, authData, p.DefaultModel, models)
-		if w.db != nil {
-			provID := p.ID
-			webInst.SetOnCookieUpdate(func(provName, newCookies string, cookieMap map[string]string) {
-				pRec, err := w.db.GetProvider(provID)
-				if err != nil || pRec == nil {
-					pRec, _ = w.db.GetProvider(provName)
-				}
-				if pRec != nil {
-					pRec.APIKey = newCookies
-					pRec.APIKeys = []string{newCookies}
-					_ = w.db.SaveProvider(pRec)
-				}
-			})
-		}
-		if p.ProxyEnabled && w.proxyPool != nil {
-			proxyClient := w.proxyPool.NewHTTPClientForGroup(p.ProxyGroup, 90*time.Second)
-			webInst.SetHTTPClient(proxyClient)
-		}
-		w.providerManager.RegisterWithID(p.ID, webInst, p.Priority)
 	}
 }
 

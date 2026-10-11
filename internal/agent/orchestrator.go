@@ -1237,6 +1237,8 @@ func FormatUserFriendlyErrorForChannel(err error, isGrapariOnly bool) string {
 		return "🔌 **Koneksi Terputus**\nGagal terhubung ke endpoint server AI. Mohon periksa koneksi jaringan atau coba beberapa saat lagi dengan `/retry`."
 	case strings.Contains(errStr, "seluruh target gagal"):
 		return "❌ **Layanan AI Sedang Gangguan**\nTarget provider/model AI saat ini tidak dapat merespons. Silakan coba lagi dengan `/retry` atau hubungi admin."
+	case strings.Contains(errStr, "login") || strings.Contains(errStr, "cookie") || strings.Contains(errStr, "autentikasi") || strings.Contains(errStr, "snlm0e") || strings.Contains(errStr, "unauthorized") || strings.Contains(errStr, "401"):
+		return fmt.Sprintf("🔐 **Kendala Autentikasi / Sesi Provider**\n%s", err.Error())
 	default:
 		return "❌ **Maaf, terjadi kendala teknis pada layanan AI.**\nSilakan coba lagi beberapa saat lagi (bisa gunakan `/retry`) atau gunakan `/reset` untuk memulai percakapan baru."
 	}

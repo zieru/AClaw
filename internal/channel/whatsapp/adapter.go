@@ -693,6 +693,7 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 					isGrapari = chRec.IsGrapariOnly()
 				}
 			}
+			log.Printf("⚠️ [WhatsApp] Error processing prompt: %v", err)
 			friendlyErr := agent.FormatUserFriendlyErrorForChannel(err, isGrapari)
 			_ = a.SendMessage(chatID, friendlyErr)
 			return

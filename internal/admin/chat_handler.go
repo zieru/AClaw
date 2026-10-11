@@ -116,6 +116,7 @@ func (a *AdminBot) handleDirectChatWithMediaAndReply(c tele.Context, replyTo *te
 			return c.Reply(text, tele.ModeHTML)
 		}
 
+		log.Printf("⚠️ [Admin Chat] Error processing prompt: %v", err)
 		friendlyErr := tgformat.MarkdownToTelegramHTML(agent.FormatUserFriendlyError(err))
 		errMenu := &tele.ReplyMarkup{}
 		retryBtn := errMenu.Data("🔄 Coba Lagi", "retry_admin_task")
