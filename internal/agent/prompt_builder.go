@@ -126,13 +126,15 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 		sb.WriteString("\n\n")
 	}
 
-	// 3. Load AGENTS.md for Multi-Agent & Specialized Roles - STATIC
-	agentsMD, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "AGENTS.md")
-	if err == nil && agentsMD != "" {
-		sb.WriteString("## Multi-Agent Delegation & Specialized Roles:\n")
-		sb.WriteString("Kamu dapat memecah masalah kompleks dan mendelegasikan sub-tugas ke sub-agen spesialis melalui tool `delegate_task` agar konteks tetap fokus dan tidak membengkak.\n")
-		sb.WriteString(agentsMD)
-		sb.WriteString("\n\n")
+	// 3. Load AGENTS.md for Multi-Agent & Specialized Roles - STATIC (Skip in GraPARI-only mode to conserve tokens)
+	if !ctx.IsGrapariOnly {
+		agentsMD, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "AGENTS.md")
+		if err == nil && agentsMD != "" {
+			sb.WriteString("## Multi-Agent Delegation & Specialized Roles:\n")
+			sb.WriteString("Kamu dapat memecah masalah kompleks dan mendelegasikan sub-tugas ke sub-agen spesialis melalui tool `delegate_task` agar konteks tetap fokus dan tidak membengkak.\n")
+			sb.WriteString(agentsMD)
+			sb.WriteString("\n\n")
+		}
 	}
 
 	// 4. Tool Instructions if TOOLS.md exists (scoped to channel or global fallback) - STATIC
@@ -175,8 +177,11 @@ func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
 	sb.WriteString("\n")
 
 	// Injected Host System Environment (dynamic detection of OS, privilege tools, package managers, init systems)
-	sb.WriteString(sysenv.GetHostInfo().FormatPrompt())
-	sb.WriteString("\n")
+	// GraPARI-only bot does not need server host environment details
+	if !ctx.IsGrapariOnly {
+		sb.WriteString(sysenv.GetHostInfo().FormatPrompt())
+		sb.WriteString("\n")
+	}
 
 	if ctx.SessionSummary != "" {
 		sb.WriteString("### Previous Conversation Summary:\n")

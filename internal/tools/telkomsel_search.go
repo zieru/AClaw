@@ -82,8 +82,13 @@ func (t *TelkomselSearchTool) Execute(ctx context.Context, args map[string]inter
 	} else {
 		count := 0
 		for _, res := range searchRes.Results {
-			// Prefer results that belong to telkomsel.com domain
+			if count >= 4 {
+				break
+			}
 			snippet := strings.TrimSpace(res.Snippet)
+			if len(snippet) > 350 {
+				snippet = snippet[:350] + "..."
+			}
 			count++
 			if snippet != "" {
 				sb.WriteString(fmt.Sprintf("%d. **%s**\n   🔗 URL: %s\n   📄 Ringkasan: %s\n\n", count, res.Title, res.URL, snippet))

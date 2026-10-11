@@ -100,3 +100,24 @@ func TestWhatsApp_TopicCommands(t *testing.T) {
 		t.Errorf("expected normal message not to be handled as topic command")
 	}
 }
+
+func TestFormatWhatsAppOptions(t *testing.T) {
+	inputWithOption := "Halo! Berikut adalah paket internet.\n\n[OPSI: Paket 100K | Paket 200K]"
+	expected := "Halo! Berikut adalah paket internet.\n\n_Mohon diperiksa kembali, AI Dapat melakukan kesalahan_"
+	got := formatWhatsAppOptions(inputWithOption)
+	if got != expected {
+		t.Errorf("expected:\n%q\ngot:\n%q", expected, got)
+	}
+
+	inputPlain := "Halo! Hanya jawaban biasa."
+	expectedPlain := "Halo! Hanya jawaban biasa.\n\n_Mohon diperiksa kembali, AI Dapat melakukan kesalahan_"
+	gotPlain := formatWhatsAppOptions(inputPlain)
+	if gotPlain != expectedPlain {
+		t.Errorf("expected:\n%q\ngot:\n%q", expectedPlain, gotPlain)
+	}
+
+	gotEmpty := formatWhatsAppOptions("")
+	if gotEmpty != "" {
+		t.Errorf("expected empty string for empty input, got %q", gotEmpty)
+	}
+}
