@@ -303,22 +303,27 @@ func (c *Client) Generate(ctx context.Context, preferredName string, req provide
 
 	provKey, model, fallbacks := c.resolve(preferredName, req)
 
-	// If resolved provider is a native scraper (gemini_web, gemini_scrape), delegate directly to Manager
 	pRec := c.findProviderByName(string(provKey))
 	if pRec == nil {
 		pRec = c.findProviderByID(string(provKey))
 	}
-	if pRec != nil && (pRec.Type == "gemini_web" || pRec.Type == "gemini_scrape") {
+
+	// If resolved provider or model is gemini_web / native scraper, Bifrost does NOT handle it;
+	// delegate directly to native Manager custom path, NEVER call Bifrost core!
+	if provider.IsGeminiWeb(preferredName) || provider.IsGeminiWeb(req.Model) || provider.IsGeminiWeb(string(provKey)) || provider.IsGeminiWeb(model) || (pRec != nil && (pRec.Type == "gemini_web" || pRec.Type == "gemini_scrape")) {
 		if pMgr := provider.GetManager(); pMgr != nil {
-			if p, ok := pMgr.Get(string(providerKey(pRec))); ok && p != nil {
+			if p, ok := pMgr.Get("gemini_web"); ok && p != nil {
 				req.Model = model
 				return p.GenerateChat(ctx, req)
 			}
-			if p, ok := pMgr.Get(pRec.ID); ok && p != nil {
-				req.Model = model
-				return p.GenerateChat(ctx, req)
+			if pRec != nil {
+				if p, ok := pMgr.Get(string(providerKey(pRec))); ok && p != nil {
+					req.Model = model
+					return p.GenerateChat(ctx, req)
+				}
 			}
 		}
+		return nil, errors.New("provider Gemini Web Scrape tidak aktif atau belum dikonfigurasi di sistem")
 	}
 
 	bfReq := &schemas.BifrostChatRequest{

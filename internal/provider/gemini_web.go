@@ -173,6 +173,9 @@ func (p *GeminiWebProvider) HasValidCookies() bool {
 	if _, ok := p.cookieMap["__Secure-1PSID"]; ok {
 		return true
 	}
+	if _, ok := p.cookieMap["__Secure-1PSIDTS"]; ok {
+		return true
+	}
 	if _, ok := p.cookieMap["SID"]; ok {
 		return true
 	}
@@ -244,7 +247,7 @@ func ParseGoogleAuthInput(input string) (map[string]string, error) {
 		if tok == "" {
 			continue
 		}
-		if eqIdx := strings.Index(tok, "="); eqIdx > 0 {
+		if eqIdx := strings.IndexAny(tok, "=:"); eqIdx > 0 {
 			k := strings.TrimSpace(tok[:eqIdx])
 			v := strings.TrimSpace(tok[eqIdx+1:])
 			// Strip surrounding quotes if present
@@ -252,12 +255,20 @@ func ParseGoogleAuthInput(input string) (map[string]string, error) {
 			if k != "" && v != "" {
 				cookies[k] = v
 			}
+		} else if strings.HasPrefix(tok, "sidts-") {
+			cookies["__Secure-1PSIDTS"] = tok
+		} else if strings.HasPrefix(tok, "g.a") {
+			cookies["__Secure-1PSID"] = tok
 		}
 	}
 
-	// Case 4: Single raw value assumed to be __Secure-1PSID if no '=' was present
+	// Case 4: Single raw value without '=' or ':'
 	if len(cookies) == 0 && len(input) > 20 && !strings.Contains(input, " ") {
-		cookies["__Secure-1PSID"] = input
+		if strings.HasPrefix(input, "sidts-") {
+			cookies["__Secure-1PSIDTS"] = input
+		} else {
+			cookies["__Secure-1PSID"] = input
+		}
 	}
 
 	if len(cookies) == 0 {

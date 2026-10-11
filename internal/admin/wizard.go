@@ -394,6 +394,18 @@ func (w *ProviderWizard) HandleTextMessage(c tele.Context) (bool, error) {
 			return true, c.Reply(fmt.Sprintf("⚠️ %v\n\nSilakan pastikan Anda menyalin URL hasil login atau cookie <code>__Secure-1PSID</code> dengan benar, lalu kirimkan kembali.", err), tele.ModeHTML)
 		}
 
+		if w.db != nil {
+			if existingP, _ := w.db.GetProvider("gemini_web"); existingP != nil && existingP.APIKey != "" {
+				if oldCookies, oErr := provider.ParseGoogleAuthInput(existingP.APIKey); oErr == nil {
+					for k, v := range oldCookies {
+						if _, hasNew := parsedCookies[k]; !hasNew {
+							parsedCookies[k] = v
+						}
+					}
+				}
+			}
+		}
+
 		var cookieParts []string
 		for k, v := range parsedCookies {
 			cookieParts = append(cookieParts, fmt.Sprintf("%s=%s", k, v))

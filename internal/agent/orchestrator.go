@@ -432,14 +432,25 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		modelToUse = policy.ModelOverride
 		if strings.HasPrefix(strings.ToLower(policy.ModelOverride), "provider:") ||
 			strings.HasPrefix(strings.ToLower(policy.ModelOverride), "resilient:") {
+			colonIdx := strings.Index(policy.ModelOverride, ":")
+			provToCall = strings.TrimSpace(policy.ModelOverride[colonIdx+1:])
 			modelToUse = ""
 		} else if strings.Contains(policy.ModelOverride, ":") && !strings.HasPrefix(strings.ToLower(policy.ModelOverride), "combo:") {
 			parts := strings.SplitN(policy.ModelOverride, ":", 2)
-			if _, ok := o.providerManager.Get(parts[0]); ok {
-				modelToUse = parts[1]
-			}
+			provToCall = strings.TrimSpace(parts[0])
+			modelToUse = strings.TrimSpace(parts[1])
 		}
 		activeModelName = modelToUse
+	}
+
+	// 4a. Custom Dedicated Execution Path for Gemini Web Scrape
+	if provider.IsGeminiWeb(provToCall) || provider.IsGeminiWeb(modelToUse) || provider.IsGeminiWeb(req.PreferredModel) || provider.IsGeminiWeb(policy.ModelOverride) {
+		provToCall = "gemini_web"
+		if modelToUse == "" || strings.EqualFold(modelToUse, "auto") || strings.EqualFold(modelToUse, "gemini_web") || strings.EqualFold(modelToUse, "gemini-web") {
+			modelToUse = "gemini-web-pro"
+		}
+		activeModelName = modelToUse
+		log.Printf("🌐 [GeminiWeb] Menjalankan jalur custom khusus Gemini Web Scraper (Model: %s)", modelToUse)
 	}
 
 	if (activeModelName == "" || strings.EqualFold(activeModelName, "auto")) && activeProv != nil {
@@ -667,6 +678,11 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
+			}
+			// Special handling for Gemini Web Scraper: do NOT retry or mask as generic error
+			if provider.IsGeminiWeb(provToCall) || provider.IsGeminiWeb(modelToUse) {
+				log.Printf("⚠️ [GeminiWeb] Kendala eksekusi web scraper: %v", genErr)
+				return nil, genErr
 			}
 			// Check if error is timeout, stream stalled, context length exceeded, or network issue
 			errStr := strings.ToLower(genErr.Error())
@@ -1237,8 +1253,8 @@ func FormatUserFriendlyErrorForChannel(err error, isGrapariOnly bool) string {
 		return "🔌 **Koneksi Terputus**\nGagal terhubung ke endpoint server AI. Mohon periksa koneksi jaringan atau coba beberapa saat lagi dengan `/retry`."
 	case strings.Contains(errStr, "seluruh target gagal"):
 		return "❌ **Layanan AI Sedang Gangguan**\nTarget provider/model AI saat ini tidak dapat merespons. Silakan coba lagi dengan `/retry` atau hubungi admin."
-	case strings.Contains(errStr, "login") || strings.Contains(errStr, "cookie") || strings.Contains(errStr, "autentikasi") || strings.Contains(errStr, "snlm0e") || strings.Contains(errStr, "unauthorized") || strings.Contains(errStr, "401"):
-		return fmt.Sprintf("🔐 **Kendala Autentikasi / Sesi Provider**\n%s", err.Error())
+	case strings.Contains(errStr, "login") || strings.Contains(errStr, "cookie") || strings.Contains(errStr, "autentikasi") || strings.Contains(errStr, "snlm0e") || strings.Contains(errStr, "unauthorized") || strings.Contains(errStr, "401") || strings.Contains(errStr, "gemini web"):
+		return fmt.Sprintf("🔐 **Kendala Sesi Gemini Web (Google Auth)**\n%s\n\n💡 <i>Silakan login ke https://gemini.google.com/app di browser Anda, salin cookie <code>__Secure-1PSID</code> (dan <code>__Secure-1PSIDTS</code> bila ada), lalu kirimkan via perintah <code>/gemini_login</code>.</i>", err.Error())
 	default:
 		return "❌ **Maaf, terjadi kendala teknis pada layanan AI.**\nSilakan coba lagi beberapa saat lagi (bisa gunakan `/retry`) atau gunakan `/reset` untuk memulai percakapan baru."
 	}

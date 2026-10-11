@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -563,70 +564,125 @@ func (m *Manager) ListAll() []Provider {
 	return list
 }
 
+// IsGeminiWeb checks if a provider name, model name, or identifier refers to Gemini Web Scraper
+func IsGeminiWeb(val string) bool {
+	v := strings.ToLower(strings.TrimSpace(val))
+	if v == "" {
+		return false
+	}
+	if strings.HasPrefix(v, "gemini-web") || strings.HasPrefix(v, "gemini_web") || strings.HasPrefix(v, "gemini_scrape") {
+		return true
+	}
+	if strings.Contains(v, "gemini_web") || strings.Contains(v, "gemini web") || strings.Contains(v, "gemini-web") || strings.Contains(v, "gemini_scrape") {
+		return true
+	}
+	return false
+}
+
 func isNativeScraper(p Provider) bool {
 	if p == nil {
 		return false
 	}
 	typ := strings.ToLower(p.Type())
-	return typ == "gemini_web" || typ == "gemini_scrape"
+	return typ == "gemini_web" || typ == "gemini_scrape" || IsGeminiWeb(p.Name())
 }
 
-// findNativeScraperLocked finds an active web scraper provider if requested by preferredName or model
+func (m *Manager) isGeminiWebRequest(preferredName string, req ChatRequest) bool {
+	if IsGeminiWeb(preferredName) || IsGeminiWeb(req.Model) || IsGeminiWeb(req.PreferredModel) {
+		return true
+	}
+	if strings.Contains(req.Model, ":") {
+		parts := strings.SplitN(req.Model, ":", 2)
+		if IsGeminiWeb(parts[0]) || IsGeminiWeb(parts[1]) {
+			return true
+		}
+	}
+	if strings.Contains(req.PreferredModel, ":") {
+		parts := strings.SplitN(req.PreferredModel, ":", 2)
+		if IsGeminiWeb(parts[0]) || IsGeminiWeb(parts[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// findNativeScraperLocked finds an active web scraper provider instance
 func (m *Manager) findNativeScraperLocked(preferredName, model string) (Provider, string) {
-	// 1. If preferredName is given, check if it matches a native scraper provider
+	var scraper Provider
+
+	// 1. If preferredName is explicitly given and matches
 	if preferredName != "" {
 		if p, ok := m.getLocked(preferredName); ok && isNativeScraper(p) {
-			cleanModel := model
-			if strings.Contains(cleanModel, ":") {
-				parts := strings.SplitN(cleanModel, ":", 2)
-				cleanModel = parts[1]
-			}
-			return p, cleanModel
+			scraper = p
 		}
 	}
 
-	// 2. If model contains "provider:model" e.g. "gemini_web:gemini-web-pro" or "Gemini Web (Google Auth):gemini-web-pro"
-	if strings.Contains(model, ":") {
-		parts := strings.SplitN(model, ":", 2)
-		provPart := strings.TrimSpace(parts[0])
-		modelPart := strings.TrimSpace(parts[1])
-		if p, ok := m.getLocked(provPart); ok && isNativeScraper(p) {
-			return p, modelPart
+	// 2. Direct ID lookup
+	if scraper == nil && m.providersByID != nil {
+		if p, ok := m.providersByID["gemini_web"]; ok && isNativeScraper(p) {
+			scraper = p
 		}
 	}
 
-	// 3. By model name matching native scraper's supported models or default model
-	cleanModel := strings.ToLower(strings.TrimSpace(model))
-	if cleanModel != "" {
+	// 3. Search across registered providers
+	if scraper == nil {
 		for _, p := range m.providers {
-			if !isNativeScraper(p) {
-				continue
-			}
-			if strings.EqualFold(p.DefaultModel(), model) {
-				return p, p.DefaultModel()
-			}
-			for _, mName := range p.Models() {
-				if strings.EqualFold(mName, model) {
-					return p, mName
-				}
+			if isNativeScraper(p) {
+				scraper = p
+				break
 			}
 		}
 	}
 
-	return nil, model
+	// 4. Fallback search across providersByID
+	if scraper == nil && m.providersByID != nil {
+		for _, p := range m.providersByID {
+			if isNativeScraper(p) {
+				scraper = p
+				break
+			}
+		}
+	}
+
+	cleanModel := strings.TrimSpace(model)
+	if strings.Contains(cleanModel, ":") {
+		parts := strings.SplitN(cleanModel, ":", 2)
+		if IsGeminiWeb(parts[0]) {
+			cleanModel = strings.TrimSpace(parts[1])
+		}
+	}
+	if cleanModel == "" || strings.EqualFold(cleanModel, "auto") || strings.EqualFold(cleanModel, "gemini_web") || strings.EqualFold(cleanModel, "gemini-web") {
+		if scraper != nil && scraper.DefaultModel() != "" {
+			cleanModel = scraper.DefaultModel()
+		} else {
+			cleanModel = "gemini-web-pro"
+		}
+	}
+
+	return scraper, cleanModel
 }
 
 // GenerateWithFallback executes chat with 9Router Smart Routing, Combo resolution, and Failsafe Fallbacks
 func (m *Manager) GenerateWithFallback(ctx context.Context, preferredName string, req ChatRequest) (*ChatResponse, error) {
-	// Native scrapers (like GeminiWebProvider) must be executed directly by the manager
-	// because external API gateways (Bifrost) do not support web session scraping.
-	m.mu.RLock()
-	if scraper, targetModel := m.findNativeScraperLocked(preferredName, req.Model); scraper != nil {
+	// DEDICATED CUSTOM EXECUTION PATH FOR GEMINI WEB SCRAPE
+	// Gemini Web Scrape uses direct Google web session scraping and NEVER routes through Bifrost.
+	if m.isGeminiWebRequest(preferredName, req) {
+		m.mu.RLock()
+		scraper, targetModel := m.findNativeScraperLocked(preferredName, req.Model)
+		if scraper == nil && req.PreferredModel != "" {
+			scraper, targetModel = m.findNativeScraperLocked(preferredName, req.PreferredModel)
+		}
 		m.mu.RUnlock()
-		req.Model = targetModel
-		return scraper.GenerateChat(ctx, req)
+
+		if scraper == nil {
+			return nil, errors.New("provider Gemini Web Scrape tidak aktif atau belum dikonfigurasi di sistem")
+		}
+
+		if targetModel != "" {
+			req.Model = targetModel
+		}
+		return executeProviderCall(ctx, scraper, req)
 	}
-	m.mu.RUnlock()
 
 	// When an external router (Bifrost) is attached, delegate the entire routing,
 	// fallback and streaming handling to it.

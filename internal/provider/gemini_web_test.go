@@ -53,6 +53,38 @@ func TestParseGoogleAuthInput(t *testing.T) {
 	if cookies4["__Secure-1PSID"] != singleToken {
 		t.Errorf("expected __Secure-1PSID=%s, got %s", singleToken, cookies4["__Secure-1PSID"])
 	}
+
+	// Test Case 5: Single raw sidts token
+	sidtsToken := "sidts-CjIBkldj_w1zrlb8-AAwH0uV3W-u8NV33JgLujfAA1L8W409mUlQNpDePEt7JHUWZyJe_BAA"
+	cookies5, err := ParseGoogleAuthInput(sidtsToken)
+	if err != nil {
+		t.Fatalf("unexpected error parsing sidts token: %v", err)
+	}
+	if cookies5["__Secure-1PSIDTS"] != sidtsToken {
+		t.Errorf("expected __Secure-1PSIDTS=%s, got %s", sidtsToken, cookies5["__Secure-1PSIDTS"])
+	}
+}
+
+func TestIsGeminiWeb(t *testing.T) {
+	testCases := []struct {
+		input    string
+		expected bool
+	}{
+		{"gemini_web", true},
+		{"gemini-web-pro", true},
+		{"Gemini Web (Google Auth)", true},
+		{"gemini_scrape", true},
+		{"gemini_web:gemini-web-flash", true},
+		{"gemini-web-ultra", true},
+		{"google gemini", false},
+		{"openai", false},
+		{"deepseek", false},
+	}
+	for _, tc := range testCases {
+		if got := IsGeminiWeb(tc.input); got != tc.expected {
+			t.Errorf("IsGeminiWeb(%q) = %v; want %v", tc.input, got, tc.expected)
+		}
+	}
 }
 
 func TestGeminiWebProviderInterface(t *testing.T) {
