@@ -1017,9 +1017,13 @@ func (w *ProviderWizard) syncProviderToManager(p *storage.ProviderRecord) {
 		}
 		webInst := provider.NewGeminiWebProvider(p.Name, authData, p.DefaultModel, models)
 		if w.db != nil {
+			provID := p.ID
 			webInst.SetOnCookieUpdate(func(provName, newCookies string, cookieMap map[string]string) {
-				pRec, err := w.db.GetProvider(provName)
-				if err == nil && pRec != nil {
+				pRec, err := w.db.GetProvider(provID)
+				if err != nil || pRec == nil {
+					pRec, _ = w.db.GetProvider(provName)
+				}
+				if pRec != nil {
 					pRec.APIKey = newCookies
 					pRec.APIKeys = []string{newCookies}
 					_ = w.db.SaveProvider(pRec)

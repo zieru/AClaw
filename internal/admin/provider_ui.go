@@ -718,6 +718,20 @@ func (ui *ProviderUI) syncProviderToManager(p *storage.ProviderRecord) {
 			authData = strings.Join(keys, "; ")
 		}
 		webInst := provider.NewGeminiWebProvider(p.Name, authData, p.DefaultModel, models)
+		if ui.db != nil {
+			provID := p.ID
+			webInst.SetOnCookieUpdate(func(provName, newCookies string, cookieMap map[string]string) {
+				pRec, err := ui.db.GetProvider(provID)
+				if err != nil || pRec == nil {
+					pRec, _ = ui.db.GetProvider(provName)
+				}
+				if pRec != nil {
+					pRec.APIKey = newCookies
+					pRec.APIKeys = []string{newCookies}
+					_ = ui.db.SaveProvider(pRec)
+				}
+			})
+		}
 		if p.ProxyEnabled && ui.proxyPool != nil {
 			proxyClient := ui.proxyPool.NewHTTPClientForGroup(p.ProxyGroup, 90*time.Second)
 			webInst.SetHTTPClient(proxyClient)

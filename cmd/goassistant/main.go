@@ -316,9 +316,13 @@ func main() {
 					authData = strings.Join(keys, "; ")
 				}
 				webInst := provider.NewGeminiWebProvider(p.Name, authData, p.DefaultModel, models)
+				provID := p.ID
 				webInst.SetOnCookieUpdate(func(provName, newCookies string, cookieMap map[string]string) {
-					pRec, err := db.GetProvider(provName)
-					if err == nil && pRec != nil {
+					pRec, err := db.GetProvider(provID)
+					if err != nil || pRec == nil {
+						pRec, _ = db.GetProvider(provName)
+					}
+					if pRec != nil {
 						pRec.APIKey = newCookies
 						pRec.APIKeys = []string{newCookies}
 						_ = db.SaveProvider(pRec)
@@ -352,6 +356,19 @@ func main() {
 					authData = strings.Join(keys, "; ")
 				}
 				webInst := provider.NewGeminiWebProvider(p.Name, authData, p.DefaultModel, models)
+				provID := p.ID
+				webInst.SetOnCookieUpdate(func(provName, newCookies string, cookieMap map[string]string) {
+					pRec, err := db.GetProvider(provID)
+					if err != nil || pRec == nil {
+						pRec, _ = db.GetProvider(provName)
+					}
+					if pRec != nil {
+						pRec.APIKey = newCookies
+						pRec.APIKeys = []string{newCookies}
+						_ = db.SaveProvider(pRec)
+						log.Printf("🔄 [GeminiWeb] Cookie sesi Google (%s) berhasil diperbarui dan disimpan secara otomatis", provName)
+					}
+				})
 				provMgr.RegisterWithID(p.ID, webInst, p.Priority)
 				log.Printf("🤖 Provider aktif: %s (Tipe: %s)", p.Name, p.Type)
 			}

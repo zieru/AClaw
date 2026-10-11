@@ -39,9 +39,10 @@ type GeminiWebProvider struct {
 }
 
 var (
-	snlm0eRegex    = regexp.MustCompile(`"SNlM0e"\s*:\s*"([^"]+)"`)
-	snlm0eAltRegex = regexp.MustCompile(`"SNlM0e"\s*,\s*null\s*,\s*"([^"]+)"`)
-	cfb2hRegex     = regexp.MustCompile(`"cfb2h"\s*:\s*"([^"]+)"`)
+	snlm0eRegex    = regexp.MustCompile(`["']?SNlM0e["']?\s*[:=]\s*["']([^"'\s]+)["']`)
+	snlm0eAltRegex = regexp.MustCompile(`["']?SNlM0e["']?\s*,\s*null\s*,\s*["']([^"'\s]+)["']`)
+	snlm0eArrRegex = regexp.MustCompile(`\[\\?["']SNlM0e\\?["'],\\?["']([^"'\\]+)\\?["']`)
+	cfb2hRegex     = regexp.MustCompile(`["']?cfb2h["']?\s*[:=]\s*["']([^"'\s]+)["']`)
 )
 
 // NewGeminiWebProvider creates a new Gemini Web Scrape provider instance
@@ -334,11 +335,23 @@ func (p *GeminiWebProvider) FetchSNlM0e(ctx context.Context) (string, error) {
 
 	matches := snlm0eRegex.FindStringSubmatch(bodyStr)
 	if len(matches) < 2 {
-		// Try alternative pattern for WIZ_global_data SNlM0e
 		matches = snlm0eAltRegex.FindStringSubmatch(bodyStr)
 	}
 	if len(matches) < 2 {
-		extractErr := errors.New("gagal mengekstrak session token SNlM0e dari Gemini Web. Pastikan cookie __Secure-1PSID sudah benar dan akun sudah login")
+		matches = snlm0eArrRegex.FindStringSubmatch(bodyStr)
+	}
+	if len(matches) < 2 {
+		p.mu.Lock()
+		p.snlm0e = ""
+		p.snlm0eFetched = time.Time{}
+		p.mu.Unlock()
+
+		var extractErr error
+		if strings.Contains(bodyStr, "/signin") || strings.Contains(bodyStr, "accounts.google.com") {
+			extractErr = errors.New("sesi Google login kedaluwarsa (diarahkan ke Sign-in). Silakan login ulang ke https://gemini.google.com/app dan perbarui cookie via /gemini_login")
+		} else {
+			extractErr = errors.New("gagal mengekstrak session token SNlM0e dari Gemini Web. Pastikan cookie __Secure-1PSID sudah benar dan akun sudah login")
+		}
 		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, extractErr)
 		return "", extractErr
 	}
@@ -444,7 +457,7 @@ func (p *GeminiWebProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 	p.updateCookiesFromResponse(httpResp)
 
 	if httpResp.StatusCode != http.StatusOK {
-		if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
+		if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden || httpResp.StatusCode == http.StatusBadRequest {
 			p.mu.Lock()
 			p.snlm0e = ""
 			p.snlm0eFetched = time.Time{}
