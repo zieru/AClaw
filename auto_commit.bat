@@ -31,8 +31,8 @@ for /f "tokens=1,2" %%A in ('powershell -NoProfile -ExecutionPolicy Bypass -File
 )
 
 if "!NEW_TAG!"=="" (
-    set CURRENT_TAG=v1.5.44
-    set NEW_TAG=v1.5.45
+    set CURRENT_TAG=v1.5.181
+    set NEW_TAG=v1.5.182
 )
 
 echo Tag tertinggi saat ini : !CURRENT_TAG!

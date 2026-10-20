@@ -12,7 +12,7 @@ import (
 
 var (
 	// Version is the current semantic version of GoAssistant (updated to latest tag)
-	Version = "1.5.4"
+	Version = "1.5.182"
 	// BuildDate is the date or timestamp this binary was compiled / committed
 	BuildDate = "2026-08-21"
 	// GitCommit is the short commit hash

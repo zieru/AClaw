@@ -30,7 +30,7 @@ foreach ($t in $allTags) {
 }
 
 if ($maxVersion -eq [version]'0.0.0') {
-    $maxVersion = [version]'1.5.0'
+    $maxVersion = [version]'1.5.181'
 }
 
 $curTag = "v" + $maxVersion.ToString(3)
