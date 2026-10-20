@@ -426,10 +426,16 @@ func (c *ModelCatalog) loadBuiltInSeeds() {
 			{ModelID: "gemini-1.5-pro", DisplayName: "Gemini 1.5 Pro", ProviderFamily: "google", SupportsVision: true, SupportsAudioIn: true, SupportsTools: true},
 			{ModelID: "gemini-1.5-flash", DisplayName: "Gemini 1.5 Flash", ProviderFamily: "google", SupportsVision: true, SupportsAudioIn: true, SupportsTools: true},
 
-			// Google Gemini Web Scrape Models
-			{ModelID: "gemini-web-pro", DisplayName: "Gemini Web Pro (Google Scrape)", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
-			{ModelID: "gemini-web-flash", DisplayName: "Gemini Web Flash (Google Scrape)", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
-			{ModelID: "gemini-web-ultra", DisplayName: "Gemini Web Ultra (Google Scrape)", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
+			// Google Gemini Web (gemini-web2api) Models
+			{ModelID: "gemini-3.5-flash-thinking", DisplayName: "Gemini 3.5 Flash Thinking (Web)", ProviderFamily: "google", SupportsVision: true, SupportsReasoning: true, SupportsTools: false},
+			{ModelID: "gemini-3.6-flash", DisplayName: "Gemini 3.6 Flash (Web)", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
+			{ModelID: "gemini-3.7-flash", DisplayName: "Gemini 3.7 Flash (Web)", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
+			{ModelID: "gemini-auto", DisplayName: "Gemini Auto (Web)", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
+			{ModelID: "gemini-flash-lite", DisplayName: "Gemini Flash Lite (Web)", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
+			{ModelID: "gemini-3.1-pro", DisplayName: "Gemini 3.1 Pro (Web)", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
+			{ModelID: "gemini-web-pro", DisplayName: "Gemini Web Pro", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
+			{ModelID: "gemini-web-flash", DisplayName: "Gemini Web Flash", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
+			{ModelID: "gemini-web-ultra", DisplayName: "Gemini Web Ultra", ProviderFamily: "google", SupportsVision: true, SupportsTools: false},
 
 			// Anthropic Claude Models (Vision)
 			{ModelID: "claude-3-5-sonnet", DisplayName: "Claude 3.5 Sonnet", ProviderFamily: "anthropic", SupportsVision: true, SupportsTools: true},

@@ -3,10 +3,12 @@
 gemini_web_runner.py
 Bridge script for GoAssistant to communicate with gemini-web2api via File IPC.
 Supports single-prompt, streaming chunk generation (JSONL), model selection,
-and proxy/cookie configuration. Compatible with Windows and Linux (Alpine).
+multimodal image input (Scotty resumable upload), and proxy/cookie configuration.
+Compatible with Windows and Linux (Alpine).
 """
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -27,6 +29,8 @@ try:
     from gemini_web2api.config import CONFIG
     from gemini_web2api.gemini import generate, generate_stream, extract_response_text, HAS_HTTPX
     from gemini_web2api.models import MODELS
+    from gemini_web2api.multimodal import upload_image, detect_image_mime, fetch_image_bytes
+    from gemini_web2api.tools import _decode_data_url
     IMPORT_SUCCESS = True
     IMPORT_ERR = ""
 except Exception as e:
@@ -82,6 +86,51 @@ def resolve_model(model_name: str, think_override=None):
         think_mode = info.get("think", 0)
 
     return model_id, think_mode
+
+
+def process_image(img_input):
+    """Extract raw image bytes and MIME type from data-URI, URL, local path, or raw base64."""
+    if not img_input:
+        return None
+    if not isinstance(img_input, str):
+        return None
+
+    # Case 1: Data URI (e.g. data:image/png;base64,...)
+    if img_input.startswith("data:"):
+        try:
+            decoded = _decode_data_url(img_input)
+            if decoded:
+                data, mime = decoded
+                return data, detect_image_mime(data, mime or "image/png")
+        except Exception:
+            pass
+
+    # Case 2: Web URL
+    if img_input.startswith("http://") or img_input.startswith("https://"):
+        try:
+            data = fetch_image_bytes(img_input)
+            if data:
+                return data, detect_image_mime(data, "image/png")
+        except Exception:
+            pass
+
+    # Case 3: Local file on disk
+    if os.path.isfile(img_input):
+        try:
+            data = Path(img_input).read_bytes()
+            return data, detect_image_mime(data, "image/png")
+        except Exception:
+            pass
+
+    # Case 4: Raw base64 string
+    try:
+        data = base64.b64decode(img_input, validate=True)
+        if data:
+            return data, detect_image_mime(data, "image/png")
+    except Exception:
+        pass
+
+    return None
 
 
 def main():
@@ -142,7 +191,6 @@ def main():
     if cookie_file and os.path.exists(cookie_file):
         CONFIG["cookie_file"] = cookie_file
     elif req.get("cookie_str"):
-        # Create a temp cookie file or configure directly
         temp_cookie_path = str(out_path.parent / f"cookie_{os.getpid()}.txt")
         try:
             with open(temp_cookie_path, "w", encoding="utf-8") as cf:
@@ -151,23 +199,55 @@ def main():
         except Exception:
             pass
 
+    # Process multimodal images (if any)
+    raw_images = req.get("images", [])
+    file_refs = []
+    if raw_images:
+        for idx, img_in in enumerate(raw_images):
+            processed = process_image(img_in)
+            if not processed:
+                continue
+            data_bytes, mime_type = processed
+            try:
+                ref = upload_image(data_bytes, filename=f"image_{idx}.png", mime_type=mime_type)
+                if ref:
+                    file_refs.append(ref)
+            except Exception as e:
+                write_line({
+                    "type": "error",
+                    "error": f"Gagal mengunggah gambar ke Google Scotty: {e}. Catatan: Multimodal Gemini Web memerlukan cookie session Google aktif.",
+                })
+                sys.exit(1)
+
+        if file_refs and "[Image attached]" not in prompt:
+            prompt = f"{prompt}\n\n[Image attached]"
+
     is_stream = req.get("stream", True)
     start_time = time.time()
     full_text = []
 
     try:
-        if is_stream and HAS_HTTPX:
-            for delta in generate_stream(prompt, model_id, resolved_think):
+        if HAS_HTTPX:
+            for delta in generate_stream(prompt, model_id, resolved_think, file_refs=file_refs if file_refs else None):
                 if delta:
                     full_text.append(delta)
-                    write_line({"type": "chunk", "delta": delta})
+                    if is_stream:
+                        write_line({"type": "chunk", "delta": delta})
             final_content = "".join(full_text).strip()
         else:
-            raw = generate(prompt, model_id, resolved_think)
+            raw = generate(prompt, model_id, resolved_think, file_refs=file_refs if file_refs else None)
             final_content = extract_response_text(raw).strip()
 
         latency_ms = int((time.time() - start_time) * 1000)
         approx_tokens = (len(prompt) + len(final_content)) // 4
+
+        if not final_content and file_refs:
+            write_line({
+                "type": "error",
+                "error": "Google Gemini Web tidak mengembalikan teks untuk input gambar. Fitur multimodal vision pada Gemini Web membutuhkan session cookie akun Google aktif. Silakan masukkan cookie di GoAssistant.",
+                "latency_ms": latency_ms,
+            })
+            sys.exit(1)
 
         write_line({
             "type": "done",
@@ -177,9 +257,12 @@ def main():
             "model": model_name,
         })
     except Exception as e:
+        err_str = str(e)
+        if "BardErrorInfo" in err_str and "1003" in err_str:
+            err_str = "Google Gemini Web menolak pemrosesan gambar (BardErrorInfo [1003]). Multimodal vision pada Gemini Web membutuhkan session cookie akun Google. Silakan atur cookie akun Google di GoAssistant."
         write_line({
             "type": "error",
-            "error": f"Eksekusi Gemini Web gagal: {e}",
+            "error": f"Eksekusi Gemini Web gagal: {err_str}",
             "latency_ms": int((time.time() - start_time) * 1000),
         })
         sys.exit(1)

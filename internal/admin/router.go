@@ -194,6 +194,12 @@ func (a *AdminBot) registerRoutes() {
 		}
 		return nil
 	})
+	a.bot.Handle(&tele.Btn{Unique: "search_prov_gemini_web"}, func(c tele.Context) error {
+		if a.searchUI != nil {
+			return a.searchUI.HandleSwitchProviderCallback(c, "gemini_web")
+		}
+		return nil
+	})
 	a.bot.Handle(&tele.Btn{Unique: "search_prov_tavily"}, func(c tele.Context) error {
 		if a.searchUI != nil {
 			return a.searchUI.HandleSwitchProviderCallback(c, "tavily")

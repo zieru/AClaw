@@ -81,3 +81,4 @@ __pycache__/
 scripts/gemini-web2api/
 data/gemini_ipc/
 goassistant-linux-amd64
+goassistant-linux-amd64.gz

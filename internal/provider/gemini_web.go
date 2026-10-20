@@ -40,14 +40,15 @@ type GeminiWebProvider struct {
 
 // IPCRequest represents the JSON payload passed to scripts/gemini_web_runner.py
 type IPCRequest struct {
-	Prompt     string `json:"prompt"`
-	Model      string `json:"model"`
-	ThinkMode  *int   `json:"think_mode,omitempty"`
-	Stream     bool   `json:"stream"`
-	Proxy      string `json:"proxy,omitempty"`
-	CookieFile string `json:"cookie_file,omitempty"`
-	CookieStr  string `json:"cookie_str,omitempty"`
-	TimeoutSec int    `json:"timeout_sec,omitempty"`
+	Prompt     string   `json:"prompt"`
+	Model      string   `json:"model"`
+	ThinkMode  *int     `json:"think_mode,omitempty"`
+	Stream     bool     `json:"stream"`
+	Proxy      string   `json:"proxy,omitempty"`
+	CookieFile string   `json:"cookie_file,omitempty"`
+	CookieStr  string   `json:"cookie_str,omitempty"`
+	TimeoutSec int      `json:"timeout_sec,omitempty"`
+	Images     []string `json:"images,omitempty"`
 }
 
 // IPCEvent represents a streaming event emitted by scripts/gemini_web_runner.py
@@ -220,6 +221,14 @@ func (p *GeminiWebProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 		_ = os.Remove(outPath)
 	}()
 
+	// Collect attached images if any (multimodal vision)
+	var allImages []string
+	for _, m := range req.Messages {
+		if len(m.Images) > 0 {
+			allImages = append(allImages, m.Images...)
+		}
+	}
+
 	ipcPayload := IPCRequest{
 		Prompt:     fullPrompt,
 		Model:      modelToUse,
@@ -227,6 +236,7 @@ func (p *GeminiWebProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 		Proxy:      proxy,
 		CookieStr:  cookieStr,
 		TimeoutSec: 150,
+		Images:     allImages,
 	}
 
 	reqBytes, err := json.Marshal(ipcPayload)

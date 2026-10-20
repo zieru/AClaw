@@ -46,6 +46,7 @@ func InitGlobalEngine(cfg config.SearchConfig) *Engine {
 	// Register core providers
 	eng.RegisterProvider(NewTavilyProvider(cfg.Tavily, timeout))
 	eng.RegisterProvider(NewFirecrawlProvider(cfg.Firecrawl, timeout))
+	eng.RegisterProvider(NewGeminiWebSearchProvider())
 
 	globalEngine = eng
 	return eng
@@ -240,6 +241,7 @@ func (e *Engine) UpdateConfig(cfg config.SearchConfig) {
 	}
 	e.providers["tavily"] = NewTavilyProvider(cfg.Tavily, timeout)
 	e.providers["firecrawl"] = NewFirecrawlProvider(cfg.Firecrawl, timeout)
+	e.providers["gemini_web"] = NewGeminiWebSearchProvider()
 }
 
 // Config returns a copy of current search configuration
@@ -318,11 +320,19 @@ func (e *Engine) buildProviderPlan() []Provider {
 		addProvider("tavily")
 		if e.cfg.FallbackEnabled {
 			addProvider("firecrawl")
+			addProvider("gemini_web")
 		}
 	case "firecrawl":
 		addProvider("firecrawl")
 		if e.cfg.FallbackEnabled {
 			addProvider("tavily")
+			addProvider("gemini_web")
+		}
+	case "gemini_web", "gemini", "gemini-web":
+		addProvider("gemini_web")
+		if e.cfg.FallbackEnabled {
+			addProvider("tavily")
+			addProvider("firecrawl")
 		}
 	case "auto":
 		fallthrough
@@ -331,7 +341,7 @@ func (e *Engine) buildProviderPlan() []Provider {
 		if strings.ToLower(e.cfg.Strategy) == "roundrobin" {
 			// Find available primary providers
 			var availPrimaries []string
-			for _, name := range []string{"tavily", "firecrawl"} {
+			for _, name := range []string{"tavily", "firecrawl", "gemini_web"} {
 				if p, ok := e.providers[name]; ok && p.IsAvailable() {
 					availPrimaries = append(availPrimaries, name)
 				}
@@ -348,9 +358,10 @@ func (e *Engine) buildProviderPlan() []Provider {
 			}
 		}
 
-		// Fallback strategy: Priority Tavily -> Firecrawl
+		// Fallback strategy: Priority Tavily -> Firecrawl -> Gemini Web
 		addProvider("tavily")
 		addProvider("firecrawl")
+		addProvider("gemini_web")
 	}
 
 	return plan

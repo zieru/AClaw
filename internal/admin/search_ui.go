@@ -82,10 +82,11 @@ func (h *SearchUIHandler) HandleSearchDashboard(c tele.Context) error {
 	if sCfg.Firecrawl.APIKey != "" {
 		firecrawlStatus = fmt.Sprintf("🟢 Terkonfigurasi (<code>%s</code>)", maskAPIKey(sCfg.Firecrawl.APIKey))
 	}
-	sb.WriteString(fmt.Sprintf("• <b>Firecrawl Web</b>: %s\n\n", firecrawlStatus))
+	sb.WriteString(fmt.Sprintf("• <b>Firecrawl Web</b>: %s\n", firecrawlStatus))
 	if sCfg.Firecrawl.BaseURL != "" && sCfg.Firecrawl.BaseURL != "https://api.firecrawl.dev" {
-		sb.WriteString(fmt.Sprintf("  └ <i>Custom URL: <code>%s</code></i>\n\n", html.EscapeString(sCfg.Firecrawl.BaseURL)))
+		sb.WriteString(fmt.Sprintf("  └ <i>Custom URL: <code>%s</code></i>\n", html.EscapeString(sCfg.Firecrawl.BaseURL)))
 	}
+	sb.WriteString("• <b>Gemini Web Search</b>: 🟢 Siap Pakai (Zero-Auth / Google Grounding)\n\n")
 
 	sb.WriteString("💡 <i>Pilih provider, ubah strategi, atau atur API key & pengaturan lanjutan menggunakan tombol di bawah:</i>")
 
@@ -110,6 +111,7 @@ func (h *SearchUIHandler) BuildKeyboard(sCfg config.SearchConfig) *tele.ReplyMar
 	}
 
 	btnAuto := menu.Data(formatBtn("Auto", "auto"), "search_prov_auto")
+	btnGemini := menu.Data(formatBtn("Gemini Web", "gemini_web"), "search_prov_gemini_web")
 	btnTavily := menu.Data(formatBtn("Tavily", "tavily"), "search_prov_tavily")
 	btnFirecrawl := menu.Data(formatBtn("Firecrawl", "firecrawl"), "search_prov_firecrawl")
 
@@ -134,7 +136,8 @@ func (h *SearchUIHandler) BuildKeyboard(sCfg config.SearchConfig) *tele.ReplyMar
 	btnBack := menu.Data("⬅️ Kembali ke Menu Utama", "menu_main")
 
 	menu.Inline(
-		menu.Row(btnAuto, btnTavily, btnFirecrawl),
+		menu.Row(btnAuto, btnGemini),
+		menu.Row(btnTavily, btnFirecrawl),
 		menu.Row(btnToggleStrat, btnToggleFB),
 		menu.Row(btnSetTavily, btnSetFirecrawl),
 		menu.Row(btnAdv, btnTest),
