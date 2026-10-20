@@ -418,14 +418,14 @@ func (p *GeminiWebProvider) RunUpdate(ctx context.Context) (string, error) {
 		if _, err := os.Stat(batPath); err == nil {
 			cmd = exec.CommandContext(ctx, "cmd.exe", "/c", batPath)
 		} else {
-			cmd = exec.CommandContext(ctx, "python", "-m", "pip", "install", "--upgrade", "git+https://github.com/Sophomoresty/gemini-web2api.git", "httpx>=0.25")
+			cmd = exec.CommandContext(ctx, "git", "clone", "--depth", "1", "https://github.com/Sophomoresty/gemini-web2api.git", filepath.Join(root, "scripts", "gemini-web2api"))
 		}
 	} else {
 		shPath := filepath.Join(root, "scripts", "update_gemini_web2api.sh")
 		if _, err := os.Stat(shPath); err == nil {
 			cmd = exec.CommandContext(ctx, "sh", shPath)
 		} else {
-			cmd = exec.CommandContext(ctx, "python3", "-m", "pip", "install", "--upgrade", "--break-system-packages", "git+https://github.com/Sophomoresty/gemini-web2api.git", "httpx>=0.25")
+			cmd = exec.CommandContext(ctx, "git", "clone", "--depth", "1", "https://github.com/Sophomoresty/gemini-web2api.git", filepath.Join(root, "scripts", "gemini-web2api"))
 		}
 	}
 

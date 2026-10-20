@@ -7,12 +7,20 @@ echo ========================================================
 
 cd /d "%~dp0.."
 
-if exist "scripts\gemini-web2api\.git" (
-    echo [*] Updating via git pull in scripts\gemini-web2api...
-    git -C scripts\gemini-web2api pull
+set TARGET_DIR=scripts\gemini-web2api
+
+if exist "%TARGET_DIR%\.git" (
+    echo [*] Updating via git pull in %TARGET_DIR%...
+    git -C "%TARGET_DIR%" pull
 ) else (
-    echo [*] Updating via pip...
-    python -m pip install --upgrade "git+https://github.com/Sophomoresty/gemini-web2api.git" "httpx>=0.25"
+    where git >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        echo [*] Cloning gemini-web2api to %TARGET_DIR%...
+        git clone --depth 1 https://github.com/Sophomoresty/gemini-web2api.git "%TARGET_DIR%"
+    ) else (
+        echo [*] Updating via pip...
+        python -m pip install --upgrade "git+https://github.com/Sophomoresty/gemini-web2api.git" "httpx>=0.25"
+    )
 )
 
 echo.

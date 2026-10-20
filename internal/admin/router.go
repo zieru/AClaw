@@ -1061,7 +1061,11 @@ func (a *AdminBot) handleGeminiWebUpdate(c tele.Context) error {
 		p := provider.NewGeminiWebProvider("gemini_web", "", "", nil)
 		out, err := p.RunUpdate(ctx)
 		if err != nil {
-			msg := fmt.Sprintf("❌ <b>Gagal memperbarui gemini-web2api:</b>\n<pre>%s</pre>", html.EscapeString(out))
+			errText := strings.TrimSpace(out)
+			if errText == "" {
+				errText = err.Error()
+			}
+			msg := fmt.Sprintf("❌ <b>Gagal memperbarui gemini-web2api:</b>\n<pre>%s</pre>", html.EscapeString(errText))
 			if len(msg) > 4000 {
 				msg = msg[len(msg)-4000:]
 			}
