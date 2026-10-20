@@ -501,11 +501,11 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 
 	if isExplicitGeminiWeb || isGeminiWebProv {
 		provToCall = "gemini_web"
-		if modelToUse == "" || strings.EqualFold(modelToUse, "auto") || strings.EqualFold(modelToUse, "gemini_web") || strings.EqualFold(modelToUse, "gemini-web") {
-			modelToUse = "gemini-web-pro"
+		if modelToUse == "" || strings.EqualFold(modelToUse, "auto") || strings.EqualFold(modelToUse, "gemini_web") || strings.EqualFold(modelToUse, "gemini-web") || strings.EqualFold(modelToUse, "gemini-web-pro") {
+			modelToUse = "gemini-3.5-flash-thinking"
 		}
 		activeModelName = modelToUse
-		log.Printf("🌐 [GeminiWeb] Menjalankan jalur custom khusus Gemini Web Scraper (Model: %s)", modelToUse)
+		log.Printf("🌐 [GeminiWeb] Menjalankan jalur gemini-web2api File IPC (Model: %s)", modelToUse)
 	}
 
 	if (activeModelName == "" || strings.EqualFold(activeModelName, "auto")) && activeProv != nil {

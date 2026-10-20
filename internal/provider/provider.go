@@ -688,7 +688,7 @@ func (m *Manager) findNativeScraperLocked(preferredName, model string) (Provider
 		if scraper != nil && scraper.DefaultModel() != "" {
 			cleanModel = scraper.DefaultModel()
 		} else {
-			cleanModel = "gemini-web-pro"
+			cleanModel = "gemini-3.5-flash-thinking"
 		}
 	}
 

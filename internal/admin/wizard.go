@@ -88,7 +88,7 @@ func (w *ProviderWizard) StartWizard(c tele.Context) error {
 	btnDeepSeek := menu.Data("🤖 DeepSeek Official", "wiz_type_deepseek")
 	btnGroq := menu.Data("🚀 Groq (Llama 3.3)", "wiz_type_groq")
 	btnGemini := menu.Data("✨ Google Gemini", "wiz_type_gemini")
-	btnGeminiWeb := menu.Data("🌐 Gemini Web (Scrape)", "wiz_type_gemini_web")
+	btnGeminiWeb := menu.Data("🌐 Gemini Web (gemini-web2api)", "wiz_type_gemini_web")
 	btnClaude := menu.Data("🧠 Anthropic Claude", "wiz_type_anthropic")
 	btnOllama := menu.Data("🦙 Ollama Local", "wiz_type_ollama")
 	btnCustom := menu.Data("⚙️ Custom Endpoint", "wiz_type_custom")
@@ -210,14 +210,22 @@ func (w *ProviderWizard) RenderProviderEditDashboard(c tele.Context, p *storage.
 	btnDel := menu.Data("🗑️ Hapus Provider", "wiz_ed_del")
 	btnBack := menu.Data("⬅️ Selesai / Kembali", "menu_providers")
 
-	menu.Inline(
+	rows := []tele.Row{
 		menu.Row(btnDetect, btnDefMod),
 		menu.Row(btnModels, btnKeyStrat),
 		menu.Row(btnKeysRep, btnKeysAdd),
 		menu.Row(btnBaseURL, btnProxy),
 		menu.Row(btnToggle, btnDel),
-		menu.Row(btnBack),
-	)
+	}
+
+	if p.Type == "gemini_web" || p.Type == "gemini_scrape" {
+		btnUpdateGemini := menu.Data("📦 Update gemini-web2api", "wiz_gemini_update")
+		btnTestGemini := menu.Data("🧪 Test Runner", "wiz_gemini_test")
+		rows = append(rows, menu.Row(btnUpdateGemini, btnTestGemini))
+	}
+
+	rows = append(rows, menu.Row(btnBack))
+	menu.Inline(rows...)
 
 	return c.EditOrSend(sb.String(), menu, tele.ModeHTML)
 }
@@ -285,12 +293,19 @@ func (w *ProviderWizard) HandleTypeSelect(c tele.Context, pType string) error {
 
 	case "gemini_web", "gemini_scrape":
 		sess.ID = "gemini_web"
-		sess.Name = "Gemini Web (Google Auth)"
+		sess.Name = "Gemini Web (gemini-web2api)"
 		sess.Type = "gemini_web"
 		sess.BaseURL = "https://gemini.google.com"
 		sess.Step = StepEnterGeminiWebAuth
-		sess.DetectedModels = []string{"gemini-web-pro", "gemini-web-flash", "gemini-web-ultra"}
-		sess.DefaultModel = "gemini-web-pro"
+		sess.DetectedModels = []string{
+			"gemini-3.5-flash-thinking",
+			"gemini-3.6-flash",
+			"gemini-3.7-flash",
+			"gemini-auto",
+			"gemini-flash-lite",
+			"gemini-3.1-pro",
+		}
+		sess.DefaultModel = "gemini-3.5-flash-thinking"
 		return w.promptGeminiWebAuth(c, sess)
 
 	case "anthropic":
@@ -322,21 +337,18 @@ func (w *ProviderWizard) HandleTypeSelect(c tele.Context, pType string) error {
 }
 
 func (w *ProviderWizard) promptGeminiWebAuth(c tele.Context, sess *WizardSession) error {
-	text := "🌐 <b>SETUP GEMINI WEB (GOOGLE AUTH SCRAPER)</b>\n\n" +
-		"Provider ini memungkinkan Anda menggunakan Google Gemini Web secara gratis melalui scraping sesi Google.\n\n" +
-		"<b>Langkah Login Google Auth:</b>\n" +
-		"1️⃣ Buka link login berikut di browser Anda:\n" +
-		"👉 <a href=\"https://gemini.google.com/app\">https://gemini.google.com/app</a>\n\n" +
-		"2️⃣ Login dengan Akun Google Anda hingga masuk ke halaman obrolan Gemini.\n\n" +
-		"3️⃣ <b>Cara Mengambil Kredensial:</b>\n" +
-		"• <b>Opsi A (Link / URL):</b> Salin URL address bar / link redirect setelah login, ATAU\n" +
-		"• <b>Opsi B (Cookies DevTools):</b> Tekan <code>F12</code> -> Tab <b>Application/Storage</b> -> <b>Cookies</b> -> Salin nilai cookie <code>__Secure-1PSID</code> (dan <code>__Secure-1PSIDTS</code> bila ada), ATAU\n" +
-		"• <b>Opsi C (Cookie Header):</b> Salin seluruh cookie header (<code>key=value; ...</code>)\n\n" +
-		"4️⃣ <b>Paste / Kirimkan link atau cookie tersebut ke chat ini:</b>"
+	text := "🌐 <b>SETUP GEMINI WEB (gemini-web2api)</b>\n\n" +
+		"Provider ini menggunakan integrasi <b>gemini-web2api</b> (File IPC):\n\n" +
+		"✨ <b>Zero Authentication (Bebas Login):</b>\n" +
+		"• Model <code>gemini-3.5-flash-thinking</code>, <code>gemini-3.6-flash</code>, dan lainnya dapat langsung digunakan tanpa akun Google.\n\n" +
+		"🍪 <b>Cookie Google (Opsional):</b>\n" +
+		"• Jika Anda memiliki langganan <b>Gemini Advanced</b> dan ingin model Pro, Anda dapat mengirimkan cookie <code>__Secure-1PSID</code> atau teks cookie.\n\n" +
+		"Pilih <b>Aktifkan Langsung (Zero Auth)</b> untuk segera mulai, atau kirimkan cookie Anda:"
 
 	menu := &tele.ReplyMarkup{}
+	btnZero := menu.Data("⚡ Aktifkan Langsung (Zero Auth)", "wiz_gemini_activate_zero")
 	btnCancel := menu.Data("❌ Batal Setup", "wiz_cancel")
-	menu.Inline(menu.Row(btnCancel))
+	menu.Inline(menu.Row(btnZero), menu.Row(btnCancel))
 
 	return c.EditOrSend(text, menu, tele.ModeHTML)
 }
@@ -389,36 +401,21 @@ func (w *ProviderWizard) HandleTextMessage(c tele.Context) (bool, error) {
 	switch sess.Step {
 	case StepEnterGeminiWebAuth:
 		_ = c.Notify(tele.Typing)
+		if strings.EqualFold(msgText, "skip") || strings.EqualFold(msgText, "zero") || msgText == "-" {
+			sess.APIKeys = []string{""}
+			return true, w.finishWizard(c, sess)
+		}
+
 		parsedCookies, err := provider.ParseGoogleAuthInput(msgText)
+		var rawCookieStr string
 		if err != nil {
-			return true, c.Reply(fmt.Sprintf("⚠️ %v\n\nSilakan pastikan Anda menyalin URL hasil login atau cookie <code>__Secure-1PSID</code> dengan benar, lalu kirimkan kembali.", err), tele.ModeHTML)
-		}
-
-		if w.db != nil {
-			if existingP, _ := w.db.GetProvider("gemini_web"); existingP != nil && existingP.APIKey != "" {
-				if oldCookies, oErr := provider.ParseGoogleAuthInput(existingP.APIKey); oErr == nil {
-					for k, v := range oldCookies {
-						if _, hasNew := parsedCookies[k]; !hasNew {
-							parsedCookies[k] = v
-						}
-					}
-				}
+			rawCookieStr = msgText
+		} else {
+			var cookieParts []string
+			for k, v := range parsedCookies {
+				cookieParts = append(cookieParts, fmt.Sprintf("%s=%s", k, v))
 			}
-		}
-
-		var cookieParts []string
-		for k, v := range parsedCookies {
-			cookieParts = append(cookieParts, fmt.Sprintf("%s=%s", k, v))
-		}
-		rawCookieStr := strings.Join(cookieParts, "; ")
-
-		testProv := provider.NewGeminiWebProvider(sess.Name, rawCookieStr, sess.DefaultModel, sess.DetectedModels)
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-
-		_, testErr := testProv.FetchSNlM0e(ctx)
-		if testErr != nil {
-			return true, c.Reply(fmt.Sprintf("⚠️ <b>Autentikasi Gemini Web Gagal:</b>\n%v\n\nSilakan periksa kembali apakah akun Google Anda sudah login di browser dan cookie <code>__Secure-1PSID</code> masih aktif, lalu kirim ulang.", html.EscapeString(testErr.Error())), tele.ModeHTML)
+			rawCookieStr = strings.Join(cookieParts, "; ")
 		}
 
 		sess.APIKeys = []string{rawCookieStr}
@@ -1296,4 +1293,22 @@ func (w *ProviderWizard) HandleEditModelsPage(c tele.Context, page int) error {
 	}
 
 	return w.RenderModelToggleDashboard(c, p, page)
+}
+
+// HandleGeminiActivateZero completes wizard setup with zero-auth for gemini_web
+func (w *ProviderWizard) HandleGeminiActivateZero(c tele.Context) error {
+	if c.Sender() == nil {
+		return nil
+	}
+	userID := c.Sender().ID
+	w.mu.Lock()
+	sess, exists := w.sessions[userID]
+	w.mu.Unlock()
+
+	if !exists {
+		return c.Reply("❌ Sesi wizard telah kedaluwarsa. Silakan mulai ulang dari menu provider.")
+	}
+
+	sess.APIKeys = []string{""}
+	return w.finishWizard(c, sess)
 }

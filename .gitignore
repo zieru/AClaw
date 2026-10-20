@@ -78,4 +78,6 @@ __pycache__/
 .venv/
 **/__pycache__/
 **/.venv/
+scripts/gemini-web2api/
+data/gemini_ipc/
 goassistant-linux-amd64

@@ -1,12 +1,16 @@
 package admin
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"log"
 	"strconv"
 	"strings"
+	"time"
 
+	"goassistant/internal/provider"
 	"goassistant/internal/tokensaver"
 	tele "gopkg.in/telebot.v3"
 )
@@ -468,6 +472,11 @@ func (a *AdminBot) registerRoutes() {
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_anthropic"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "anthropic") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_ollama"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "ollama") })
 	a.bot.Handle(&tele.Btn{Unique: "wiz_type_custom"}, func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "custom") })
+	a.bot.Handle(&tele.Btn{Unique: "wiz_gemini_activate_zero"}, func(c tele.Context) error { return a.wizard.HandleGeminiActivateZero(c) })
+	a.bot.Handle(&tele.Btn{Unique: "wiz_gemini_update"}, func(c tele.Context) error { return a.handleGeminiWebUpdate(c) })
+	a.bot.Handle(&tele.Btn{Unique: "wiz_gemini_test"}, func(c tele.Context) error { return a.handleGeminiWebTest(c) })
+	a.bot.Handle("/gemini_update", func(c tele.Context) error { return a.handleGeminiWebUpdate(c) })
+	a.bot.Handle("/gemini_test", func(c tele.Context) error { return a.handleGeminiWebTest(c) })
 	a.bot.Handle("/gemini_login", func(c tele.Context) error { return a.wizard.HandleTypeSelect(c, "gemini_web") })
 
 	// Wizard Model Choice Callbacks (0..15)
@@ -1031,6 +1040,8 @@ func (a *AdminBot) registerCommands() {
 		{Text: "logs", Description: "Lihat log aktivitas request & payload"},
 		{Text: "backup", Description: "Unduh file backup SQLite & Markdown"},
 		{Text: "update", Description: "Cek & pasang update binary dari GitHub"},
+		{Text: "gemini_update", Description: "Update library gemini-web2api via pip/git"},
+		{Text: "gemini_test", Description: "Test runner gemini-web2api File IPC"},
 		{Text: "restartg3a", Description: "Cek update & restart g3a MCP service (DuckDB & SOP)"},
 	}
 
@@ -1039,4 +1050,57 @@ func (a *AdminBot) registerCommands() {
 	} else {
 		log.Printf("✅ [Admin-TG] %d perintah bot berhasil didaftarkan ke auto-complete Telegram.", len(adminCommands))
 	}
+}
+
+func (a *AdminBot) handleGeminiWebUpdate(c tele.Context) error {
+	_ = c.Reply("⏳ <b>Memperbarui dependensi gemini-web2api...</b>\nMohon tunggu sejenak.", tele.ModeHTML)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+
+		p := provider.NewGeminiWebProvider("gemini_web", "", "", nil)
+		out, err := p.RunUpdate(ctx)
+		if err != nil {
+			msg := fmt.Sprintf("❌ <b>Gagal memperbarui gemini-web2api:</b>\n<pre>%s</pre>", html.EscapeString(out))
+			if len(msg) > 4000 {
+				msg = msg[len(msg)-4000:]
+			}
+			_ = c.Reply(msg, tele.ModeHTML)
+			return
+		}
+
+		diag, _ := p.RunDiagnostic(ctx)
+		verInfo := ""
+		if diag != nil {
+			if pyVer, ok := diag["python_version"].(string); ok {
+				lines := strings.Split(pyVer, "\n")
+				verInfo = fmt.Sprintf("\n• Python: <code>%s</code>", html.EscapeString(lines[0]))
+			}
+			if mods, ok := diag["available_models"].([]interface{}); ok {
+				verInfo += fmt.Sprintf("\n• Model Tersedia: <code>%d model</code>", len(mods))
+			}
+		}
+
+		msg := fmt.Sprintf("✅ <b>gemini-web2api berhasil diperbarui!</b>%s\n\n<pre>%s</pre>", verInfo, html.EscapeString(out))
+		if len(msg) > 4000 {
+			msg = msg[len(msg)-4000:]
+		}
+		_ = c.Reply(msg, tele.ModeHTML)
+	}()
+	return nil
+}
+
+func (a *AdminBot) handleGeminiWebTest(c tele.Context) error {
+	_ = c.Notify(tele.Typing)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	p := provider.NewGeminiWebProvider("gemini_web", "", "", nil)
+	diag, err := p.RunDiagnostic(ctx)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ <b>Diagnostic Runner Gagal:</b>\n%s", html.EscapeString(err.Error())), tele.ModeHTML)
+	}
+
+	b, _ := json.MarshalIndent(diag, "", "  ")
+	return c.Reply(fmt.Sprintf("🧪 <b>HASIL DIAGNOSTIC RUNNER gemini-web2api:</b>\n<pre>%s</pre>", html.EscapeString(string(b))), tele.ModeHTML)
 }

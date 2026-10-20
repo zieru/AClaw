@@ -332,7 +332,7 @@ func main() {
 					}
 				})
 				provMgr.RegisterWithID(p.ID, webInst, p.Priority)
-				log.Printf("🤖 Provider aktif [Scraper]: %s (Tipe: %s, Default Model: %s)", p.Name, p.Type, p.DefaultModel)
+				log.Printf("🤖 Provider aktif [gemini-web2api]: %s (Tipe: %s, Default Model: %s)", p.Name, p.Type, p.DefaultModel)
 			} else {
 				provMgr.RegisterWithID(p.ID, bf.NewGatewayProvider(bifrostClient, p), p.Priority)
 			}

@@ -8,58 +8,92 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
-	"net/http"
-	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
-// CookieUpdateCallback is invoked whenever Google returns updated session cookies (e.g. rotated __Secure-1PSIDTS)
+// CookieUpdateCallback is kept for backwards compatibility
 type CookieUpdateCallback func(providerName string, newCookies string, cookieMap map[string]string)
 
-// GeminiWebProvider scrapes/interacts with Gemini Web (gemini.google.com) using Google session cookies
+// GeminiWebProvider wraps gemini-web2api via File IPC for zero-auth / cookie-based Gemini Web access
 type GeminiWebProvider struct {
 	mu             sync.Mutex
 	name           string
 	defaultModel   string
 	models         []string
-	cookies        string            // Full formatted cookie string
-	cookieMap      map[string]string // Parsed cookie map
-	snlm0e         string            // CSRF session token from gemini.google.com/app
-	snlm0eFetched  time.Time
-	conversationID string
-	responseID     string
-	choiceID       string
-	buildLabel     string
-	client         *http.Client
+	cookies        string
+	cookieMap      map[string]string
+	proxy          string
+	pythonBin      string
+	runnerPath     string
+	ipcDir         string
 	onCookieUpdate CookieUpdateCallback
 }
 
-var (
-	snlm0eRegex    = regexp.MustCompile(`["']?SNlM0e["']?\s*[:=]\s*["']([^"'\s]+)["']`)
-	snlm0eAltRegex = regexp.MustCompile(`["']?SNlM0e["']?\s*,\s*null\s*,\s*["']([^"'\s]+)["']`)
-	snlm0eArrRegex = regexp.MustCompile(`\[\\?["']SNlM0e\\?["'],\\?["']([^"'\\]+)\\?["']`)
-	cfb2hRegex     = regexp.MustCompile(`["']?cfb2h["']?\s*[:=]\s*["']([^"'\s]+)["']`)
-)
+// IPCRequest represents the JSON payload passed to scripts/gemini_web_runner.py
+type IPCRequest struct {
+	Prompt     string `json:"prompt"`
+	Model      string `json:"model"`
+	ThinkMode  *int   `json:"think_mode,omitempty"`
+	Stream     bool   `json:"stream"`
+	Proxy      string `json:"proxy,omitempty"`
+	CookieFile string `json:"cookie_file,omitempty"`
+	CookieStr  string `json:"cookie_str,omitempty"`
+	TimeoutSec int    `json:"timeout_sec,omitempty"`
+}
 
-// NewGeminiWebProvider creates a new Gemini Web Scrape provider instance
+// IPCEvent represents a streaming event emitted by scripts/gemini_web_runner.py
+type IPCEvent struct {
+	Type        string `json:"type"` // "chunk", "done", "error"
+	Delta       string `json:"delta,omitempty"`
+	Content     string `json:"content,omitempty"`
+	Thinking    string `json:"thinking,omitempty"`
+	TotalTokens int    `json:"total_tokens,omitempty"`
+	LatencyMs   int64  `json:"latency_ms,omitempty"`
+	Model       string `json:"model,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+// Default models supported by gemini-web2api
+var defaultGeminiWebModels = []string{
+	"gemini-3.5-flash-thinking",
+	"gemini-3.6-flash",
+	"gemini-3.7-flash",
+	"gemini-auto",
+	"gemini-flash-lite",
+	"gemini-3.1-pro",
+	"gemini-3.5-flash-thinking-lite",
+}
+
+// NewGeminiWebProvider creates a new GeminiWeb2APIProvider instance
 func NewGeminiWebProvider(name string, authInput string, defaultModel string, models []string) *GeminiWebProvider {
 	if defaultModel == "" {
-		defaultModel = "gemini-web-pro"
+		defaultModel = "gemini-3.5-flash-thinking"
 	}
 	if len(models) == 0 {
-		models = []string{"gemini-web-pro", "gemini-web-flash", "gemini-web-ultra"}
+		models = make([]string, len(defaultGeminiWebModels))
+		copy(models, defaultGeminiWebModels)
 	}
+
+	ipcDir := filepath.Join("data", "gemini_ipc")
+	_ = os.MkdirAll(ipcDir, 0755)
 
 	p := &GeminiWebProvider{
 		name:         name,
 		defaultModel: defaultModel,
 		models:       models,
 		cookieMap:    make(map[string]string),
-		client:       &http.Client{Timeout: defaultAPITimeout()},
+		ipcDir:       ipcDir,
+		pythonBin:    findPythonBinary(),
+		runnerPath:   findRunnerScript(),
 	}
 
 	if authInput != "" {
@@ -75,323 +109,66 @@ func (p *GeminiWebProvider) DefaultModel() string { return p.defaultModel }
 func (p *GeminiWebProvider) Models() []string     { return p.models }
 
 func (p *GeminiWebProvider) SetHTTPClient(client interface{}) {
-	if c, ok := client.(*http.Client); ok && c != nil {
-		p.client = c
-	}
+	// Not used for File IPC, but preserved to satisfy Provider interface
 }
 
-// SetOnCookieUpdate configures a callback listener for automatic cookie updates
+func (p *GeminiWebProvider) SetProxy(proxyURL string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.proxy = proxyURL
+}
+
 func (p *GeminiWebProvider) SetOnCookieUpdate(cb CookieUpdateCallback) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.onCookieUpdate = cb
 }
 
-// updateCookiesFromResponse extracts Set-Cookie headers and updates local state & triggers persistence
-func (p *GeminiWebProvider) updateCookiesFromResponse(resp *http.Response) {
-	if resp == nil {
-		return
-	}
-	cookies := resp.Cookies()
-	if len(cookies) == 0 {
-		return
-	}
-
-	var updated bool
-	p.mu.Lock()
-	if p.cookieMap == nil {
-		p.cookieMap = make(map[string]string)
-	}
-	for _, c := range cookies {
-		if c.Value != "" && p.cookieMap[c.Name] != c.Value {
-			p.cookieMap[c.Name] = c.Value
-			updated = true
-		}
-	}
-	if !updated {
-		p.mu.Unlock()
-		return
-	}
-
-	var parts []string
-	for k, v := range p.cookieMap {
-		parts = append(parts, fmt.Sprintf("%s=%s", k, v))
-	}
-	p.cookies = strings.Join(parts, "; ")
-
-	cb := p.onCookieUpdate
-	provName := p.name
-	cookieStr := p.cookies
-	cookieMapCopy := make(map[string]string, len(p.cookieMap))
-	for k, v := range p.cookieMap {
-		cookieMapCopy[k] = v
-	}
-	p.mu.Unlock()
-
-	if cb != nil {
-		go cb(provName, cookieStr, cookieMapCopy)
-	}
-}
-
-// UpdateAuth parses and stores authentication input (URL redirect, cookie string, or individual cookie)
-func (p *GeminiWebProvider) UpdateAuth(rawInput string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	parsedCookies, err := ParseGoogleAuthInput(rawInput)
-	if err != nil {
-		return err
-	}
-
-	for k, v := range parsedCookies {
-		p.cookieMap[k] = v
-	}
-
-	// Rebuild cookie string
-	var parts []string
-	for k, v := range p.cookieMap {
-		parts = append(parts, fmt.Sprintf("%s=%s", k, v))
-	}
-	p.cookies = strings.Join(parts, "; ")
-
-	// Reset cached SNlM0e to force re-fetch
-	p.snlm0e = ""
-	p.snlm0eFetched = time.Time{}
-
-	return nil
-}
-
-// HasValidCookies checks if minimum required Google cookies are present
 func (p *GeminiWebProvider) HasValidCookies() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	if p.cookies == "" {
-		return false
-	}
-	// Minimal Google session cookie
-	if _, ok := p.cookieMap["__Secure-1PSID"]; ok {
-		return true
-	}
-	if _, ok := p.cookieMap["__Secure-1PSIDTS"]; ok {
-		return true
-	}
-	if _, ok := p.cookieMap["SID"]; ok {
-		return true
-	}
-	return len(p.cookies) > 20
+	return len(p.cookies) > 10
 }
 
-// GetCookiesString returns current cookie string
 func (p *GeminiWebProvider) GetCookiesString() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.cookies
 }
 
-// ParseGoogleAuthInput extracts cookies from a pasted URL or raw cookie header string
-func ParseGoogleAuthInput(input string) (map[string]string, error) {
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return nil, errors.New("input autentikasi kosong")
-	}
-
-	cookies := make(map[string]string)
-
-	// Case 1: JSON formatted cookies (e.g. from Cookie-Editor extension export)
-	if strings.HasPrefix(input, "[") && strings.HasSuffix(input, "]") {
-		type cookieJSON struct {
-			Name  string `json:"name"`
-			Value string `json:"value"`
-		}
-		var list []cookieJSON
-		if err := json.Unmarshal([]byte(input), &list); err == nil && len(list) > 0 {
-			for _, item := range list {
-				if item.Name != "" && item.Value != "" {
-					cookies[item.Name] = item.Value
-				}
-			}
-			if len(cookies) > 0 {
-				return cookies, nil
-			}
-		}
-	}
-
-	// Case 2: URL with query parameters or fragments (e.g. redirect URL after login)
-	if strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://") {
-		if u, err := url.Parse(input); err == nil {
-			// Check query params
-			for k, vals := range u.Query() {
-				if len(vals) > 0 {
-					cookies[k] = vals[0]
-				}
-			}
-			// Check fragment (hash) params
-			if u.Fragment != "" {
-				if fragValues, err := url.ParseQuery(u.Fragment); err == nil {
-					for k, vals := range fragValues {
-						if len(vals) > 0 {
-							cookies[k] = vals[0]
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Case 3: Standard Cookie header string: "key1=val1; key2=val2" or key=val per line
-	splitRegex := regexp.MustCompile(`[;\n\r]+`)
-	tokens := splitRegex.Split(input, -1)
-	for _, tok := range tokens {
-		tok = strings.TrimSpace(tok)
-		if tok == "" {
-			continue
-		}
-		if eqIdx := strings.IndexAny(tok, "=:"); eqIdx > 0 {
-			k := strings.TrimSpace(tok[:eqIdx])
-			v := strings.TrimSpace(tok[eqIdx+1:])
-			// Strip surrounding quotes if present
-			v = strings.Trim(v, `"'`)
-			if k != "" && v != "" {
-				cookies[k] = v
-			}
-		} else if strings.HasPrefix(tok, "sidts-") {
-			cookies["__Secure-1PSIDTS"] = tok
-		} else if strings.HasPrefix(tok, "g.a") {
-			cookies["__Secure-1PSID"] = tok
-		}
-	}
-
-	// Case 4: Single raw value without '=' or ':'
-	if len(cookies) == 0 && len(input) > 20 && !strings.Contains(input, " ") {
-		if strings.HasPrefix(input, "sidts-") {
-			cookies["__Secure-1PSIDTS"] = input
-		} else {
-			cookies["__Secure-1PSID"] = input
-		}
-	}
-
-	if len(cookies) == 0 {
-		return nil, errors.New("tidak ditemukan cookie atau token valid dalam input yang diberikan")
-	}
-
-	return cookies, nil
-}
-
-// FetchSNlM0e fetches the CSRF session token (SNlM0e) from gemini.google.com/app
-func (p *GeminiWebProvider) FetchSNlM0e(ctx context.Context) (string, error) {
+func (p *GeminiWebProvider) UpdateAuth(rawInput string) error {
 	p.mu.Lock()
-	if p.snlm0e != "" && time.Since(p.snlm0eFetched) < 1*time.Hour {
-		token := p.snlm0e
-		p.mu.Unlock()
-		return token, nil
-	}
-	cookieStr := p.cookies
-	client := p.client
-	provName := p.name
-	p.mu.Unlock()
+	defer p.mu.Unlock()
 
-	if cookieStr == "" {
-		err := errors.New("cookie Google belum diatur. Silakan jalankan /gemini_login")
-		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, err)
-		return "", err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://gemini.google.com/app", nil)
+	parsed, err := ParseGoogleAuthInput(rawInput)
 	if err != nil {
-		reqErr := fmt.Errorf("gagal membuat request: %w", err)
-		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, reqErr)
-		return "", reqErr
+		p.cookies = strings.TrimSpace(rawInput)
+		return nil
 	}
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-	req.Header.Set("Cookie", cookieStr)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9,id;q=0.8")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		doErr := fmt.Errorf("gagal menghubungi gemini.google.com: %w", err)
-		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, doErr)
-		return "", doErr
-	}
-	defer resp.Body.Close()
-
-	// Capture any rotated cookies
-	p.updateCookiesFromResponse(resp)
-
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		p.mu.Lock()
-		p.snlm0e = ""
-		p.snlm0eFetched = time.Time{}
-		p.mu.Unlock()
-		authErr := errors.New("sesi Google login kedaluwarsa atau tidak valid (HTTP 401/403). Silakan perbarui cookie via /gemini_login")
-		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, authErr)
-		return "", authErr
+	for k, v := range parsed {
+		p.cookieMap[k] = v
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		readErr := fmt.Errorf("gagal membaca response Gemini Web: %w", err)
-		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, readErr)
-		return "", readErr
+	var parts []string
+	for k, v := range p.cookieMap {
+		parts = append(parts, fmt.Sprintf("%s=%s", k, v))
 	}
-
-	bodyStr := string(body)
-	if m := cfb2hRegex.FindStringSubmatch(bodyStr); len(m) >= 2 {
-		p.mu.Lock()
-		p.buildLabel = m[1]
-		p.mu.Unlock()
-	}
-
-	matches := snlm0eRegex.FindStringSubmatch(bodyStr)
-	if len(matches) < 2 {
-		matches = snlm0eAltRegex.FindStringSubmatch(bodyStr)
-	}
-	if len(matches) < 2 {
-		matches = snlm0eArrRegex.FindStringSubmatch(bodyStr)
-	}
-	if len(matches) < 2 {
-		p.mu.Lock()
-		p.snlm0e = ""
-		p.snlm0eFetched = time.Time{}
-		p.mu.Unlock()
-
-		var extractErr error
-		if strings.Contains(bodyStr, "/signin") || strings.Contains(bodyStr, "accounts.google.com") {
-			extractErr = errors.New("sesi Google login kedaluwarsa (diarahkan ke Sign-in). Silakan login ulang ke https://gemini.google.com/app dan perbarui cookie via /gemini_login")
-		} else {
-			extractErr = errors.New("gagal mengekstrak session token SNlM0e dari Gemini Web. Pastikan cookie __Secure-1PSID sudah benar dan akun sudah login")
-		}
-		log.Printf("⚠️ [GeminiWeb] Gagal memperbarui session token SNlM0e (%s): %v", provName, extractErr)
-		return "", extractErr
-	}
-
-	snlm0e := matches[1]
-	p.mu.Lock()
-	p.snlm0e = snlm0e
-	p.snlm0eFetched = time.Now()
-	p.mu.Unlock()
-
-	log.Printf("🔄 [GeminiWeb] Session token SNlM0e (%s) berhasil diperbarui", provName)
-	return snlm0e, nil
+	p.cookies = strings.Join(parts, "; ")
+	return nil
 }
 
 // GenerateChat executes standard non-streaming chat request
 func (p *GeminiWebProvider) GenerateChat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	req.Stream = false
 	return p.GenerateChatStream(ctx, req)
 }
 
-// GenerateChatStream executes streaming or non-streaming chat request via Gemini Web backend
+// GenerateChatStream executes streaming or non-streaming chat request via gemini-web2api File IPC
 func (p *GeminiWebProvider) GenerateChatStream(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	startTime := time.Now()
 
-	snlm0e, err := p.FetchSNlM0e(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Build prompt from messages
+	// 1. Build prompt from messages
 	var promptBuilder strings.Builder
 	for _, m := range req.Messages {
 		switch m.Role {
@@ -408,363 +185,386 @@ func (p *GeminiWebProvider) GenerateChatStream(ctx context.Context, req ChatRequ
 		return nil, errors.New("prompt tidak boleh kosong")
 	}
 
+	modelToUse := req.Model
+	if modelToUse == "" || strings.EqualFold(modelToUse, "auto") || strings.EqualFold(modelToUse, "gemini_web") || strings.EqualFold(modelToUse, "gemini-web") {
+		modelToUse = p.defaultModel
+	}
+
 	p.mu.Lock()
-	convID := p.conversationID
-	respID := p.responseID
-	choiceID := p.choiceID
 	cookieStr := p.cookies
-	client := p.client
+	proxy := p.proxy
+	pyBin := p.pythonBin
+	runnerPath := p.runnerPath
+	ipcDir := p.ipcDir
 	p.mu.Unlock()
 
-	// Format RPC payload according to Bard/Gemini Web stream protocol
-	reqArray := []interface{}{
-		nil,
-		fmt.Sprintf(`[[%s,0,null,null,null,null,0],["id"],[%s,%s,%s,null,null,[]],null,null,null,[1]]`,
-			quoteJSONString(fullPrompt),
-			quoteJSONString(convID),
-			quoteJSONString(respID),
-			quoteJSONString(choiceID),
-		),
+	if pyBin == "" {
+		pyBin = findPythonBinary()
+	}
+	if runnerPath == "" {
+		runnerPath = findRunnerScript()
 	}
 
-	reqArrayJSON, err := json.Marshal(reqArray)
+	if _, err := os.Stat(runnerPath); err != nil {
+		return nil, fmt.Errorf("runner script tidak ditemukan di %s: %w", runnerPath, err)
+	}
+
+	// 2. Prepare File IPC paths
+	_ = os.MkdirAll(ipcDir, 0755)
+	reqID := uuid.New().String()
+	reqPath := filepath.Join(ipcDir, fmt.Sprintf("req_%s.json", reqID))
+	outPath := filepath.Join(ipcDir, fmt.Sprintf("resp_%s.jsonl", reqID))
+
+	defer func() {
+		_ = os.Remove(reqPath)
+		_ = os.Remove(outPath)
+	}()
+
+	ipcPayload := IPCRequest{
+		Prompt:     fullPrompt,
+		Model:      modelToUse,
+		Stream:     req.Stream,
+		Proxy:      proxy,
+		CookieStr:  cookieStr,
+		TimeoutSec: 150,
+	}
+
+	reqBytes, err := json.Marshal(ipcPayload)
 	if err != nil {
-		return nil, fmt.Errorf("gagal menyusun request payload: %w", err)
+		return nil, fmt.Errorf("gagal menyusun request IPC: %w", err)
 	}
 
-	formData := url.Values{}
-	formData.Set("f.req", string(reqArrayJSON))
-	formData.Set("at", snlm0e)
-
-	randReqID := rand.Intn(900000) + 100000
-	buildLabel := "boq_gemini-web-uiserver_20261008.15_p0"
-	p.mu.Lock()
-	if p.buildLabel != "" {
-		buildLabel = p.buildLabel
-	}
-	p.mu.Unlock()
-	apiURL := fmt.Sprintf("https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=%s&_reqid=%d&rt=c", buildLabel, randReqID)
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", apiURL, strings.NewReader(formData.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("gagal membuat request POST Gemini: %w", err)
+	if err := os.WriteFile(reqPath, reqBytes, 0600); err != nil {
+		return nil, fmt.Errorf("gagal menulis request IPC: %w", err)
 	}
 
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
-	httpReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-	httpReq.Header.Set("Cookie", cookieStr)
-	httpReq.Header.Set("Origin", "https://gemini.google.com")
-	httpReq.Header.Set("Referer", "https://gemini.google.com/")
-	httpReq.Header.Set("X-Same-Domain", "1")
-	httpReq.Header.Set("Accept", "*/*")
+	// 3. Spawn python runner process
+	cmd := exec.CommandContext(ctx, pyBin, runnerPath, "--req", reqPath, "--out", outPath)
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
 
-	httpResp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("gagal mengirim request ke Gemini Web: %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	// Capture any rotated cookies from RPC response
-	p.updateCookiesFromResponse(httpResp)
-
-	if httpResp.StatusCode != http.StatusOK {
-		if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden || httpResp.StatusCode == http.StatusBadRequest {
-			p.mu.Lock()
-			p.snlm0e = ""
-			p.snlm0eFetched = time.Time{}
-			p.mu.Unlock()
-		}
-		bodySample, _ := io.ReadAll(io.LimitReader(httpResp.Body, 512))
-		return nil, fmt.Errorf("Gemini Web mengembalikan status HTTP %d: %s", httpResp.StatusCode, string(bodySample))
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("gagal menjalankan runner python (%s): %w", pyBin, err)
 	}
 
-	// Parse stream response
-	reader := bufio.NewReader(httpResp.Body)
-	var finalContent string
-	var finalThinking string
-	var newConvID, newRespID, newChoiceID string
+	// 4. Stream consumer loop: tails outPath incrementally
+	var finalContent strings.Builder
+	var lastEvent *IPCEvent
+	var streamDone bool
 
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
+	readTimeout := time.After(180 * time.Second)
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	var fileOffset int64
+	procFinished := make(chan error, 1)
+	go func() {
+		procFinished <- cmd.Wait()
+	}()
+
+	for !streamDone {
+		select {
+		case <-ctx.Done():
+			_ = cmd.Process.Kill()
+			return nil, ctx.Err()
+		case <-readTimeout:
+			_ = cmd.Process.Kill()
+			return nil, errors.New("timeout membaca respon dari gemini-web2api File IPC")
+		case procErr := <-procFinished:
+			// Read remaining events from file
+			readRemainingEvents(outPath, &fileOffset, func(ev IPCEvent) {
+				lastEvent = &ev
+				if ev.Type == "chunk" && ev.Delta != "" {
+					finalContent.WriteString(ev.Delta)
+					if req.Stream && req.StreamCallback != nil {
+						req.StreamCallback(StreamChunk{Content: ev.Delta, Done: false})
+					}
+				} else if ev.Type == "done" {
+					streamDone = true
+				}
+			})
+
+			if procErr != nil && lastEvent == nil {
+				errMsg := strings.TrimSpace(stderrBuf.String())
+				if errMsg == "" {
+					errMsg = procErr.Error()
+				}
+				return nil, fmt.Errorf("runner gemini-web2api gagal (%v): %s", procErr, errMsg)
 			}
-			break
-		}
-
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		// Look for wrb.fr response blocks
-		if strings.HasPrefix(line, `[["wrb.fr"`) {
-			content, thought, cID, rID, chID, parseErr := parseGeminiWebChunk(line)
-			if parseErr == nil && content != "" {
-				delta := content
-				if strings.HasPrefix(content, finalContent) {
-					delta = strings.TrimPrefix(content, finalContent)
+			streamDone = true
+		case <-ticker.C:
+			// Read incremental new lines from outPath
+			readRemainingEvents(outPath, &fileOffset, func(ev IPCEvent) {
+				lastEvent = &ev
+				if ev.Type == "chunk" && ev.Delta != "" {
+					finalContent.WriteString(ev.Delta)
+					if req.Stream && req.StreamCallback != nil {
+						req.StreamCallback(StreamChunk{Content: ev.Delta, Done: false})
+					}
+				} else if ev.Type == "done" {
+					streamDone = true
 				}
-				finalContent = content
-				if thought != "" {
-					finalThinking = thought
-				}
-				if cID != "" {
-					newConvID = cID
-				}
-				if rID != "" {
-					newRespID = rID
-				}
-				if chID != "" {
-					newChoiceID = chID
-				}
-
-				if req.Stream && req.StreamCallback != nil && delta != "" {
-					req.StreamCallback(StreamChunk{
-						Content:  delta,
-						Thinking: finalThinking,
-						Done:     false,
-					})
-				}
-			}
+			})
 		}
 	}
 
-	// Update conversation identifiers
-	p.mu.Lock()
-	if newConvID != "" {
-		p.conversationID = newConvID
-	}
-	if newRespID != "" {
-		p.responseID = newRespID
-	}
-	if newChoiceID != "" {
-		p.choiceID = newChoiceID
-	}
-	p.mu.Unlock()
-
-	// Sanitize any garbled draft restarts from Gemini Web stream buffer
-	finalContent = sanitizeGarbledGeminiWebText(finalContent)
-
-	// Auto-reset conversation ID if model hit a safety block/canned refusal
-	if isGeminiWebRefusal(finalContent) {
-		log.Printf("⚠️ [GeminiWeb] Terdeteksi penolakan/refusal dari model (%s). Mereset conversation ID untuk mencegah context lock.", p.name)
-		p.ResetConversation()
+	if lastEvent != nil && lastEvent.Type == "error" {
+		return nil, fmt.Errorf("gemini-web2api error: %s", lastEvent.Error)
 	}
 
-	if finalContent == "" {
-		p.ResetConversation()
-		return nil, errors.New("tidak ada konten yang dihasilkan oleh Gemini Web. Periksa kembali autentikasi")
+	contentStr := finalContent.String()
+	if lastEvent != nil && lastEvent.Content != "" {
+		contentStr = lastEvent.Content
+	}
+
+	if strings.TrimSpace(contentStr) == "" {
+		errMsg := strings.TrimSpace(stderrBuf.String())
+		if errMsg != "" {
+			return nil, fmt.Errorf("tidak ada output yang dihasilkan oleh gemini-web2api: %s", errMsg)
+		}
+		return nil, errors.New("tidak ada output yang dihasilkan oleh gemini-web2api")
 	}
 
 	if req.Stream && req.StreamCallback != nil {
-		req.StreamCallback(StreamChunk{
-			Done: true,
-		})
+		req.StreamCallback(StreamChunk{Done: true})
 	}
 
 	latency := time.Since(startTime)
-	approxTokens := (len(fullPrompt) + len(finalContent)) / 4
+	approxTokens := (len(fullPrompt) + len(contentStr)) / 4
+	if lastEvent != nil && lastEvent.TotalTokens > 0 {
+		approxTokens = lastEvent.TotalTokens
+	}
 
 	return &ChatResponse{
-		Content:          finalContent,
-		Thinking:         finalThinking,
+		Content:          contentStr,
+		Thinking:         lastEventThinking(lastEvent),
 		PromptTokens:     len(fullPrompt) / 4,
-		CompletionTokens: len(finalContent) / 4,
+		CompletionTokens: len(contentStr) / 4,
 		TotalTokens:      approxTokens,
-		CostUSD:          0, // Free web scraping
+		CostUSD:          0, // Free Gemini Web
 		Latency:          latency,
-		Model:            p.defaultModel,
+		Model:            modelToUse,
 		ProviderName:     p.name,
 	}, nil
 }
 
-// isGeminiWebRefusal detects canned refusal strings from Gemini Web safety guardrails
-func isGeminiWebRefusal(text string) bool {
-	lower := strings.ToLower(text)
-	refusals := []string{
-		"saya hanya ai berbasis teks",
-		"saya hanya model bahasa",
-		"tidak bisa membantu anda untuk itu",
-		"tidak dapat membantu anda untuk itu",
-		"i am a text-based ai",
-		"i'm a text-based ai",
-		"as a text-based ai, i",
-		"i am a large language model",
-		"i cannot help with that",
-		"i'm sorry, but i can't help with that",
-	}
-	for _, r := range refusals {
-		if strings.Contains(lower, r) {
-			return true
-		}
-	}
-	return false
-}
-
-// sanitizeGarbledGeminiWebText detects and removes aborted/restarted draft fragments in Gemini Web responses
-func sanitizeGarbledGeminiWebText(content string) string {
-	if strings.TrimSpace(content) == "" {
-		return content
-	}
-
-	tableSepRegex := regexp.MustCompile(`(?m)^\|(\s*:?-+:?\s*\|)+\s*$`)
-	tableMatches := tableSepRegex.FindAllStringIndex(content, -1)
-
-	// If there are at least 2 table definitions in the content
-	if len(tableMatches) >= 2 {
-		firstSepEnd := tableMatches[0][1]
-		secondSepStart := tableMatches[1][0]
-
-		between := content[firstSepEnd:secondSepStart]
-
-		// Look for a line in 'between' that started as a table row (has leading |)
-		// but was aborted mid-row and has NO other pipes in the entire line (strings.Count(line, "|") == 1)
-		lines := strings.Split(between, "\n")
-		for _, line := range lines {
-			trimmedLine := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmedLine, "|") && strings.Count(trimmedLine, "|") == 1 && len(trimmedLine) > 20 {
-				// Case A: Fused line where aborted cell joins directly with restarted draft:
-				// e.g. "| **Rentang Suhu Oper**Lithium Titanate (LTO)** unggul mutlak..."
-				fusedRe := regexp.MustCompile(`^\|\s*(?:\*\*)?[^*|]+(?:\*\*)?(\*\*[A-Z].+)$`)
-				if matches := fusedRe.FindStringSubmatch(trimmedLine); len(matches) >= 2 {
-					restartedDraftStart := matches[1]
-					if pos := strings.Index(content, restartedDraftStart); pos != -1 && pos < secondSepStart {
-						candidate := strings.TrimSpace(content[pos:])
-						if tableSepRegex.MatchString(candidate) {
-							return candidate
-						}
-					}
-				}
-
-				// Case B: Aborted cell followed by sentence after space:
-				fusedSpaceRe := regexp.MustCompile(`^\|\s*(?:\*\*)?[^*|]+(?:\*\*)?\s+([A-Z][a-z]+ [A-Z][\s\S]+)$`)
-				if matches := fusedSpaceRe.FindStringSubmatch(trimmedLine); len(matches) >= 2 {
-					restartedDraftStart := matches[1]
-					if pos := strings.Index(content, restartedDraftStart); pos != -1 && pos < secondSepStart {
-						candidate := strings.TrimSpace(content[pos:])
-						if tableSepRegex.MatchString(candidate) {
-							return candidate
-						}
-					}
-				}
-			}
-		}
-
-		// Also check if any non-table paragraph line in 'between' starts a fresh draft that repeats the table
-		for _, line := range lines {
-			trimmedLine := strings.TrimSpace(line)
-			if !strings.HasPrefix(trimmedLine, "|") && len(trimmedLine) > 30 {
-				if pos := strings.Index(content[firstSepEnd:], trimmedLine); pos != -1 {
-					candidate := strings.TrimSpace(content[firstSepEnd+pos:])
-					if tableSepRegex.MatchString(candidate) {
-						return candidate
-					}
-				}
-			}
-		}
-	}
-
-	return content
-}
-
-// ResetConversation resets the ongoing conversation context
-func (p *GeminiWebProvider) ResetConversation() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.conversationID = ""
-	p.responseID = ""
-	p.choiceID = ""
-}
-
-// parseGeminiWebChunk parses the raw wrb.fr line into text content and metadata
-func parseGeminiWebChunk(line string) (content string, thought string, convID string, respID string, choiceID string, err error) {
-	var outer []interface{}
-	if err := json.Unmarshal([]byte(line), &outer); err != nil {
-		return "", "", "", "", "", err
-	}
-
-	if len(outer) == 0 {
-		return "", "", "", "", "", errors.New("empty chunk")
-	}
-
-	firstElem, ok := outer[0].([]interface{})
-	if !ok || len(firstElem) < 3 {
-		return "", "", "", "", "", errors.New("invalid outer structure")
-	}
-
-	payloadStr, ok := firstElem[2].(string)
-	if !ok || payloadStr == "" {
-		return "", "", "", "", "", errors.New("empty payload string")
-	}
-
-	var inner []interface{}
-	if err := json.Unmarshal([]byte(payloadStr), &inner); err != nil {
-		return "", "", "", "", "", err
-	}
-
-	// inner[1] usually holds [conversation_id, response_id]
-	if len(inner) > 1 {
-		if metaList, ok := inner[1].([]interface{}); ok {
-			if len(metaList) > 0 {
-				if s, ok := metaList[0].(string); ok {
-					convID = s
-				}
-			}
-			if len(metaList) > 1 {
-				if s, ok := metaList[1].(string); ok {
-					respID = s
-				}
-			}
-		}
-	}
-
-	// inner[4] holds candidates and text chunks
-	if len(inner) > 4 {
-		if candidates, ok := inner[4].([]interface{}); ok && len(candidates) > 0 {
-			if firstCand, ok := candidates[0].([]interface{}); ok {
-				if len(firstCand) > 0 {
-					if s, ok := firstCand[0].(string); ok {
-						choiceID = s
-					}
-				}
-				if len(firstCand) > 1 {
-					if textList, ok := firstCand[1].([]interface{}); ok && len(textList) > 0 {
-						if textStr, ok := textList[0].(string); ok {
-							content = textStr
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Fallback recursive string search if content is still empty
-	if content == "" {
-		content = extractTextRecursively(inner)
-	}
-
-	return content, thought, convID, respID, choiceID, nil
-}
-
-func extractTextRecursively(v interface{}) string {
-	switch val := v.(type) {
-	case string:
-		if len(val) > 20 && !strings.HasPrefix(val, "c_") && !strings.HasPrefix(val, "r_") {
-			return val
-		}
-	case []interface{}:
-		for _, item := range val {
-			if res := extractTextRecursively(item); res != "" {
-				return res
-			}
-		}
+func lastEventThinking(ev *IPCEvent) string {
+	if ev != nil {
+		return ev.Thinking
 	}
 	return ""
 }
 
-func quoteJSONString(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
+// readRemainingEvents reads new lines from file starting from offset
+func readRemainingEvents(path string, offset *int64, callback func(IPCEvent)) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	if *offset > 0 {
+		if _, err := f.Seek(*offset, io.SeekStart); err != nil {
+			return
+		}
+	}
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		*offset += int64(len(line) + 1) // +1 for newline delimiter
+		lineStr := strings.TrimSpace(string(line))
+		if lineStr == "" {
+			continue
+		}
+		var ev IPCEvent
+		if err := json.Unmarshal([]byte(lineStr), &ev); err == nil {
+			callback(ev)
+		}
+	}
+}
+
+// RunDiagnostic executes runner diagnostic check (--test)
+func (p *GeminiWebProvider) RunDiagnostic(ctx context.Context) (map[string]interface{}, error) {
+	pyBin := p.pythonBin
+	if pyBin == "" {
+		pyBin = findPythonBinary()
+	}
+	runner := p.runnerPath
+	if runner == "" {
+		runner = findRunnerScript()
+	}
+
+	cmd := exec.CommandContext(ctx, pyBin, runner, "--test")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("diagnostic gagal dieksekusi: %w (output: %s)", err, string(out))
+	}
+
+	var res map[string]interface{}
+	if err := json.Unmarshal(out, &res); err != nil {
+		return nil, fmt.Errorf("output diagnostic bukan JSON: %s", string(out))
+	}
+	return res, nil
+}
+
+// RunUpdate executes the update script for gemini-web2api
+func (p *GeminiWebProvider) RunUpdate(ctx context.Context) (string, error) {
+	root := findProjectRoot()
+	var cmd *exec.Cmd
+
+	if runtime.GOOS == "windows" {
+		batPath := filepath.Join(root, "scripts", "update_gemini_web2api.bat")
+		if _, err := os.Stat(batPath); err == nil {
+			cmd = exec.CommandContext(ctx, "cmd.exe", "/c", batPath)
+		} else {
+			cmd = exec.CommandContext(ctx, "python", "-m", "pip", "install", "--upgrade", "git+https://github.com/Sophomoresty/gemini-web2api.git", "httpx>=0.25")
+		}
+	} else {
+		shPath := filepath.Join(root, "scripts", "update_gemini_web2api.sh")
+		if _, err := os.Stat(shPath); err == nil {
+			cmd = exec.CommandContext(ctx, "sh", shPath)
+		} else {
+			cmd = exec.CommandContext(ctx, "python3", "-m", "pip", "install", "--upgrade", "--break-system-packages", "git+https://github.com/Sophomoresty/gemini-web2api.git", "httpx>=0.25")
+		}
+	}
+
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	outputStr := string(out)
+	if err != nil {
+		log.Printf("⚠️ [GeminiWeb] Update script gagal: %v\nOutput:\n%s", err, outputStr)
+		return outputStr, fmt.Errorf("update gagal: %w", err)
+	}
+	return outputStr, nil
+}
+
+// ParseGoogleAuthInput parses cookie strings, tokens or JSON exports
+func ParseGoogleAuthInput(input string) (map[string]string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return nil, errors.New("input autentikasi kosong")
+	}
+
+	cookies := make(map[string]string)
+
+	// JSON format
+	if strings.HasPrefix(input, "[") && strings.HasSuffix(input, "]") {
+		type cJSON struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}
+		var list []cJSON
+		if err := json.Unmarshal([]byte(input), &list); err == nil && len(list) > 0 {
+			for _, item := range list {
+				if item.Name != "" && item.Value != "" {
+					cookies[item.Name] = item.Value
+				}
+			}
+			if len(cookies) > 0 {
+				return cookies, nil
+			}
+		}
+	}
+
+	// Standard cookie string format (key=value; ...)
+	splitRegex := regexp.MustCompile(`[;\n\r]+`)
+	tokens := splitRegex.Split(input, -1)
+	for _, tok := range tokens {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		if eqIdx := strings.IndexAny(tok, "=:"); eqIdx > 0 {
+			k := strings.TrimSpace(tok[:eqIdx])
+			v := strings.TrimSpace(tok[eqIdx+1:])
+			v = strings.Trim(v, `"'`)
+			if k != "" && v != "" {
+				cookies[k] = v
+			}
+		} else if strings.HasPrefix(tok, "sidts-") {
+			cookies["__Secure-1PSIDTS"] = tok
+		} else if strings.HasPrefix(tok, "g.a") {
+			cookies["__Secure-1PSID"] = tok
+		}
+	}
+
+	if len(cookies) == 0 && len(input) > 20 && !strings.Contains(input, " ") {
+		if strings.HasPrefix(input, "sidts-") {
+			cookies["__Secure-1PSIDTS"] = input
+		} else {
+			cookies["__Secure-1PSID"] = input
+		}
+	}
+
+	if len(cookies) == 0 {
+		return nil, errors.New("tidak ditemukan cookie atau token valid")
+	}
+
+	return cookies, nil
+}
+
+func findPythonBinary() string {
+	if envPy := os.Getenv("PYTHON_BIN"); envPy != "" {
+		return envPy
+	}
+	// On Alpine / Linux, prefer python3
+	if runtime.GOOS != "windows" {
+		if path, err := exec.LookPath("python3"); err == nil {
+			return path
+		}
+		if path, err := exec.LookPath("python"); err == nil {
+			return path
+		}
+		return "python3"
+	}
+	// On Windows, check python then python3
+	if path, err := exec.LookPath("python"); err == nil {
+		return path
+	}
+	if path, err := exec.LookPath("python3"); err == nil {
+		return path
+	}
+	return "python"
+}
+
+func findRunnerScript() string {
+	root := findProjectRoot()
+	return filepath.Join(root, "scripts", "gemini_web_runner.py")
+}
+
+func findProjectRoot() string {
+	if wd, err := os.Getwd(); err == nil {
+		dir := wd
+		for {
+			if _, err := os.Stat(filepath.Join(dir, "scripts", "gemini_web_runner.py")); err == nil {
+				return dir
+			}
+			if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+				return dir
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	if exePath, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exePath)
+		for {
+			if _, err := os.Stat(filepath.Join(dir, "scripts", "gemini_web_runner.py")); err == nil {
+				return dir
+			}
+			if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+				return dir
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	return "."
 }
