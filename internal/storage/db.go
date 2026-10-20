@@ -1,0 +1,2873 @@
+package storage
+
+import (
+	"database/sql"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	_ "modernc.org/sqlite" // Pure Go SQLite driver (Zero-CGO)
+)
+
+// DB wraps the SQLite database connection
+type DB struct {
+	db *sql.DB
+	mu sync.RWMutex
+}
+
+// Open initializes and migrates the SQLite database
+func Open(dbPath string) (*DB, error) {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create db directory: %w", err)
+	}
+
+	// modernc.org/sqlite connection string with WAL mode and busy timeout
+	dsn := fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)", dbPath)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
+	}
+
+	// Set connection pool settings suitable for SQLite
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(time.Hour)
+
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("failed to ping sqlite database: %w", err)
+	}
+
+	// Execute migrations
+	if _, err := db.Exec(schemaSQL); err != nil {
+		return nil, fmt.Errorf("failed to run schema migrations: %w", err)
+	}
+
+	// Check and migrate chat_sessions if it has old UNIQUE(channel_id, chat_id) constraint or lacks is_active
+	var tableSQL string
+	_ = db.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='chat_sessions'").Scan(&tableSQL)
+	if strings.Contains(tableSQL, "UNIQUE(channel_id, chat_id)") || (tableSQL != "" && !strings.Contains(tableSQL, "is_active")) {
+		_, _ = db.Exec("PRAGMA foreign_keys = OFF")
+		_, _ = db.Exec("DROP TABLE IF EXISTS chat_sessions_v2")
+		_, err := db.Exec(`CREATE TABLE chat_sessions_v2 (
+			id TEXT PRIMARY KEY,
+			channel_id TEXT NOT NULL,
+			chat_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			is_active INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`)
+		if err == nil {
+			if strings.Contains(tableSQL, "is_active") {
+				_, _ = db.Exec(`INSERT OR IGNORE INTO chat_sessions_v2 (id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at)
+					SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions`)
+			} else {
+				_, _ = db.Exec(`INSERT OR IGNORE INTO chat_sessions_v2 (id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at)
+					SELECT id, channel_id, chat_id, user_id, title, summary, 1, created_at, updated_at FROM chat_sessions`)
+			}
+			_, _ = db.Exec("DROP TABLE chat_sessions")
+			_, _ = db.Exec("ALTER TABLE chat_sessions_v2 RENAME TO chat_sessions")
+		}
+		_, _ = db.Exec("PRAGMA foreign_keys = ON")
+	}
+	_, _ = db.Exec("ALTER TABLE chat_sessions ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_chat_sessions_lookup ON chat_sessions(channel_id, chat_id, is_active, updated_at)")
+
+	// Auto-upgrade columns if upgrading from earlier version
+	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN client_request TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN full_request_payload TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN provider_response TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN tokens_saved INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN proxy_used TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN number_of_tries INTEGER NOT NULL DEFAULT 1")
+	_, _ = db.Exec("ALTER TABLE audit_logs ADD COLUMN thinking_tokens INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN footer_mode TEXT NOT NULL DEFAULT 'off'")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN token_saver_mode TEXT NOT NULL DEFAULT 'auto'")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN proxy_pool_enabled INTEGER NOT NULL DEFAULT 1")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN api_keys TEXT NOT NULL DEFAULT '[]'")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN models TEXT NOT NULL DEFAULT '[]'")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN disabled_models TEXT NOT NULL DEFAULT '[]'")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN strategy TEXT NOT NULL DEFAULT 'failsafe'")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN key_strategy TEXT NOT NULL DEFAULT 'round-robin'")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN proxy_enabled INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE providers ADD COLUMN proxy_group TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE proxy_nodes ADD COLUMN group_name TEXT NOT NULL DEFAULT 'default'")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN streaming_enabled INTEGER NOT NULL DEFAULT 1")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN thinking_enabled INTEGER NOT NULL DEFAULT 1")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN thinking_display TEXT NOT NULL DEFAULT 'full'")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN thinking_level TEXT NOT NULL DEFAULT 'low'")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN timeout_api_seconds INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN timeout_handler_seconds INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN max_audit_logs INTEGER NOT NULL DEFAULT 5000")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN token_budget INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN response_cache_enabled INTEGER NOT NULL DEFAULT 1")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN response_cache_ttl_sec INTEGER NOT NULL DEFAULT 1800")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN fallback_vision_model TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE channel_policies ADD COLUMN fallback_audio_model TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS response_cache (
+		cache_key TEXT PRIMARY KEY,
+		channel_id TEXT NOT NULL,
+		model TEXT NOT NULL,
+		prompt TEXT NOT NULL,
+		response_text TEXT NOT NULL,
+		thinking_text TEXT NOT NULL DEFAULT '',
+		tools_called TEXT NOT NULL DEFAULT '[]',
+		media_files TEXT NOT NULL DEFAULT '[]',
+		prompt_tokens INTEGER NOT NULL DEFAULT 0,
+		completion_tokens INTEGER NOT NULL DEFAULT 0,
+		thinking_tokens INTEGER NOT NULL DEFAULT 0,
+		total_tokens INTEGER NOT NULL DEFAULT 0,
+		cost_usd REAL NOT NULL DEFAULT 0.0,
+		expires_at DATETIME NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_response_cache_expires ON response_cache(expires_at)")
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS model_catalog (
+		model_id TEXT PRIMARY KEY,
+		raw_id TEXT NOT NULL DEFAULT '',
+		display_name TEXT NOT NULL DEFAULT '',
+		provider_family TEXT NOT NULL DEFAULT '',
+		modality TEXT NOT NULL DEFAULT 'text->text',
+		supports_vision INTEGER NOT NULL DEFAULT 0,
+		supports_audio_in INTEGER NOT NULL DEFAULT 0,
+		supports_audio_out INTEGER NOT NULL DEFAULT 0,
+		supports_tools INTEGER NOT NULL DEFAULT 1,
+		supports_reasoning INTEGER NOT NULL DEFAULT 0,
+		context_length INTEGER NOT NULL DEFAULT 4096,
+		is_custom INTEGER NOT NULL DEFAULT 0,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_model_catalog_vision ON model_catalog(supports_vision)")
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_model_catalog_audio_out ON model_catalog(supports_audio_out)")
+	_, _ = db.Exec("ALTER TABLE memories ADD COLUMN is_promoted INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_memories_promoted ON memories(scope, scope_id, is_promoted)")
+
+	// Ensure default global policy exists and has footer_mode 'full' by default
+	_, _ = db.Exec("INSERT OR IGNORE INTO channel_policies (id, scope, scope_id, footer_mode, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold) VALUES ('global', 'global', 'system', 'full', 10, 2048, 20, 1, 15)")
+	// Ensure any accidental zero-value streaming_enabled & thinking_enabled on chat policies are healed to 1
+	_, _ = db.Exec("UPDATE channel_policies SET streaming_enabled = 1 WHERE scope = 'chat' AND streaming_enabled = 0")
+	_, _ = db.Exec("UPDATE channel_policies SET thinking_enabled = 1 WHERE scope = 'chat' AND thinking_enabled = 0")
+	_, _ = db.Exec("UPDATE channel_policies SET thinking_display = 'full' WHERE scope = 'chat' AND (thinking_display IS NULL OR thinking_display = '' OR thinking_display = 'off')")
+
+	return &DB{db: db}, nil
+}
+
+// Close closes the database connection
+func (d *DB) Close() error {
+	return d.db.Close()
+}
+
+// --- Models ---
+
+type PolicyRecord struct {
+	ID                  string    `json:"id"`
+	Scope               string    `json:"scope"`    // 'global', 'channel', 'chat'
+	ScopeID             string    `json:"scope_id"` // 'system', channel_id, or chat_id
+	MaxUploadFileMB     int       `json:"max_upload_file_mb"`
+	MaxTokens           int       `json:"max_tokens"`
+	MaxHistoryTurns     int       `json:"max_history_turns"`
+	AutoCompaction      bool      `json:"auto_compaction"`
+	CompactionThreshold int       `json:"compaction_threshold"`
+	ModelOverride       string    `json:"model_override"`
+	FooterMode          string    `json:"footer_mode"`         // 'off', 'tokens', 'full'
+	TokenSaverMode      string    `json:"token_saver_mode"`    // 'off', 'auto', 'aggressive', 'caveman'
+	ProxyPoolEnabled    bool      `json:"proxy_pool_enabled"`
+	StreamingEnabled    bool      `json:"streaming_enabled"`   // Enable streaming for this scope
+	ThinkingEnabled     bool      `json:"thinking_enabled"`    // Enable thinking display
+	ThinkingDisplay     string    `json:"thinking_display"`    // 'full', 'summary', 'hidden'
+	ThinkingLevel       string    `json:"thinking_level"`      // 'none', 'low', 'medium', 'high'
+	TimeoutAPISeconds   int       `json:"timeout_api_seconds"` // 0 = default config
+	TimeoutHandlerSec   int       `json:"timeout_handler_seconds"` // 0 = default config
+	MaxAuditLogs        int       `json:"max_audit_logs"`      // Max rows for rotation, default 5000
+	TokenBudget         int       `json:"token_budget"`        // 0 = default
+	ResponseCacheEnabled bool     `json:"response_cache_enabled"` // Toggle local response caching
+	ResponseCacheTTLSec int       `json:"response_cache_ttl_sec"` // TTL in seconds (default 1800)
+	FallbackVisionModel string    `json:"fallback_vision_model"` // Fallback model if current model does not support image/vision
+	FallbackAudioModel  string    `json:"fallback_audio_model"`  // Fallback model if current model does not support audio/TTS
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+type ModelCatalogRecord struct {
+	ModelID          string    `json:"model_id"`
+	RawID            string    `json:"raw_id"`
+	DisplayName      string    `json:"display_name"`
+	ProviderFamily   string    `json:"provider_family"`
+	Modality         string    `json:"modality"`
+	SupportsVision   bool      `json:"supports_vision"`
+	SupportsAudioIn  bool      `json:"supports_audio_in"`
+	SupportsAudioOut bool      `json:"supports_audio_out"`
+	SupportsTools    bool      `json:"supports_tools"`
+	SupportsReasoning bool     `json:"supports_reasoning"`
+	ContextLength    int       `json:"context_length"`
+	IsCustom         bool      `json:"is_custom"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type ProxyNodeRecord struct {
+	ID           string     `json:"id"`
+	URL          string     `json:"url"`
+	Protocol     string     `json:"protocol"` // http, https, socks5
+	Label        string     `json:"label"`
+	GroupName    string     `json:"group_name"`
+	IsActive     bool       `json:"is_active"`
+	FailCount    int        `json:"fail_count"`
+	SuccessCount int        `json:"success_count"`
+	AvgLatencyMs int        `json:"avg_latency_ms"`
+	LastChecked  *time.Time `json:"last_checked"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type ProviderRecord struct {
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Type           string    `json:"type"` // 9router, openai, anthropic, gemini, groq, deepseek, ollama, custom, dahl
+	BaseURL        string    `json:"base_url"`
+	APIKey         string    `json:"api_key"`
+	APIKeys        []string  `json:"api_keys"`
+	DefaultModel   string    `json:"default_model"`
+	Models         []string  `json:"models"`
+	DisabledModels []string  `json:"disabled_models,omitempty"`
+	Strategy       string    `json:"strategy"`     // failsafe, round-robin, random
+	KeyStrategy    string    `json:"key_strategy"` // round-robin, random, failover
+	ProxyEnabled   bool      `json:"proxy_enabled"`
+	ProxyGroup     string    `json:"proxy_group"`
+	IsActive       bool      `json:"is_active"`
+	Priority       int       `json:"priority"`
+	SettingsJSON   string    `json:"settings_json"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// IsModelEnabled returns true if the model is active (not disabled)
+func (p *ProviderRecord) IsModelEnabled(model string) bool {
+	if p == nil {
+		return false
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	for _, dm := range p.DisabledModels {
+		if strings.EqualFold(strings.TrimSpace(dm), model) {
+			return false
+		}
+	}
+	return true
+}
+
+// EnabledModels returns all models from Models that are not disabled
+func (p *ProviderRecord) EnabledModels() []string {
+	if p == nil {
+		return nil
+	}
+	var list []string
+	for _, m := range p.Models {
+		if p.IsModelEnabled(m) {
+			list = append(list, m)
+		}
+	}
+	// Fallback to default model if all models are disabled
+	if len(list) == 0 && p.DefaultModel != "" {
+		list = []string{p.DefaultModel}
+	}
+	return list
+}
+
+// ToggleModel toggles the enabled state of a model. Returns true if now enabled, false if disabled
+func (p *ProviderRecord) ToggleModel(model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return true
+	}
+	for i, dm := range p.DisabledModels {
+		if strings.EqualFold(strings.TrimSpace(dm), model) {
+			p.DisabledModels = append(p.DisabledModels[:i], p.DisabledModels[i+1:]...)
+			return true
+		}
+	}
+	p.DisabledModels = append(p.DisabledModels, model)
+	return false
+}
+
+// SetAllModelsState enables or disables all models (excluding default model if disabling)
+func (p *ProviderRecord) SetAllModelsState(enabled bool) {
+	if enabled {
+		p.DisabledModels = nil
+		return
+	}
+	p.DisabledModels = nil
+	for _, m := range p.Models {
+		if !strings.EqualFold(m, p.DefaultModel) {
+			p.DisabledModels = append(p.DisabledModels, m)
+		}
+	}
+}
+
+type ComboTarget struct {
+	ProviderID           string `json:"provider_id"`
+	Model                string `json:"model"`
+	Priority             int    `json:"priority"`
+	PreferredIfAvailable bool   `json:"preferred_if_available,omitempty"`
+}
+
+type ModelComboRecord struct {
+	ID          string        `json:"id"`
+	Name        string        `json:"name"`
+	Description string        `json:"description"`
+	Targets     []ComboTarget `json:"targets"`
+	Strategy    string        `json:"strategy"` // failsafe, round-robin, random
+	IsActive    bool          `json:"is_active"`
+	CreatedAt   time.Time     `json:"created_at"`
+	UpdatedAt   time.Time     `json:"updated_at"`
+}
+
+type ChannelRecord struct {
+	ID           string    `json:"id"`
+	Type         string    `json:"type"` // telegram, whatsapp
+	Name         string    `json:"name"`
+	Identifier   string    `json:"identifier"`
+	IsActive     bool      `json:"is_active"`
+	DefaultAgent string    `json:"default_agent"`
+	DefaultModel string    `json:"default_model"`
+	SettingsJSON string    `json:"settings_json"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// IsGrapariOnly returns true if the channel is dedicated exclusively to GraPARI SOP & operations
+func (c *ChannelRecord) IsGrapariOnly() bool {
+	if c == nil || c.SettingsJSON == "" || c.SettingsJSON == "{}" {
+		return false
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(c.SettingsJSON), &m); err != nil {
+		return false
+	}
+	if val, ok := m["grapari_only"]; ok {
+		if b, ok := val.(bool); ok {
+			return b
+		}
+	}
+	return false
+}
+
+// SetGrapariOnly toggles the GraPARI-only mode in SettingsJSON
+func (c *ChannelRecord) SetGrapariOnly(val bool) {
+	if c == nil {
+		return
+	}
+	var m map[string]interface{}
+	if c.SettingsJSON != "" && c.SettingsJSON != "{}" {
+		_ = json.Unmarshal([]byte(c.SettingsJSON), &m)
+	}
+	if m == nil {
+		m = make(map[string]interface{})
+	}
+	m["grapari_only"] = val
+	data, _ := json.Marshal(m)
+	c.SettingsJSON = string(data)
+}
+
+
+type CronJobRecord struct {
+	ID            string     `json:"id"`
+	Name          string     `json:"name"`
+	CronExpr      string     `json:"cron_expr"`
+	TargetChannel string     `json:"target_channel"`
+	TargetChatID  string     `json:"target_chat_id"`
+	Prompt        string     `json:"prompt"`
+	IsActive      bool       `json:"is_active"`
+	LastRun       *time.Time `json:"last_run"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+type ChatSessionRecord struct {
+	ID        string    `json:"id"`
+	ChannelID string    `json:"channel_id"`
+	ChatID    string    `json:"chat_id"`
+	UserID    string    `json:"user_id"`
+	Title     string    `json:"title"`
+	Summary   string    `json:"summary"`
+	IsActive  bool      `json:"is_active"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type ChatMessageRecord struct {
+	ID        string    `json:"id"`
+	SessionID string    `json:"session_id"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	Tokens    int       `json:"tokens"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type MemoryRecord struct {
+	ID        string    `json:"id"`
+	Scope     string    `json:"scope"`
+	ScopeID   string    `json:"scope_id"`
+	KeyTag    string    `json:"key_tag"`
+	Content   string    `json:"content"`
+	Category  string    `json:"category"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// MemoryItemRecord represents an OmniRoute-compatible full memory entry
+type MemoryItemRecord struct {
+	ID             string                 `json:"id"`
+	Type           string                 `json:"type"` // factual, episodic, procedural, semantic
+	Scope          string                 `json:"scope"` // global, channel, user
+	ScopeID        string                 `json:"scope_id"`
+	SessionID      string                 `json:"session_id,omitempty"`
+	Key            string                 `json:"key"`
+	Content        string                 `json:"content"`
+	Category       string                 `json:"category"`
+	Embedding      []float32              `json:"-"`
+	Metadata       map[string]interface{} `json:"metadata"`
+	IsPromoted     bool                   `json:"is_promoted"` // 1 if promoted to permanent long-term memory
+	AccessCount    int                    `json:"access_count"`
+	LastAccessedAt *time.Time             `json:"last_accessed_at,omitempty"`
+	CreatedAt      time.Time              `json:"created_at"`
+	UpdatedAt      time.Time              `json:"updated_at"`
+	Score          float32                `json:"score,omitempty"` // retrieval relevance score
+}
+
+type AuditLogRecord struct {
+	ID                 string    `json:"id"`
+	Timestamp          time.Time `json:"timestamp"`
+	ChannelType        string    `json:"channel_type"`
+	ChannelID          string    `json:"channel_id"`
+	ChatID             string    `json:"chat_id"`
+	UserID             string    `json:"user_id"`
+	UserName           string    `json:"user_name"`
+	Provider           string    `json:"provider"`
+	Model              string    `json:"model"`
+	PromptTokens       int       `json:"prompt_tokens"`
+	CompletionTokens   int       `json:"completion_tokens"`
+	ThinkingTokens     int       `json:"thinking_tokens"`
+	TotalTokens        int       `json:"total_tokens"`
+	TokensSaved        int       `json:"tokens_saved"`
+	NumberOfTries      int       `json:"number_of_tries"`
+	ProxyUsed          string    `json:"proxy_used"`
+	LatencyMs          int       `json:"latency_ms"`
+	CostUSD            float64   `json:"cost_usd"`
+	ToolsCalled        string    `json:"tools_called"`
+	ClientRequest      string    `json:"client_request"`
+	SystemPrompt       string    `json:"system_prompt"`
+	FullRequestPayload string    `json:"full_request_payload"`
+	ProviderResponse   string    `json:"provider_response"`
+	Status             string    `json:"status"`
+	ErrorMessage       string    `json:"error_message"`
+}
+
+// --- Governance Policy Operations ---
+
+func (d *DB) GetPolicy(scope, scopeID string) (*PolicyRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var p PolicyRecord
+	var autoCompInt, proxyPoolInt, streamingInt, thinkingInt, respCacheInt int
+	err := d.db.QueryRow(`
+		SELECT id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, 
+		       model_override, COALESCE(footer_mode, ''), COALESCE(token_saver_mode, 'auto'), COALESCE(proxy_pool_enabled, 1),
+		       COALESCE(streaming_enabled, 1), COALESCE(thinking_enabled, 1), COALESCE(thinking_display, 'full'),
+		       COALESCE(thinking_level, 'low'),
+		       COALESCE(timeout_api_seconds, 0), COALESCE(timeout_handler_seconds, 0), COALESCE(max_audit_logs, 5000), COALESCE(token_budget, 0),
+		       COALESCE(response_cache_enabled, 1), COALESCE(response_cache_ttl_sec, 1800),
+		       COALESCE(fallback_vision_model, ''), COALESCE(fallback_audio_model, ''),
+		       updated_at 
+		FROM channel_policies WHERE scope = ? AND scope_id = ?`, scope, scopeID).
+		Scan(&p.ID, &p.Scope, &p.ScopeID, &p.MaxUploadFileMB, &p.MaxTokens, &p.MaxHistoryTurns, &autoCompInt, &p.CompactionThreshold, 
+			&p.ModelOverride, &p.FooterMode, &p.TokenSaverMode, &proxyPoolInt,
+			&streamingInt, &thinkingInt, &p.ThinkingDisplay, &p.ThinkingLevel,
+			&p.TimeoutAPISeconds, &p.TimeoutHandlerSec, &p.MaxAuditLogs, &p.TokenBudget,
+			&respCacheInt, &p.ResponseCacheTTLSec,
+			&p.FallbackVisionModel, &p.FallbackAudioModel,
+			&p.UpdatedAt)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if p.Scope == "global" && p.FooterMode == "" {
+		p.FooterMode = "full"
+	}
+	if p.ThinkingLevel == "" {
+		p.ThinkingLevel = "low"
+	}
+	p.AutoCompaction = autoCompInt == 1
+	p.ProxyPoolEnabled = proxyPoolInt == 1
+	p.StreamingEnabled = streamingInt == 1
+	p.ThinkingEnabled = thinkingInt == 1
+	p.ResponseCacheEnabled = respCacheInt == 1
+	return &p, nil
+}
+
+// GetOrCreatePolicy returns an existing PolicyRecord, or initializes one with inherited defaults from resolved policy
+func (d *DB) GetOrCreatePolicy(scope, scopeID string) *PolicyRecord {
+	pol, err := d.GetPolicy(scope, scopeID)
+	if err == nil && pol != nil {
+		return pol
+	}
+	channelID := ""
+	chatID := ""
+	if scope == "channel" {
+		channelID = scopeID
+	} else if scope == "chat" {
+		chatID = scopeID
+	}
+	resolved := d.GetResolvedPolicy(channelID, chatID)
+	return &PolicyRecord{
+		ID:                   scope + "_" + scopeID,
+		Scope:                scope,
+		ScopeID:              scopeID,
+		MaxUploadFileMB:      resolved.MaxUploadFileMB,
+		MaxTokens:            resolved.MaxTokens,
+		MaxHistoryTurns:      resolved.MaxHistoryTurns,
+		AutoCompaction:       resolved.AutoCompaction,
+		CompactionThreshold:  resolved.CompactionThreshold,
+		ModelOverride:        resolved.ModelOverride,
+		FooterMode:           resolved.FooterMode,
+		TokenSaverMode:       resolved.TokenSaverMode,
+		ProxyPoolEnabled:     resolved.ProxyPoolEnabled,
+		StreamingEnabled:     resolved.StreamingEnabled,
+		ThinkingEnabled:      resolved.ThinkingEnabled,
+		ThinkingDisplay:      resolved.ThinkingDisplay,
+		ThinkingLevel:        resolved.ThinkingLevel,
+		TimeoutAPISeconds:    resolved.TimeoutAPISeconds,
+		TimeoutHandlerSec:    resolved.TimeoutHandlerSec,
+		MaxAuditLogs:         resolved.MaxAuditLogs,
+		TokenBudget:          resolved.TokenBudget,
+		ResponseCacheEnabled: resolved.ResponseCacheEnabled,
+		ResponseCacheTTLSec:  resolved.ResponseCacheTTLSec,
+		FallbackVisionModel:  resolved.FallbackVisionModel,
+		FallbackAudioModel:   resolved.FallbackAudioModel,
+	}
+}
+
+func (d *DB) SavePolicy(p *PolicyRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if p.ID == "" {
+		p.ID = uuid.New().String()[:8]
+	}
+	if p.Scope == "global" && p.FooterMode == "" {
+		p.FooterMode = "full"
+	}
+	if p.TokenSaverMode == "" {
+		p.TokenSaverMode = "auto"
+	}
+	if p.ThinkingDisplay == "" {
+		p.ThinkingDisplay = "full"
+	}
+	if p.MaxAuditLogs <= 0 {
+		p.MaxAuditLogs = 5000
+	}
+	if p.ResponseCacheTTLSec <= 0 {
+		p.ResponseCacheTTLSec = 1800
+	}
+	autoCompInt := 0
+	if p.AutoCompaction {
+		autoCompInt = 1
+	}
+	proxyPoolInt := 0
+	if p.ProxyPoolEnabled {
+		proxyPoolInt = 1
+	}
+	streamingInt := 0
+	if p.StreamingEnabled {
+		streamingInt = 1
+	}
+	thinkingInt := 0
+	if p.ThinkingEnabled {
+		thinkingInt = 1
+	}
+	respCacheInt := 0
+	if p.ResponseCacheEnabled {
+		respCacheInt = 1
+	}
+
+	query := `
+	INSERT INTO channel_policies (id, scope, scope_id, max_upload_file_mb, max_tokens, max_history_turns, auto_compaction, compaction_threshold, model_override, footer_mode, token_saver_mode, proxy_pool_enabled, streaming_enabled, thinking_enabled, thinking_display, thinking_level, timeout_api_seconds, timeout_handler_seconds, max_audit_logs, token_budget, response_cache_enabled, response_cache_ttl_sec, fallback_vision_model, fallback_audio_model, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(scope, scope_id) DO UPDATE SET
+		max_upload_file_mb=excluded.max_upload_file_mb,
+		max_tokens=excluded.max_tokens,
+		max_history_turns=excluded.max_history_turns,
+		auto_compaction=excluded.auto_compaction,
+		compaction_threshold=excluded.compaction_threshold,
+		model_override=excluded.model_override,
+		footer_mode=excluded.footer_mode,
+		token_saver_mode=excluded.token_saver_mode,
+		proxy_pool_enabled=excluded.proxy_pool_enabled,
+		streaming_enabled=excluded.streaming_enabled,
+		thinking_enabled=excluded.thinking_enabled,
+		thinking_display=excluded.thinking_display,
+		thinking_level=excluded.thinking_level,
+		timeout_api_seconds=excluded.timeout_api_seconds,
+		timeout_handler_seconds=excluded.timeout_handler_seconds,
+		max_audit_logs=excluded.max_audit_logs,
+		token_budget=excluded.token_budget,
+		response_cache_enabled=excluded.response_cache_enabled,
+		response_cache_ttl_sec=excluded.response_cache_ttl_sec,
+		fallback_vision_model=excluded.fallback_vision_model,
+		fallback_audio_model=excluded.fallback_audio_model,
+		updated_at=CURRENT_TIMESTAMP
+	`
+	thinkingLevel := p.ThinkingLevel
+	if thinkingLevel == "" {
+		thinkingLevel = "low"
+	}
+	_, err := d.db.Exec(query, p.ID, p.Scope, p.ScopeID, p.MaxUploadFileMB, p.MaxTokens, p.MaxHistoryTurns, autoCompInt, p.CompactionThreshold, p.ModelOverride, p.FooterMode, p.TokenSaverMode, proxyPoolInt, streamingInt, thinkingInt, p.ThinkingDisplay, thinkingLevel, p.TimeoutAPISeconds, p.TimeoutHandlerSec, p.MaxAuditLogs, p.TokenBudget, respCacheInt, p.ResponseCacheTTLSec, p.FallbackVisionModel, p.FallbackAudioModel)
+	return err
+}
+
+// GetResolvedPolicy resolves hierarchical limits: Default -> Global -> Channel -> Chat
+func (d *DB) GetResolvedPolicy(channelID, chatID string) PolicyRecord {
+	// 1. Defaults
+	res := PolicyRecord{
+		MaxUploadFileMB:      10,
+		MaxTokens:            2048,
+		MaxHistoryTurns:      20,
+		AutoCompaction:       true,
+		CompactionThreshold:  15,
+		ModelOverride:        "",
+		FooterMode:           "full",
+		TokenSaverMode:       "auto",
+		ProxyPoolEnabled:     true,
+		StreamingEnabled:     true,
+		ThinkingEnabled:      true,
+		ThinkingDisplay:      "full",
+		ThinkingLevel:        "low",
+		TimeoutAPISeconds:    0,
+		TimeoutHandlerSec:    0,
+		MaxAuditLogs:         5000,
+		TokenBudget:          0,
+		ResponseCacheEnabled: true,
+		ResponseCacheTTLSec:  1800,
+	}
+
+	// 2. Global overlay
+	if glob, _ := d.GetPolicy("global", "system"); glob != nil {
+		if glob.MaxUploadFileMB > 0 {
+			res.MaxUploadFileMB = glob.MaxUploadFileMB
+		}
+		if glob.MaxTokens > 0 {
+			res.MaxTokens = glob.MaxTokens
+		}
+		if glob.MaxHistoryTurns > 0 {
+			res.MaxHistoryTurns = glob.MaxHistoryTurns
+		}
+		res.AutoCompaction = glob.AutoCompaction
+		if glob.CompactionThreshold > 0 {
+			res.CompactionThreshold = glob.CompactionThreshold
+		}
+		if glob.ModelOverride != "" {
+			res.ModelOverride = glob.ModelOverride
+		}
+		if glob.FooterMode != "" {
+			res.FooterMode = glob.FooterMode
+		}
+		if glob.TokenSaverMode != "" {
+			res.TokenSaverMode = glob.TokenSaverMode
+		}
+		res.ProxyPoolEnabled = glob.ProxyPoolEnabled
+		res.StreamingEnabled = glob.StreamingEnabled
+		res.ThinkingEnabled = glob.ThinkingEnabled
+		if glob.ThinkingDisplay != "" {
+			res.ThinkingDisplay = glob.ThinkingDisplay
+		}
+		if glob.ThinkingLevel != "" {
+			res.ThinkingLevel = glob.ThinkingLevel
+		}
+		if glob.TimeoutAPISeconds > 0 {
+			res.TimeoutAPISeconds = glob.TimeoutAPISeconds
+		}
+		if glob.TimeoutHandlerSec > 0 {
+			res.TimeoutHandlerSec = glob.TimeoutHandlerSec
+		}
+		if glob.MaxAuditLogs > 0 {
+			res.MaxAuditLogs = glob.MaxAuditLogs
+		}
+		if glob.TokenBudget > 0 {
+			res.TokenBudget = glob.TokenBudget
+		}
+		res.ResponseCacheEnabled = glob.ResponseCacheEnabled
+		if glob.ResponseCacheTTLSec > 0 {
+			res.ResponseCacheTTLSec = glob.ResponseCacheTTLSec
+		}
+		if glob.FallbackVisionModel != "" {
+			res.FallbackVisionModel = glob.FallbackVisionModel
+		}
+		if glob.FallbackAudioModel != "" {
+			res.FallbackAudioModel = glob.FallbackAudioModel
+		}
+	}
+
+	// 3. Channel overlay
+	if channelID != "" {
+		if chPol, _ := d.GetPolicy("channel", channelID); chPol != nil {
+			if chPol.MaxUploadFileMB > 0 {
+				res.MaxUploadFileMB = chPol.MaxUploadFileMB
+			}
+			if chPol.MaxTokens > 0 {
+				res.MaxTokens = chPol.MaxTokens
+			}
+			if chPol.MaxHistoryTurns > 0 {
+				res.MaxHistoryTurns = chPol.MaxHistoryTurns
+			}
+			res.AutoCompaction = chPol.AutoCompaction
+			if chPol.CompactionThreshold > 0 {
+				res.CompactionThreshold = chPol.CompactionThreshold
+			}
+			if chPol.ModelOverride != "" {
+				res.ModelOverride = chPol.ModelOverride
+			}
+			if chPol.FooterMode != "" && chPol.FooterMode != "inherit" {
+				res.FooterMode = chPol.FooterMode
+			}
+			if chPol.TokenSaverMode != "" {
+				res.TokenSaverMode = chPol.TokenSaverMode
+			}
+			res.ProxyPoolEnabled = chPol.ProxyPoolEnabled
+			res.StreamingEnabled = chPol.StreamingEnabled
+			res.ThinkingEnabled = chPol.ThinkingEnabled
+			if chPol.ThinkingDisplay != "" {
+				res.ThinkingDisplay = chPol.ThinkingDisplay
+			}
+			if chPol.ThinkingLevel != "" {
+				res.ThinkingLevel = chPol.ThinkingLevel
+			}
+			if chPol.TimeoutAPISeconds > 0 {
+				res.TimeoutAPISeconds = chPol.TimeoutAPISeconds
+			}
+			if chPol.TimeoutHandlerSec > 0 {
+				res.TimeoutHandlerSec = chPol.TimeoutHandlerSec
+			}
+			if chPol.MaxAuditLogs > 0 {
+				res.MaxAuditLogs = chPol.MaxAuditLogs
+			}
+			if chPol.TokenBudget > 0 {
+				res.TokenBudget = chPol.TokenBudget
+			}
+			res.ResponseCacheEnabled = chPol.ResponseCacheEnabled
+			if chPol.ResponseCacheTTLSec > 0 {
+				res.ResponseCacheTTLSec = chPol.ResponseCacheTTLSec
+			}
+			if chPol.FallbackVisionModel != "" {
+				res.FallbackVisionModel = chPol.FallbackVisionModel
+			}
+			if chPol.FallbackAudioModel != "" {
+				res.FallbackAudioModel = chPol.FallbackAudioModel
+			}
+		}
+	}
+
+	// 4. Chat/Group overlay
+	if chatID != "" {
+		if chatPol, _ := d.GetPolicy("chat", chatID); chatPol != nil {
+			if chatPol.MaxUploadFileMB > 0 {
+				res.MaxUploadFileMB = chatPol.MaxUploadFileMB
+			}
+			if chatPol.MaxTokens > 0 {
+				res.MaxTokens = chatPol.MaxTokens
+			}
+			if chatPol.MaxHistoryTurns > 0 {
+				res.MaxHistoryTurns = chatPol.MaxHistoryTurns
+			}
+			res.AutoCompaction = chatPol.AutoCompaction
+			if chatPol.CompactionThreshold > 0 {
+				res.CompactionThreshold = chatPol.CompactionThreshold
+			}
+			if chatPol.ModelOverride != "" {
+				res.ModelOverride = chatPol.ModelOverride
+			}
+			if chatPol.FooterMode != "" && chatPol.FooterMode != "inherit" {
+				res.FooterMode = chatPol.FooterMode
+			}
+			if chatPol.TokenSaverMode != "" {
+				res.TokenSaverMode = chatPol.TokenSaverMode
+			}
+			res.ProxyPoolEnabled = chatPol.ProxyPoolEnabled
+			res.StreamingEnabled = chatPol.StreamingEnabled
+			res.ThinkingEnabled = chatPol.ThinkingEnabled
+			if chatPol.ThinkingDisplay != "" {
+				res.ThinkingDisplay = chatPol.ThinkingDisplay
+			}
+			if chatPol.ThinkingLevel != "" {
+				res.ThinkingLevel = chatPol.ThinkingLevel
+			}
+			if chatPol.TimeoutAPISeconds > 0 {
+				res.TimeoutAPISeconds = chatPol.TimeoutAPISeconds
+			}
+			if chatPol.TimeoutHandlerSec > 0 {
+				res.TimeoutHandlerSec = chatPol.TimeoutHandlerSec
+			}
+			if chatPol.MaxAuditLogs > 0 {
+				res.MaxAuditLogs = chatPol.MaxAuditLogs
+			}
+			if chatPol.TokenBudget > 0 {
+				res.TokenBudget = chatPol.TokenBudget
+			}
+			res.ResponseCacheEnabled = chatPol.ResponseCacheEnabled
+			if chatPol.ResponseCacheTTLSec > 0 {
+				res.ResponseCacheTTLSec = chatPol.ResponseCacheTTLSec
+			}
+			if chatPol.FallbackVisionModel != "" {
+				res.FallbackVisionModel = chatPol.FallbackVisionModel
+			}
+			if chatPol.FallbackAudioModel != "" {
+				res.FallbackAudioModel = chatPol.FallbackAudioModel
+			}
+		}
+	}
+
+	return res
+}
+
+// --- Provider Operations ---
+
+func (d *DB) ListProviders() ([]ProviderRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query(`
+		SELECT id, name, type, base_url, api_key, COALESCE(api_keys, '[]'), default_model, COALESCE(models, '[]'), 
+		       COALESCE(disabled_models, '[]'),
+		       COALESCE(strategy, 'failsafe'), COALESCE(key_strategy, 'round-robin'), 
+		       COALESCE(proxy_enabled, 0), COALESCE(proxy_group, ''),
+		       is_active, priority, settings_json, created_at, updated_at 
+		FROM providers ORDER BY priority ASC, name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ProviderRecord
+	for rows.Next() {
+		var p ProviderRecord
+		var activeInt, proxyEnabledInt int
+		var apiKeysJSON, modelsJSON, disabledModelsJSON string
+		if err := rows.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &apiKeysJSON, &p.DefaultModel, &modelsJSON, &disabledModelsJSON, &p.Strategy, &p.KeyStrategy, &proxyEnabledInt, &p.ProxyGroup, &activeInt, &p.Priority, &p.SettingsJSON, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		p.IsActive = activeInt == 1
+		p.ProxyEnabled = proxyEnabledInt == 1
+		_ = json.Unmarshal([]byte(apiKeysJSON), &p.APIKeys)
+		_ = json.Unmarshal([]byte(modelsJSON), &p.Models)
+		_ = json.Unmarshal([]byte(disabledModelsJSON), &p.DisabledModels)
+		if len(p.APIKeys) == 0 && p.APIKey != "" {
+			p.APIKeys = []string{p.APIKey}
+		}
+		list = append(list, p)
+	}
+	return list, nil
+}
+
+func (d *DB) GetProvider(id string) (*ProviderRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var p ProviderRecord
+	var activeInt, proxyEnabledInt int
+	var apiKeysJSON, modelsJSON, disabledModelsJSON string
+	err := d.db.QueryRow(`
+		SELECT id, name, type, base_url, api_key, COALESCE(api_keys, '[]'), default_model, COALESCE(models, '[]'), 
+		       COALESCE(disabled_models, '[]'),
+		       COALESCE(strategy, 'failsafe'), COALESCE(key_strategy, 'round-robin'), 
+		       COALESCE(proxy_enabled, 0), COALESCE(proxy_group, ''),
+		       is_active, priority, settings_json, created_at, updated_at 
+		FROM providers WHERE id = ?`, id).
+		Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &apiKeysJSON, &p.DefaultModel, &modelsJSON, &disabledModelsJSON, &p.Strategy, &p.KeyStrategy, &proxyEnabledInt, &p.ProxyGroup, &activeInt, &p.Priority, &p.SettingsJSON, &p.CreatedAt, &p.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	p.IsActive = activeInt == 1
+	p.ProxyEnabled = proxyEnabledInt == 1
+	_ = json.Unmarshal([]byte(apiKeysJSON), &p.APIKeys)
+	_ = json.Unmarshal([]byte(modelsJSON), &p.Models)
+	_ = json.Unmarshal([]byte(disabledModelsJSON), &p.DisabledModels)
+	if len(p.APIKeys) == 0 && p.APIKey != "" {
+		p.APIKeys = []string{p.APIKey}
+	}
+	return &p, nil
+}
+
+func (d *DB) SaveProvider(p *ProviderRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if p.ID == "" {
+		p.ID = uuid.New().String()[:8]
+	}
+	if p.Strategy == "" {
+		p.Strategy = "failsafe"
+	}
+	if p.KeyStrategy == "" {
+		p.KeyStrategy = "round-robin"
+	}
+	if len(p.APIKeys) == 0 && p.APIKey != "" {
+		p.APIKeys = []string{p.APIKey}
+	}
+	if p.APIKey == "" && len(p.APIKeys) > 0 {
+		p.APIKey = p.APIKeys[0]
+	}
+
+	apiKeysBytes, _ := json.Marshal(p.APIKeys)
+	modelsBytes, _ := json.Marshal(p.Models)
+	disabledModelsBytes, _ := json.Marshal(p.DisabledModels)
+
+	activeInt := 0
+	if p.IsActive {
+		activeInt = 1
+	}
+	proxyEnabledInt := 0
+	if p.ProxyEnabled {
+		proxyEnabledInt = 1
+	}
+
+	query := `
+	INSERT INTO providers (id, name, type, base_url, api_key, api_keys, default_model, models, disabled_models, strategy, key_strategy, proxy_enabled, proxy_group, is_active, priority, settings_json, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(id) DO UPDATE SET
+		name=excluded.name,
+		type=excluded.type,
+		base_url=excluded.base_url,
+		api_key=excluded.api_key,
+		api_keys=excluded.api_keys,
+		default_model=excluded.default_model,
+		models=excluded.models,
+		disabled_models=excluded.disabled_models,
+		strategy=excluded.strategy,
+		key_strategy=excluded.key_strategy,
+		proxy_enabled=excluded.proxy_enabled,
+		proxy_group=excluded.proxy_group,
+		is_active=excluded.is_active,
+		priority=excluded.priority,
+		settings_json=excluded.settings_json,
+		updated_at=CURRENT_TIMESTAMP
+	`
+	_, err := d.db.Exec(query, p.ID, p.Name, p.Type, p.BaseURL, p.APIKey, string(apiKeysBytes), p.DefaultModel, string(modelsBytes), string(disabledModelsBytes), p.Strategy, p.KeyStrategy, proxyEnabledInt, p.ProxyGroup, activeInt, p.Priority, p.SettingsJSON)
+	return err
+}
+
+func (d *DB) DeleteProvider(id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM providers WHERE id = ?", id)
+	return err
+}
+
+// --- Model Combo Operations ---
+
+func (d *DB) ListCombos() ([]ModelComboRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT id, name, description, targets_json, strategy, is_active, created_at, updated_at FROM model_combos ORDER BY name ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ModelComboRecord
+	for rows.Next() {
+		var c ModelComboRecord
+		var targetsJSON string
+		var activeInt int
+		if err := rows.Scan(&c.ID, &c.Name, &c.Description, &targetsJSON, &c.Strategy, &activeInt, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, err
+		}
+		c.IsActive = activeInt == 1
+		_ = json.Unmarshal([]byte(targetsJSON), &c.Targets)
+		list = append(list, c)
+	}
+	return list, nil
+}
+
+func (d *DB) GetCombo(name string) (*ModelComboRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var c ModelComboRecord
+	var targetsJSON string
+	var activeInt int
+	err := d.db.QueryRow("SELECT id, name, description, targets_json, strategy, is_active, created_at, updated_at FROM model_combos WHERE name = ?", name).
+		Scan(&c.ID, &c.Name, &c.Description, &targetsJSON, &c.Strategy, &activeInt, &c.CreatedAt, &c.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.IsActive = activeInt == 1
+	_ = json.Unmarshal([]byte(targetsJSON), &c.Targets)
+	return &c, nil
+}
+
+func (d *DB) SaveCombo(c *ModelComboRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if c.ID == "" {
+		c.ID = uuid.New().String()[:8]
+	}
+	if c.Strategy == "" {
+		c.Strategy = "failsafe"
+	}
+	activeInt := 0
+	if c.IsActive {
+		activeInt = 1
+	}
+
+	targetsBytes, _ := json.Marshal(c.Targets)
+
+	query := `
+	INSERT INTO model_combos (id, name, description, targets_json, strategy, is_active, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(name) DO UPDATE SET
+		description=excluded.description,
+		targets_json=excluded.targets_json,
+		strategy=excluded.strategy,
+		is_active=excluded.is_active,
+		updated_at=CURRENT_TIMESTAMP
+	`
+	_, err := d.db.Exec(query, c.ID, c.Name, c.Description, string(targetsBytes), c.Strategy, activeInt)
+	return err
+}
+
+func (d *DB) DeleteCombo(name string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM model_combos WHERE name = ?", name)
+	return err
+}
+
+// --- Channel Operations ---
+
+func (d *DB) ListChannels() ([]ChannelRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT id, type, name, identifier, is_active, default_agent, default_model, settings_json, created_at, updated_at FROM channels ORDER BY name ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ChannelRecord
+	for rows.Next() {
+		var c ChannelRecord
+		var activeInt int
+		if err := rows.Scan(&c.ID, &c.Type, &c.Name, &c.Identifier, &activeInt, &c.DefaultAgent, &c.DefaultModel, &c.SettingsJSON, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, err
+		}
+		c.IsActive = activeInt == 1
+		list = append(list, c)
+	}
+	return list, nil
+}
+
+func (d *DB) GetChannel(id string) (*ChannelRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var c ChannelRecord
+	var activeInt int
+	err := d.db.QueryRow("SELECT id, type, name, identifier, is_active, default_agent, default_model, settings_json, created_at, updated_at FROM channels WHERE id = ?", id).
+		Scan(&c.ID, &c.Type, &c.Name, &c.Identifier, &activeInt, &c.DefaultAgent, &c.DefaultModel, &c.SettingsJSON, &c.CreatedAt, &c.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.IsActive = activeInt == 1
+	return &c, nil
+}
+
+func (d *DB) SaveChannel(c *ChannelRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if c.ID == "" {
+		c.ID = uuid.New().String()[:8]
+	}
+	activeInt := 0
+	if c.IsActive {
+		activeInt = 1
+	}
+
+	query := `
+	INSERT INTO channels (id, type, name, identifier, is_active, default_agent, default_model, settings_json, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(id) DO UPDATE SET
+		type=excluded.type,
+		name=excluded.name,
+		identifier=excluded.identifier,
+		is_active=excluded.is_active,
+		default_agent=excluded.default_agent,
+		default_model=excluded.default_model,
+		settings_json=excluded.settings_json,
+		updated_at=CURRENT_TIMESTAMP
+	`
+	_, err := d.db.Exec(query, c.ID, c.Type, c.Name, c.Identifier, activeInt, c.DefaultAgent, c.DefaultModel, c.SettingsJSON)
+	return err
+}
+
+func (d *DB) DeleteChannel(id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM channels WHERE id = ?", id)
+	return err
+}
+
+// --- Channel Tool Permissions ---
+
+func (d *DB) GetChannelToolPerms(channelID string) (map[string]bool, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT tool_name, is_allowed FROM channel_tool_perms WHERE channel_id = ?", channelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	perms := make(map[string]bool)
+	for rows.Next() {
+		var toolName string
+		var allowedInt int
+		if err := rows.Scan(&toolName, &allowedInt); err != nil {
+			return nil, err
+		}
+		perms[toolName] = allowedInt == 1
+	}
+	return perms, nil
+}
+
+func (d *DB) SetChannelToolPerm(channelID, toolName string, isAllowed bool) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	allowedInt := 0
+	if isAllowed {
+		allowedInt = 1
+	}
+
+	query := `
+	INSERT INTO channel_tool_perms (channel_id, tool_name, is_allowed, updated_at)
+	VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(channel_id, tool_name) DO UPDATE SET
+		is_allowed=excluded.is_allowed,
+		updated_at=CURRENT_TIMESTAMP
+	`
+	_, err := d.db.Exec(query, channelID, toolName, allowedInt)
+	return err
+}
+
+// --- Cron Operations ---
+
+func (d *DB) ListCronJobs() ([]CronJobRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT id, name, cron_expr, target_channel, target_chat_id, prompt, is_active, last_run, created_at, updated_at FROM cron_jobs ORDER BY created_at DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []CronJobRecord
+	for rows.Next() {
+		var j CronJobRecord
+		var activeInt int
+		if err := rows.Scan(&j.ID, &j.Name, &j.CronExpr, &j.TargetChannel, &j.TargetChatID, &j.Prompt, &activeInt, &j.LastRun, &j.CreatedAt, &j.UpdatedAt); err != nil {
+			return nil, err
+		}
+		j.IsActive = activeInt == 1
+		list = append(list, j)
+	}
+	return list, nil
+}
+
+func (d *DB) GetCronJob(id string) (*CronJobRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var j CronJobRecord
+	var activeInt int
+	err := d.db.QueryRow("SELECT id, name, cron_expr, target_channel, target_chat_id, prompt, is_active, last_run, created_at, updated_at FROM cron_jobs WHERE id = ?", id).
+		Scan(&j.ID, &j.Name, &j.CronExpr, &j.TargetChannel, &j.TargetChatID, &j.Prompt, &activeInt, &j.LastRun, &j.CreatedAt, &j.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	j.IsActive = activeInt == 1
+	return &j, nil
+}
+
+func (d *DB) SaveCronJob(j *CronJobRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if j.ID == "" {
+		j.ID = uuid.New().String()[:8]
+	}
+	activeInt := 0
+	if j.IsActive {
+		activeInt = 1
+	}
+
+	query := `
+	INSERT INTO cron_jobs (id, name, cron_expr, target_channel, target_chat_id, prompt, is_active, last_run, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(id) DO UPDATE SET
+		name=excluded.name,
+		cron_expr=excluded.cron_expr,
+		target_channel=excluded.target_channel,
+		target_chat_id=excluded.target_chat_id,
+		prompt=excluded.prompt,
+		is_active=excluded.is_active,
+		last_run=excluded.last_run,
+		updated_at=CURRENT_TIMESTAMP
+	`
+	_, err := d.db.Exec(query, j.ID, j.Name, j.CronExpr, j.TargetChannel, j.TargetChatID, j.Prompt, activeInt, j.LastRun)
+	return err
+}
+
+func (d *DB) DeleteCronJob(id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM cron_jobs WHERE id = ?", id)
+	return err
+}
+
+func (d *DB) UpdateCronLastRun(id string, t time.Time) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("UPDATE cron_jobs SET last_run = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", t, id)
+	return err
+}
+
+// --- Session & Memory Operations ---
+
+func (d *DB) GetOrCreateSession(channelID, chatID, userID string) (*ChatSessionRecord, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var s ChatSessionRecord
+	var isActiveInt int
+	err := d.db.QueryRow("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE channel_id = ? AND chat_id = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1", channelID, chatID).
+		Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt)
+
+	if err == nil {
+		s.IsActive = (isActiveInt == 1)
+		return &s, nil
+	}
+
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+
+	// If no session is active, check if any session exists for this chat and activate it
+	err = d.db.QueryRow("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE channel_id = ? AND chat_id = ? ORDER BY updated_at DESC LIMIT 1", channelID, chatID).
+		Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt)
+	if err == nil {
+		_, _ = d.db.Exec("UPDATE chat_sessions SET is_active = 1 WHERE id = ?", s.ID)
+		s.IsActive = true
+		return &s, nil
+	}
+
+	// Create new session
+	s = ChatSessionRecord{
+		ID:        uuid.New().String(),
+		ChannelID: channelID,
+		ChatID:    chatID,
+		UserID:    userID,
+		Title:     "Topik Utama",
+		Summary:   "",
+		IsActive:  true,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	_, err = d.db.Exec("INSERT INTO chat_sessions (id, channel_id, chat_id, user_id, title, summary, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)",
+		s.ID, s.ChannelID, s.ChatID, s.UserID, s.Title, s.Summary)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// ListChatSessions returns all topics/sessions for a channel and chat
+func (d *DB) ListChatSessions(channelID, chatID string) ([]*ChatSessionRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE channel_id = ? AND chat_id = ? ORDER BY is_active DESC, updated_at DESC", channelID, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []*ChatSessionRecord
+	for rows.Next() {
+		var s ChatSessionRecord
+		var isActiveInt int
+		if err := rows.Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt); err == nil {
+			s.IsActive = (isActiveInt == 1)
+			list = append(list, &s)
+		}
+	}
+	return list, nil
+}
+
+// ListAllChatSessions returns all topics/sessions across all channels or filtered by channel
+func (d *DB) ListAllChatSessions(channelID string, limit int) ([]*ChatSessionRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 100
+	}
+
+	query := "SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions"
+	var args []interface{}
+	if channelID != "" && channelID != "all" {
+		query += " WHERE channel_id = ?"
+		args = append(args, channelID)
+	}
+	query += " ORDER BY updated_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []*ChatSessionRecord
+	for rows.Next() {
+		var s ChatSessionRecord
+		var isActiveInt int
+		if err := rows.Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt); err == nil {
+			s.IsActive = (isActiveInt == 1)
+			list = append(list, &s)
+		}
+	}
+	return list, nil
+}
+
+// CreateChatSession creates a new session/topic for a chat. If setActive is true, marks others as inactive.
+func (d *DB) CreateChatSession(channelID, chatID, userID, title string, setActive bool) (*ChatSessionRecord, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if strings.TrimSpace(title) == "" {
+		title = "Topik Baru"
+	}
+
+	activeInt := 0
+	if setActive {
+		activeInt = 1
+		_, _ = d.db.Exec("UPDATE chat_sessions SET is_active = 0 WHERE channel_id = ? AND chat_id = ?", channelID, chatID)
+	}
+
+	s := &ChatSessionRecord{
+		ID:        uuid.New().String(),
+		ChannelID: channelID,
+		ChatID:    chatID,
+		UserID:    userID,
+		Title:     title,
+		Summary:   "",
+		IsActive:  setActive,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	_, err := d.db.Exec("INSERT INTO chat_sessions (id, channel_id, chat_id, user_id, title, summary, is_active) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		s.ID, s.ChannelID, s.ChatID, s.UserID, s.Title, s.Summary, activeInt)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// GetChatSession returns a single chat session by ID
+func (d *DB) GetChatSession(sessionID string) (*ChatSessionRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var s ChatSessionRecord
+	var isActiveInt int
+	err := d.db.QueryRow("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE id = ?", sessionID).
+		Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	s.IsActive = (isActiveInt == 1)
+	return &s, nil
+}
+
+// ListChannelsWithTopics returns distinct channel IDs that have active sessions/topics
+func (d *DB) ListChannelsWithTopics() ([]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT DISTINCT channel_id FROM chat_sessions WHERE channel_id != '' ORDER BY channel_id ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channels []string
+	for rows.Next() {
+		var ch string
+		if err := rows.Scan(&ch); err == nil && ch != "" {
+			channels = append(channels, ch)
+		}
+	}
+	return channels, nil
+}
+
+// SwitchChatSession sets the specified session as active and deactivates others in the chat
+func (d *DB) SwitchChatSession(channelID, chatID, sessionID string) (*ChatSessionRecord, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var s ChatSessionRecord
+	var isActiveInt int
+	err := d.db.QueryRow("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE id = ? AND channel_id = ? AND chat_id = ?", sessionID, channelID, chatID).
+		Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("sesi tidak ditemukan: %w", err)
+	}
+
+	_, _ = d.db.Exec("UPDATE chat_sessions SET is_active = 0 WHERE channel_id = ? AND chat_id = ?", channelID, chatID)
+	_, _ = d.db.Exec("UPDATE chat_sessions SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", sessionID)
+	s.IsActive = true
+	s.UpdatedAt = time.Now()
+	return &s, nil
+}
+
+// DeleteChatSession deletes a session and all its messages. If it was active, activates the most recent remaining session.
+func (d *DB) DeleteChatSession(channelID, chatID, sessionID string) (*ChatSessionRecord, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Delete messages and session
+	_, _ = d.db.Exec("DELETE FROM chat_messages WHERE session_id = ?", sessionID)
+	_, err := d.db.Exec("DELETE FROM chat_sessions WHERE id = ?", sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find active or activate remaining session
+	var nextActive *ChatSessionRecord
+	var nextActiveInt int
+	var s ChatSessionRecord
+	err = d.db.QueryRow("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE channel_id = ? AND chat_id = ? ORDER BY is_active DESC, updated_at DESC LIMIT 1", channelID, chatID).
+		Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &nextActiveInt, &s.CreatedAt, &s.UpdatedAt)
+
+	if err == nil {
+		if nextActiveInt == 0 {
+			_, _ = d.db.Exec("UPDATE chat_sessions SET is_active = 1 WHERE id = ?", s.ID)
+			s.IsActive = true
+		} else {
+			s.IsActive = (nextActiveInt == 1)
+		}
+		nextActive = &s
+	} else if err == sql.ErrNoRows {
+		// If no sessions remain, create a fresh default active session
+		newSess := &ChatSessionRecord{
+			ID:        uuid.New().String(),
+			ChannelID: channelID,
+			ChatID:    chatID,
+			UserID:    "",
+			Title:     "Topik Utama",
+			Summary:   "",
+			IsActive:  true,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		_, _ = d.db.Exec("INSERT INTO chat_sessions (id, channel_id, chat_id, user_id, title, summary, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)",
+			newSess.ID, newSess.ChannelID, newSess.ChatID, newSess.UserID, newSess.Title, newSess.Summary)
+		nextActive = newSess
+	}
+
+	return nextActive, nil
+}
+
+// RenameChatSession updates the title of a session
+func (d *DB) RenameChatSession(sessionID, newTitle string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	newTitle = strings.TrimSpace(newTitle)
+	if newTitle == "" {
+		return fmt.Errorf("judul topik tidak boleh kosong")
+	}
+	_, err := d.db.Exec("UPDATE chat_sessions SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", newTitle, sessionID)
+	return err
+}
+
+// GetSessionByID retrieves a session record by its primary key ID
+func (d *DB) GetSessionByID(sessionID string) (*ChatSessionRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var s ChatSessionRecord
+	var isActiveInt int
+	err := d.db.QueryRow("SELECT id, channel_id, chat_id, user_id, title, summary, is_active, created_at, updated_at FROM chat_sessions WHERE id = ?", sessionID).
+		Scan(&s.ID, &s.ChannelID, &s.ChatID, &s.UserID, &s.Title, &s.Summary, &isActiveInt, &s.CreatedAt, &s.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	s.IsActive = (isActiveInt == 1)
+	return &s, nil
+}
+
+// ClearActiveSessionMessages deletes messages only in the current active session
+func (d *DB) ClearActiveSessionMessages(channelID, chatID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var sessionID string
+	err := d.db.QueryRow("SELECT id FROM chat_sessions WHERE channel_id = ? AND chat_id = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1", channelID, chatID).Scan(&sessionID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	_, _ = d.db.Exec("DELETE FROM chat_messages WHERE session_id = ?", sessionID)
+	_, _ = d.db.Exec("UPDATE chat_sessions SET summary = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?", sessionID)
+	return nil
+}
+
+func (d *DB) AddMessage(sessionID, role, content string, tokens int) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	id := uuid.New().String()
+	_, err := d.db.Exec("INSERT INTO chat_messages (id, session_id, role, content, tokens) VALUES (?, ?, ?, ?, ?)",
+		id, sessionID, role, content, tokens)
+	return err
+}
+
+func (d *DB) CountSessionMessages(sessionID string) (int, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var count int
+	err := d.db.QueryRow("SELECT COUNT(*) FROM chat_messages WHERE session_id = ?", sessionID).Scan(&count)
+	return count, err
+}
+
+func (d *DB) TruncateOldMessages(sessionID string, keepCount int) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	query := `
+	DELETE FROM chat_messages 
+	WHERE session_id = ? AND id NOT IN (
+		SELECT id FROM chat_messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?
+	)
+	`
+	_, err := d.db.Exec(query, sessionID, sessionID, keepCount)
+	return err
+}
+
+func (d *DB) GetRecentMessages(sessionID string, limit int) ([]ChatMessageRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	query := "SELECT id, session_id, role, content, tokens, created_at FROM chat_messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?"
+	rows, err := d.db.Query(query, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []ChatMessageRecord
+	for rows.Next() {
+		var m ChatMessageRecord
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Tokens, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, m)
+	}
+
+	// Reverse to get chronological order
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
+}
+
+func (d *DB) ClearSessionMessages(sessionID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, err := d.db.Exec("DELETE FROM chat_messages WHERE session_id = ?", sessionID)
+	if err != nil {
+		return err
+	}
+	_, err = d.db.Exec("UPDATE chat_sessions SET summary = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?", sessionID)
+	return err
+}
+
+func (d *DB) ClearSessionsByChatID(chatID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	rows, err := d.db.Query("SELECT id FROM chat_sessions WHERE chat_id = ?", chatID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var sessionIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			sessionIDs = append(sessionIDs, id)
+		}
+	}
+
+	for _, sid := range sessionIDs {
+		_, _ = d.db.Exec("DELETE FROM chat_messages WHERE session_id = ?", sid)
+		_, _ = d.db.Exec("UPDATE chat_sessions SET summary = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?", sid)
+	}
+	return nil
+}
+
+func (d *DB) UpdateSessionSummary(sessionID, summary string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("UPDATE chat_sessions SET summary = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", summary, sessionID)
+	return err
+}
+
+// --- Vector Embedding Helpers ---
+
+func Float32SliceToBytes(vec []float32) []byte {
+	if len(vec) == 0 {
+		return nil
+	}
+	buf := make([]byte, len(vec)*4)
+	for i, f := range vec {
+		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(f))
+	}
+	return buf
+}
+
+func BytesToFloat32Slice(buf []byte) []float32 {
+	if len(buf) < 4 {
+		return nil
+	}
+	n := len(buf) / 4
+	vec := make([]float32, n)
+	for i := 0; i < n; i++ {
+		bits := binary.LittleEndian.Uint32(buf[i*4:])
+		vec[i] = math.Float32frombits(bits)
+	}
+	return vec
+}
+
+// --- OmniRoute-Grade Memory System (SQLite + FTS5 + Vector) ---
+
+// UpsertMemory saves or updates a memory item into the 'memories' table and keeps FTS5 index in sync
+func (d *DB) UpsertMemory(item *MemoryItemRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if item.ID == "" {
+		item.ID = uuid.New().String()
+	}
+	if item.Type == "" {
+		item.Type = "factual"
+	}
+	if item.Scope == "" {
+		item.Scope = "user"
+	}
+	if item.Category == "" {
+		item.Category = "fact"
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now()
+	}
+	item.UpdatedAt = time.Now()
+
+	var metaJSON []byte
+	if item.Metadata != nil {
+		metaJSON, _ = json.Marshal(item.Metadata)
+	}
+	if len(metaJSON) == 0 {
+		metaJSON = []byte("{}")
+	}
+
+	embBytes := Float32SliceToBytes(item.Embedding)
+	isPromVal := 0
+	if item.IsPromoted {
+		isPromVal = 1
+	}
+
+	query := `
+		INSERT INTO memories (id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(scope, scope_id, key) DO UPDATE SET
+			type = excluded.type,
+			content = excluded.content,
+			category = excluded.category,
+			session_id = CASE WHEN excluded.session_id != '' THEN excluded.session_id ELSE memories.session_id END,
+			embedding = CASE WHEN excluded.embedding IS NOT NULL THEN excluded.embedding ELSE memories.embedding END,
+			metadata = excluded.metadata,
+			is_promoted = CASE WHEN excluded.is_promoted = 1 THEN 1 ELSE memories.is_promoted END,
+			updated_at = CURRENT_TIMESTAMP
+	`
+	_, err := d.db.Exec(query,
+		item.ID, item.Type, item.Scope, item.ScopeID, item.SessionID,
+		item.Key, item.Content, item.Category, embBytes, string(metaJSON),
+		isPromVal, item.AccessCount, item.CreatedAt, item.UpdatedAt)
+
+	return err
+}
+
+// GetMemory retrieves a single memory by its ID
+func (d *DB) GetMemory(id string) (*MemoryItemRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at FROM memories WHERE id = ?`
+	row := d.db.QueryRow(query, id)
+
+	var m MemoryItemRecord
+	var embBytes []byte
+	var metaStr string
+	var lastAcc sql.NullTime
+	var isProm int
+
+	if err := row.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &isProm, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		return nil, err
+	}
+	m.IsPromoted = (isProm == 1)
+	m.Embedding = BytesToFloat32Slice(embBytes)
+	if metaStr != "" {
+		_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
+	}
+	if lastAcc.Valid {
+		m.LastAccessedAt = &lastAcc.Time
+	}
+	return &m, nil
+}
+
+// GetMemoryByKey retrieves a single memory by (scope, scope_id, key)
+func (d *DB) GetMemoryByKey(scope, scopeID, key string) (*MemoryItemRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at FROM memories WHERE scope = ? AND scope_id = ? AND key = ?`
+	row := d.db.QueryRow(query, scope, scopeID, key)
+
+	var m MemoryItemRecord
+	var embBytes []byte
+	var metaStr string
+	var lastAcc sql.NullTime
+	var isProm int
+
+	if err := row.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &isProm, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		return nil, err
+	}
+	m.IsPromoted = (isProm == 1)
+	m.Embedding = BytesToFloat32Slice(embBytes)
+	if metaStr != "" {
+		_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
+	}
+	if lastAcc.Valid {
+		m.LastAccessedAt = &lastAcc.Time
+	}
+	return &m, nil
+}
+
+// ListMemoriesByScope lists memories filtered by scope, scope_id, and optional memType
+func (d *DB) ListMemoriesByScope(scope, scopeID string, memType string, limit int) ([]MemoryItemRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 100
+	}
+
+	var rows *sql.Rows
+	var err error
+
+	if memType != "" && strings.ToLower(memType) != "all" {
+		query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at 
+		          FROM memories WHERE scope = ? AND scope_id = ? AND type = ? ORDER BY updated_at DESC LIMIT ?`
+		rows, err = d.db.Query(query, scope, scopeID, memType, limit)
+	} else {
+		query := `SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at 
+		          FROM memories WHERE scope = ? AND scope_id = ? ORDER BY updated_at DESC LIMIT ?`
+		rows, err = d.db.Query(query, scope, scopeID, limit)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []MemoryItemRecord
+	for rows.Next() {
+		var m MemoryItemRecord
+		var embBytes []byte
+		var metaStr string
+		var lastAcc sql.NullTime
+		var isProm int
+
+		if err := rows.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &isProm, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		m.IsPromoted = (isProm == 1)
+		m.Embedding = BytesToFloat32Slice(embBytes)
+		if metaStr != "" {
+			_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
+		}
+		if lastAcc.Valid {
+			m.LastAccessedAt = &lastAcc.Time
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
+// CleanFTSQuery cleans user query string for safe FTS5 MATCH syntax
+func CleanFTSQuery(query string) string {
+	clean := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == ' ' {
+			return r
+		}
+		return ' '
+	}, query)
+	words := strings.Fields(clean)
+	if len(words) == 0 {
+		return ""
+	}
+	// Build prefix matching query for FTS5: word1* OR word2* ...
+	var terms []string
+	for _, w := range words {
+		if len(w) > 1 {
+			terms = append(terms, w+"*")
+		}
+	}
+	if len(terms) == 0 {
+		terms = words
+	}
+	return strings.Join(terms, " OR ")
+}
+
+// SearchMemoriesFTS5 searches memories using SQLite FTS5 BM25 full-text ranking
+func (d *DB) SearchMemoriesFTS5(scope, scopeID, query string, limit int) ([]MemoryItemRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 50
+	}
+
+	ftsQuery := CleanFTSQuery(query)
+	if ftsQuery == "" {
+		return d.ListMemoriesByScope(scope, scopeID, "", limit)
+	}
+
+	sqlQuery := `
+		SELECT m.id, m.type, m.scope, m.scope_id, m.session_id, m.key, m.content, m.category,
+		       m.embedding, m.metadata, m.is_promoted, m.access_count, m.last_accessed_at, m.created_at, m.updated_at,
+		       fts.rank
+		FROM memories_fts fts
+		JOIN memories m ON m.rowid = fts.rowid
+		WHERE memories_fts MATCH ?
+		  AND (m.scope = ? AND m.scope_id = ?)
+		ORDER BY fts.rank ASC
+		LIMIT ?
+	`
+	rows, err := d.db.Query(sqlQuery, ftsQuery, scope, scopeID, limit)
+	if err != nil {
+		// Fallback to LIKE if FTS expression has syntax error
+		pattern := "%" + strings.TrimSpace(query) + "%"
+		fallbackQuery := `
+			SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at, 0.0 as rank
+			FROM memories
+			WHERE scope = ? AND scope_id = ? AND (key LIKE ? OR content LIKE ? OR category LIKE ?)
+			ORDER BY updated_at DESC LIMIT ?
+		`
+		var fallbackErr error
+		rows, fallbackErr = d.db.Query(fallbackQuery, scope, scopeID, pattern, pattern, pattern, limit)
+		if fallbackErr != nil {
+			return nil, err
+		}
+	}
+	defer rows.Close()
+
+	var list []MemoryItemRecord
+	for rows.Next() {
+		var m MemoryItemRecord
+		var embBytes []byte
+		var metaStr string
+		var lastAcc sql.NullTime
+		var isProm int
+		var rank float64
+
+		if err := rows.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &isProm, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt, &rank); err != nil {
+			return nil, err
+		}
+		m.IsPromoted = (isProm == 1)
+		m.Embedding = BytesToFloat32Slice(embBytes)
+		if metaStr != "" {
+			_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
+		}
+		if lastAcc.Valid {
+			m.LastAccessedAt = &lastAcc.Time
+		}
+		// Convert BM25 negative rank to normalized 0..1 score (higher is better)
+		if rank < 0 {
+			m.Score = float32(1.0 / (1.0 + math.Abs(rank)*0.1))
+		} else {
+			m.Score = 0.5
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
+// ListCandidateMemoriesForScopes loads all memories for given scopes, respecting retention expiration
+func (d *DB) ListCandidateMemoriesForScopes(scopeFilter []struct{ Scope, ScopeID string }, retentionDays int) ([]MemoryItemRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if len(scopeFilter) == 0 {
+		return nil, nil
+	}
+
+	var clauses []string
+	var args []interface{}
+	for _, sf := range scopeFilter {
+		clauses = append(clauses, "(scope = ? AND scope_id = ?)")
+		args = append(args, sf.Scope, sf.ScopeID)
+	}
+
+	whereScopes := fmt.Sprintf("(%s)", strings.Join(clauses, " OR "))
+	var query string
+	if retentionDays > 0 {
+		query = fmt.Sprintf(`
+			SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at
+			FROM memories
+			WHERE %s AND (is_promoted = 1 OR COALESCE(last_accessed_at, updated_at, created_at) >= datetime('now', '-' || ? || ' days'))
+			ORDER BY updated_at DESC
+		`, whereScopes)
+		args = append(args, retentionDays)
+	} else {
+		query = fmt.Sprintf(`
+			SELECT id, type, scope, scope_id, session_id, key, content, category, embedding, metadata, is_promoted, access_count, last_accessed_at, created_at, updated_at
+			FROM memories
+			WHERE %s
+			ORDER BY updated_at DESC
+		`, whereScopes)
+	}
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []MemoryItemRecord
+	for rows.Next() {
+		var m MemoryItemRecord
+		var embBytes []byte
+		var metaStr string
+		var lastAcc sql.NullTime
+		var isProm int
+
+		if err := rows.Scan(&m.ID, &m.Type, &m.Scope, &m.ScopeID, &m.SessionID, &m.Key, &m.Content, &m.Category, &embBytes, &metaStr, &isProm, &m.AccessCount, &lastAcc, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		m.IsPromoted = (isProm == 1)
+		m.Embedding = BytesToFloat32Slice(embBytes)
+		if metaStr != "" {
+			_ = json.Unmarshal([]byte(metaStr), &m.Metadata)
+		}
+		if lastAcc.Valid {
+			m.LastAccessedAt = &lastAcc.Time
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
+// DeleteMemory deletes a memory record by ID
+func (d *DB) DeleteMemory(id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM memories WHERE id = ?", id)
+	return err
+}
+
+// DeleteMemoryByKey deletes a memory record by scope, scope_id, and key
+func (d *DB) DeleteMemoryByKey(scope, scopeID, key string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM memories WHERE scope = ? AND scope_id = ? AND key = ?", scope, scopeID, key)
+	return err
+}
+
+// ClearMemoriesByScope deletes all memories in a given scope and scopeID
+func (d *DB) ClearMemoriesByScope(scope, scopeID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM memories WHERE scope = ? AND scope_id = ?", scope, scopeID)
+	return err
+}
+
+// IncrementMemoryAccess increments access count and auto-promotes to permanent if threshold reached
+func (d *DB) IncrementMemoryAccess(id string, promotionThreshold int) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if promotionThreshold <= 0 {
+		promotionThreshold = 3
+	}
+	query := `
+		UPDATE memories 
+		SET access_count = access_count + 1, 
+		    last_accessed_at = CURRENT_TIMESTAMP,
+		    is_promoted = CASE WHEN (access_count + 1) >= ? THEN 1 ELSE is_promoted END
+		WHERE id = ?
+	`
+	_, err := d.db.Exec(query, promotionThreshold, id)
+	return err
+}
+
+// PromoteMemory marks a memory item as permanent (immune to retention expiration)
+func (d *DB) PromoteMemory(id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("UPDATE memories SET is_promoted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", id)
+	return err
+}
+
+// PruneExpiredMemories removes non-promoted memories that haven't been accessed within retentionDays
+func (d *DB) PruneExpiredMemories(retentionDays int) (int64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if retentionDays <= 0 {
+		return 0, nil
+	}
+	query := `
+		DELETE FROM memories 
+		WHERE is_promoted = 0 
+		  AND COALESCE(last_accessed_at, updated_at, created_at) < datetime('now', '-' || ? || ' days')
+	`
+	res, err := d.db.Exec(query, retentionDays)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// OptimizeMemoryStorage optimizes the SQLite FTS5 index and optimizes database
+func (d *DB) OptimizeMemoryStorage() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, _ = d.db.Exec("INSERT INTO memories_fts(memories_fts) VALUES('optimize')")
+	_, _ = d.db.Exec("PRAGMA optimize")
+	return nil
+}
+
+// CountMemories returns the count of active memories for a given scope and scope_id
+func (d *DB) CountMemories(scope, scopeID string) (int, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	var count int
+	err := d.db.QueryRow("SELECT COUNT(*) FROM memories WHERE scope = ? AND scope_id = ?", scope, scopeID).Scan(&count)
+	return count, err
+}
+
+// --- Legacy Memory Items Compatibility ---
+
+func (d *DB) AddMemoryItem(scope, scopeID, keyTag, content, category string) error {
+	return d.UpsertMemory(&MemoryItemRecord{
+		Scope:    scope,
+		ScopeID:  scopeID,
+		Key:      keyTag,
+		Content:  content,
+		Category: category,
+		Type:     "factual",
+	})
+}
+
+func (d *DB) UpsertMemoryItem(scope, scopeID, keyTag, content, category string) error {
+	return d.UpsertMemory(&MemoryItemRecord{
+		Scope:    scope,
+		ScopeID:  scopeID,
+		Key:      keyTag,
+		Content:  content,
+		Category: category,
+		Type:     "factual",
+	})
+}
+
+func (d *DB) ListMemoryItems(scope, scopeID string) ([]MemoryRecord, error) {
+	items, err := d.ListMemoriesByScope(scope, scopeID, "", 100)
+	if err != nil {
+		return nil, err
+	}
+	var records []MemoryRecord
+	for _, it := range items {
+		records = append(records, MemoryRecord{
+			ID:        it.ID,
+			Scope:     it.Scope,
+			ScopeID:   it.ScopeID,
+			KeyTag:    it.Key,
+			Content:   it.Content,
+			Category:  it.Category,
+			CreatedAt: it.CreatedAt,
+			UpdatedAt: it.UpdatedAt,
+		})
+	}
+	return records, nil
+}
+
+func (d *DB) SearchMemoryItems(scope, scopeID, query string) ([]MemoryRecord, error) {
+	items, err := d.SearchMemoriesFTS5(scope, scopeID, query, 50)
+	if err != nil {
+		return nil, err
+	}
+	var records []MemoryRecord
+	for _, it := range items {
+		records = append(records, MemoryRecord{
+			ID:        it.ID,
+			Scope:     it.Scope,
+			ScopeID:   it.ScopeID,
+			KeyTag:    it.Key,
+			Content:   it.Content,
+			Category:  it.Category,
+			CreatedAt: it.CreatedAt,
+			UpdatedAt: it.UpdatedAt,
+		})
+	}
+	return records, nil
+}
+
+func (d *DB) DeleteMemoryItem(id string) error {
+	return d.DeleteMemory(id)
+}
+
+// --- Proxy Node Operations ---
+
+func (d *DB) ListProxyNodes() ([]ProxyNodeRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT id, url, protocol, label, COALESCE(group_name, 'default'), is_active, fail_count, success_count, avg_latency_ms, last_checked, created_at, updated_at FROM proxy_nodes ORDER BY is_active DESC, group_name ASC, avg_latency_ms ASC, created_at ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ProxyNodeRecord
+	for rows.Next() {
+		var n ProxyNodeRecord
+		var activeInt int
+		if err := rows.Scan(&n.ID, &n.URL, &n.Protocol, &n.Label, &n.GroupName, &activeInt, &n.FailCount, &n.SuccessCount, &n.AvgLatencyMs, &n.LastChecked, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			return nil, err
+		}
+		n.IsActive = activeInt == 1
+		list = append(list, n)
+	}
+	return list, nil
+}
+
+func (d *DB) ListProxyNodesByGroup(group string) ([]ProxyNodeRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT id, url, protocol, label, COALESCE(group_name, 'default'), is_active, fail_count, success_count, avg_latency_ms, last_checked, created_at, updated_at FROM proxy_nodes WHERE group_name = ? ORDER BY is_active DESC, avg_latency_ms ASC", group)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ProxyNodeRecord
+	for rows.Next() {
+		var n ProxyNodeRecord
+		var activeInt int
+		if err := rows.Scan(&n.ID, &n.URL, &n.Protocol, &n.Label, &n.GroupName, &activeInt, &n.FailCount, &n.SuccessCount, &n.AvgLatencyMs, &n.LastChecked, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			return nil, err
+		}
+		n.IsActive = activeInt == 1
+		list = append(list, n)
+	}
+	return list, nil
+}
+
+func (d *DB) ListProxyGroups() ([]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query("SELECT DISTINCT COALESCE(group_name, 'default') FROM proxy_nodes ORDER BY group_name ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var groups []string
+	for rows.Next() {
+		var g string
+		if err := rows.Scan(&g); err == nil && g != "" {
+			groups = append(groups, g)
+		}
+	}
+	if len(groups) == 0 {
+		groups = []string{"default"}
+	}
+	return groups, nil
+}
+
+func (d *DB) GetProxyNode(id string) (*ProxyNodeRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var n ProxyNodeRecord
+	var activeInt int
+	err := d.db.QueryRow("SELECT id, url, protocol, label, COALESCE(group_name, 'default'), is_active, fail_count, success_count, avg_latency_ms, last_checked, created_at, updated_at FROM proxy_nodes WHERE id = ?", id).
+		Scan(&n.ID, &n.URL, &n.Protocol, &n.Label, &n.GroupName, &activeInt, &n.FailCount, &n.SuccessCount, &n.AvgLatencyMs, &n.LastChecked, &n.CreatedAt, &n.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	n.IsActive = activeInt == 1
+	return &n, nil
+}
+
+func (d *DB) SaveProxyNode(n *ProxyNodeRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if n.ID == "" {
+		n.ID = uuid.New().String()[:8]
+	}
+	if n.Protocol == "" {
+		n.Protocol = "http"
+	}
+	if n.GroupName == "" {
+		n.GroupName = "default"
+	}
+	activeInt := 0
+	if n.IsActive {
+		activeInt = 1
+	}
+
+	query := `
+	INSERT INTO proxy_nodes (id, url, protocol, label, group_name, is_active, fail_count, success_count, avg_latency_ms, last_checked, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(id) DO UPDATE SET
+		url=excluded.url,
+		protocol=excluded.protocol,
+		label=excluded.label,
+		group_name=excluded.group_name,
+		is_active=excluded.is_active,
+		fail_count=excluded.fail_count,
+		success_count=excluded.success_count,
+		avg_latency_ms=excluded.avg_latency_ms,
+		last_checked=excluded.last_checked,
+		updated_at=CURRENT_TIMESTAMP
+	`
+	_, err := d.db.Exec(query, n.ID, n.URL, n.Protocol, n.Label, n.GroupName, activeInt, n.FailCount, n.SuccessCount, n.AvgLatencyMs, n.LastChecked)
+	return err
+}
+
+func (d *DB) SaveBatchProxies(nodes []*ProxyNodeRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO proxy_nodes (id, url, protocol, label, group_name, is_active, fail_count, success_count, avg_latency_ms, last_checked, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(id) DO UPDATE SET
+			url=excluded.url,
+			protocol=excluded.protocol,
+			label=excluded.label,
+			group_name=excluded.group_name,
+			is_active=excluded.is_active,
+			updated_at=CURRENT_TIMESTAMP
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, n := range nodes {
+		if n.ID == "" {
+			n.ID = uuid.New().String()[:8]
+		}
+		if n.Protocol == "" {
+			n.Protocol = "http"
+		}
+		if n.GroupName == "" {
+			n.GroupName = "default"
+		}
+		activeInt := 0
+		if n.IsActive {
+			activeInt = 1
+		}
+		if _, err := stmt.Exec(n.ID, n.URL, n.Protocol, n.Label, n.GroupName, activeInt, n.FailCount, n.SuccessCount, n.AvgLatencyMs, n.LastChecked); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (d *DB) ToggleProxyGroup(group string, enable bool) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	activeInt := 0
+	if enable {
+		activeInt = 1
+	}
+	_, err := d.db.Exec("UPDATE proxy_nodes SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE group_name = ?", activeInt, group)
+	return err
+}
+
+func (d *DB) DeleteProxyGroup(group string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM proxy_nodes WHERE group_name = ?", group)
+	return err
+}
+
+func (d *DB) DeleteProxyNode(id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec("DELETE FROM proxy_nodes WHERE id = ?", id)
+	return err
+}
+
+func (d *DB) UpdateProxyStats(id string, success bool, latencyMs int) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	now := time.Now()
+	if success {
+		query := `
+		UPDATE proxy_nodes 
+		SET success_count = success_count + 1,
+		    avg_latency_ms = CASE WHEN avg_latency_ms = 0 THEN ? ELSE (avg_latency_ms * 3 + ?) / 4 END,
+		    last_checked = ?,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+		`
+		_, err := d.db.Exec(query, latencyMs, latencyMs, now, id)
+		return err
+	}
+
+	query := `
+	UPDATE proxy_nodes 
+	SET fail_count = fail_count + 1,
+	    last_checked = ?,
+	    updated_at = CURRENT_TIMESTAMP
+	WHERE id = ?
+	`
+	_, err := d.db.Exec(query, now, id)
+	return err
+}
+
+// --- Audit Log Operations ---
+
+func (d *DB) InsertAuditLog(l *AuditLogRecord) error {
+	d.mu.Lock()
+	if l.ID == "" {
+		l.ID = uuid.New().String()
+	}
+
+	if l.NumberOfTries <= 0 {
+		l.NumberOfTries = 1
+	}
+
+	query := `
+	INSERT INTO audit_logs (id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, thinking_tokens, total_tokens, tokens_saved, number_of_tries, proxy_used, latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message)
+	VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+	_, err := d.db.Exec(query, l.ID, l.ChannelType, l.ChannelID, l.ChatID, l.UserID, l.UserName, l.Provider, l.Model, l.PromptTokens, l.CompletionTokens, l.ThinkingTokens, l.TotalTokens, l.TokensSaved, l.NumberOfTries, l.ProxyUsed, l.LatencyMs, l.CostUSD, l.ToolsCalled, l.ClientRequest, l.SystemPrompt, l.FullRequestPayload, l.ProviderResponse, l.Status, l.ErrorMessage)
+	d.mu.Unlock()
+
+	if err == nil {
+		// Auto-rotate in background if needed
+		go func() {
+			maxLogs := 5000
+			if glob, err := d.GetPolicy("global", "system"); err == nil && glob != nil && glob.MaxAuditLogs > 0 {
+				maxLogs = glob.MaxAuditLogs
+			}
+			_, _ = d.RotateAuditLogs(maxLogs)
+		}()
+	}
+
+	return err
+}
+
+// RotateAuditLogs prunes oldest audit logs keeping only the most recent maxCount records
+func (d *DB) RotateAuditLogs(maxCount int) (int64, error) {
+	if maxCount <= 0 {
+		return 0, nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	query := `
+	DELETE FROM audit_logs 
+	WHERE id NOT IN (
+		SELECT id FROM audit_logs 
+		ORDER BY timestamp DESC, id DESC 
+		LIMIT ?
+	)
+	`
+	res, err := d.db.Exec(query, maxCount)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// CountAuditLogs returns total number of records in audit_logs table
+func (d *DB) CountAuditLogs() (int, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var count int
+	err := d.db.QueryRow("SELECT COUNT(*) FROM audit_logs").Scan(&count)
+	return count, err
+}
+
+// CountActiveSessions returns total number of chat sessions
+func (d *DB) CountActiveSessions() (int, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var count int
+	err := d.db.QueryRow("SELECT COUNT(*) FROM chat_sessions").Scan(&count)
+	return count, err
+}
+
+type StatsSummary struct {
+	TotalRequests    int
+	TotalTokens      int
+	TotalTokensSaved int
+	PromptTokens     int
+	CompTokens       int
+	TotalCost        float64
+	AvgLatencyMs     int
+	ErrorCount       int
+}
+
+func (d *DB) GetStatsSummary(since time.Time) (*StatsSummary, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	sinceStr := "1970-01-01 00:00:00"
+	if !since.IsZero() {
+		sinceStr = since.UTC().Format("2006-01-02 15:04:05")
+	}
+
+	query := `
+	SELECT 
+		COUNT(*),
+		COALESCE(SUM(total_tokens), 0),
+		COALESCE(SUM(tokens_saved), 0),
+		COALESCE(SUM(prompt_tokens), 0),
+		COALESCE(SUM(completion_tokens), 0),
+		COALESCE(SUM(cost_usd), 0.0),
+		COALESCE(AVG(latency_ms), 0.0),
+		COALESCE(SUM(CASE WHEN status != 'success' THEN 1 ELSE 0 END), 0)
+	FROM audit_logs
+	WHERE timestamp >= ?
+	`
+	row := d.db.QueryRow(query, sinceStr)
+	var s StatsSummary
+	var avgLatency float64
+	if err := row.Scan(&s.TotalRequests, &s.TotalTokens, &s.TotalTokensSaved, &s.PromptTokens, &s.CompTokens, &s.TotalCost, &avgLatency, &s.ErrorCount); err != nil {
+		return nil, err
+	}
+	s.AvgLatencyMs = int(avgLatency)
+	return &s, nil
+}
+
+func (d *DB) GetRecentAuditLogs(limit int) ([]AuditLogRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	query := "SELECT id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, COALESCE(thinking_tokens, 0), total_tokens, COALESCE(tokens_saved, 0), COALESCE(number_of_tries, 1), COALESCE(proxy_used, ''), latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message FROM audit_logs ORDER BY timestamp DESC LIMIT ?"
+	rows, err := d.db.Query(query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []AuditLogRecord
+	for rows.Next() {
+		var l AuditLogRecord
+		if err := rows.Scan(&l.ID, &l.Timestamp, &l.ChannelType, &l.ChannelID, &l.ChatID, &l.UserID, &l.UserName, &l.Provider, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.ThinkingTokens, &l.TotalTokens, &l.TokensSaved, &l.NumberOfTries, &l.ProxyUsed, &l.LatencyMs, &l.CostUSD, &l.ToolsCalled, &l.ClientRequest, &l.SystemPrompt, &l.FullRequestPayload, &l.ProviderResponse, &l.Status, &l.ErrorMessage); err != nil {
+			return nil, err
+		}
+		logs = append(logs, l)
+	}
+	return logs, nil
+}
+
+func (d *DB) GetAuditLogByID(id string) (*AuditLogRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	query := "SELECT id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, COALESCE(thinking_tokens, 0), total_tokens, COALESCE(tokens_saved, 0), COALESCE(number_of_tries, 1), COALESCE(proxy_used, ''), latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message FROM audit_logs WHERE id = ?"
+	row := d.db.QueryRow(query, id)
+
+	var l AuditLogRecord
+	if err := row.Scan(&l.ID, &l.Timestamp, &l.ChannelType, &l.ChannelID, &l.ChatID, &l.UserID, &l.UserName, &l.Provider, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.ThinkingTokens, &l.TotalTokens, &l.TokensSaved, &l.NumberOfTries, &l.ProxyUsed, &l.LatencyMs, &l.CostUSD, &l.ToolsCalled, &l.ClientRequest, &l.SystemPrompt, &l.FullRequestPayload, &l.ProviderResponse, &l.Status, &l.ErrorMessage); err != nil {
+		return nil, err
+	}
+	return &l, nil
+}
+
+// ListAuditLogsFiltered retrieves audit logs with filtering, search, and pagination
+func (d *DB) ListAuditLogsFiltered(channelType, status, search string, limit, offset int) ([]AuditLogRecord, int, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var whereClauses []string
+	var args []interface{}
+
+	if channelType != "" && channelType != "all" {
+		whereClauses = append(whereClauses, "channel_type = ?")
+		args = append(args, channelType)
+	}
+	if status != "" && status != "all" {
+		whereClauses = append(whereClauses, "status = ?")
+		args = append(args, status)
+	}
+	if search != "" {
+		whereClauses = append(whereClauses, "(user_name LIKE ? OR client_request LIKE ? OR provider_response LIKE ? OR model LIKE ?)")
+		pattern := "%" + search + "%"
+		args = append(args, pattern, pattern, pattern, pattern)
+	}
+
+	whereSQL := ""
+	if len(whereClauses) > 0 {
+		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	// Count total matching records
+	countQuery := "SELECT COUNT(*) FROM audit_logs " + whereSQL
+	var total int
+	if err := d.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	query := fmt.Sprintf("SELECT id, timestamp, channel_type, channel_id, chat_id, user_id, user_name, provider, model, prompt_tokens, completion_tokens, COALESCE(thinking_tokens, 0), total_tokens, COALESCE(tokens_saved, 0), COALESCE(number_of_tries, 1), COALESCE(proxy_used, ''), latency_ms, cost_usd, tools_called, client_request, system_prompt, full_request_payload, provider_response, status, error_message FROM audit_logs %s ORDER BY timestamp DESC LIMIT ? OFFSET ?", whereSQL)
+	queryArgs := append(args, limit, offset)
+
+	rows, err := d.db.Query(query, queryArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var logs []AuditLogRecord
+	for rows.Next() {
+		var l AuditLogRecord
+		if err := rows.Scan(&l.ID, &l.Timestamp, &l.ChannelType, &l.ChannelID, &l.ChatID, &l.UserID, &l.UserName, &l.Provider, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.ThinkingTokens, &l.TotalTokens, &l.TokensSaved, &l.NumberOfTries, &l.ProxyUsed, &l.LatencyMs, &l.CostUSD, &l.ToolsCalled, &l.ClientRequest, &l.SystemPrompt, &l.FullRequestPayload, &l.ProviderResponse, &l.Status, &l.ErrorMessage); err != nil {
+			return nil, 0, err
+		}
+		logs = append(logs, l)
+	}
+	return logs, total, nil
+}
+
+// --- System Settings ---
+
+func (d *DB) GetSetting(key string, fallback string) (string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var val string
+	err := d.db.QueryRow("SELECT value FROM system_settings WHERE key = ?", key).Scan(&val)
+	if err == sql.ErrNoRows {
+		return fallback, nil
+	}
+	if err != nil {
+		return fallback, err
+	}
+	return val, nil
+}
+
+func (d *DB) SetSetting(key, val string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	query := `
+	INSERT INTO system_settings (key, value, updated_at)
+	VALUES (?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP
+	`
+	_, err := d.db.Exec(query, key, val)
+	return err
+}
+
+// --- Response Cache Persistent Operations ---
+
+type ResponseCacheRecord struct {
+	CacheKey         string    `json:"cache_key"`
+	ChannelID        string    `json:"channel_id"`
+	Model            string    `json:"model"`
+	Prompt           string    `json:"prompt"`
+	ResponseText     string    `json:"response_text"`
+	ThinkingText     string    `json:"thinking_text"`
+	ToolsCalled      string    `json:"tools_called"`
+	MediaFiles       string    `json:"media_files"`
+	PromptTokens     int       `json:"prompt_tokens"`
+	CompletionTokens int       `json:"completion_tokens"`
+	ThinkingTokens   int       `json:"thinking_tokens"`
+	TotalTokens      int       `json:"total_tokens"`
+	CostUSD          float64   `json:"cost_usd"`
+	ExpiresAt        time.Time `json:"expires_at"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+func (d *DB) GetCachedResponse(key string) (*ResponseCacheRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	query := `
+	SELECT cache_key, channel_id, model, prompt, response_text, thinking_text, tools_called, media_files,
+	       prompt_tokens, completion_tokens, thinking_tokens, total_tokens, cost_usd, expires_at, created_at
+	FROM response_cache
+	WHERE cache_key = ? AND expires_at > CURRENT_TIMESTAMP
+	`
+	row := d.db.QueryRow(query, key)
+	var r ResponseCacheRecord
+	err := row.Scan(&r.CacheKey, &r.ChannelID, &r.Model, &r.Prompt, &r.ResponseText, &r.ThinkingText,
+		&r.ToolsCalled, &r.MediaFiles, &r.PromptTokens, &r.CompletionTokens, &r.ThinkingTokens,
+		&r.TotalTokens, &r.CostUSD, &r.ExpiresAt, &r.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (d *DB) SetCachedResponse(rec *ResponseCacheRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	query := `
+	INSERT INTO response_cache (cache_key, channel_id, model, prompt, response_text, thinking_text, tools_called, media_files,
+	                            prompt_tokens, completion_tokens, thinking_tokens, total_tokens, cost_usd, expires_at, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(cache_key) DO UPDATE SET
+		response_text = excluded.response_text,
+		thinking_text = excluded.thinking_text,
+		tools_called = excluded.tools_called,
+		media_files = excluded.media_files,
+		prompt_tokens = excluded.prompt_tokens,
+		completion_tokens = excluded.completion_tokens,
+		thinking_tokens = excluded.thinking_tokens,
+		total_tokens = excluded.total_tokens,
+		cost_usd = excluded.cost_usd,
+		expires_at = excluded.expires_at
+	`
+	_, err := d.db.Exec(query, rec.CacheKey, rec.ChannelID, rec.Model, rec.Prompt, rec.ResponseText, rec.ThinkingText,
+		rec.ToolsCalled, rec.MediaFiles, rec.PromptTokens, rec.CompletionTokens, rec.ThinkingTokens,
+		rec.TotalTokens, rec.CostUSD, rec.ExpiresAt)
+	return err
+}
+
+func (d *DB) DeleteExpiredCachedResponses() (int64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	res, err := d.db.Exec("DELETE FROM response_cache WHERE expires_at <= CURRENT_TIMESTAMP")
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (d *DB) FlushCachedResponses() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, err := d.db.Exec("DELETE FROM response_cache")
+	return err
+}
+
+// --- Model Catalog Operations ---
+
+func (d *DB) UpsertModelCatalog(records []ModelCatalogRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO model_catalog (
+			model_id, raw_id, display_name, provider_family, modality,
+			supports_vision, supports_audio_in, supports_audio_out,
+			supports_tools, supports_reasoning, context_length, is_custom, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(model_id) DO UPDATE SET
+			raw_id=excluded.raw_id,
+			display_name=excluded.display_name,
+			provider_family=excluded.provider_family,
+			modality=excluded.modality,
+			supports_vision=excluded.supports_vision,
+			supports_audio_in=excluded.supports_audio_in,
+			supports_audio_out=excluded.supports_audio_out,
+			supports_tools=excluded.supports_tools,
+			supports_reasoning=excluded.supports_reasoning,
+			context_length=excluded.context_length,
+			updated_at=CURRENT_TIMESTAMP
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, r := range records {
+		visInt := 0
+		if r.SupportsVision {
+			visInt = 1
+		}
+		audInInt := 0
+		if r.SupportsAudioIn {
+			audInInt = 1
+		}
+		audOutInt := 0
+		if r.SupportsAudioOut {
+			audOutInt = 1
+		}
+		toolsInt := 0
+		if r.SupportsTools {
+			toolsInt = 1
+		}
+		reasInt := 0
+		if r.SupportsReasoning {
+			reasInt = 1
+		}
+		customInt := 0
+		if r.IsCustom {
+			customInt = 1
+		}
+
+		_, err = stmt.Exec(
+			r.ModelID, r.RawID, r.DisplayName, r.ProviderFamily, r.Modality,
+			visInt, audInInt, audOutInt, toolsInt, reasInt, r.ContextLength, customInt,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (d *DB) GetModelCatalog() (map[string]ModelCatalogRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query(`
+		SELECT model_id, raw_id, display_name, provider_family, modality,
+		       supports_vision, supports_audio_in, supports_audio_out,
+		       supports_tools, supports_reasoning, context_length, is_custom, updated_at
+		FROM model_catalog
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	res := make(map[string]ModelCatalogRecord)
+	for rows.Next() {
+		var r ModelCatalogRecord
+		var vis, audIn, audOut, tools, reas, custom int
+		if err := rows.Scan(
+			&r.ModelID, &r.RawID, &r.DisplayName, &r.ProviderFamily, &r.Modality,
+			&vis, &audIn, &audOut, &tools, &reas, &r.ContextLength, &custom, &r.UpdatedAt,
+		); err != nil {
+			continue
+		}
+		r.SupportsVision = vis == 1
+		r.SupportsAudioIn = audIn == 1
+		r.SupportsAudioOut = audOut == 1
+		r.SupportsTools = tools == 1
+		r.SupportsReasoning = reas == 1
+		r.IsCustom = custom == 1
+		res[r.ModelID] = r
+	}
+	return res, nil
+}
+
+func (d *DB) SetFallbackVisionModel(scope, scopeID, model string) error {
+	p := d.GetOrCreatePolicy(scope, scopeID)
+	p.FallbackVisionModel = model
+	return d.SavePolicy(p)
+}
+
+func (d *DB) SetFallbackAudioModel(scope, scopeID, model string) error {
+	p := d.GetOrCreatePolicy(scope, scopeID)
+	p.FallbackAudioModel = model
+	return d.SavePolicy(p)
+}
+

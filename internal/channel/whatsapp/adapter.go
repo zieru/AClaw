@@ -1,0 +1,1293 @@
+package whatsapp
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"goassistant/internal/agent"
+	"goassistant/internal/config"
+	"goassistant/internal/storage"
+	"goassistant/internal/tokensaver"
+	"goassistant/internal/util"
+	"goassistant/internal/version"
+	"goassistant/internal/waformat"
+
+	"github.com/skip2/go-qrcode"
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store"
+	waTypes "go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
+)
+
+// NativeAdapter manages a native WhatsApp Multi-Device connection
+type NativeAdapter struct {
+	channelID      string
+	name           string
+	device         *store.Device
+	client         *whatsmeow.Client
+	orchestrator   *agent.Orchestrator
+	db             *storage.DB
+	settings       WhatsAppSettings
+	mu             sync.RWMutex
+	activeTasks    sync.Map // chatID -> context.CancelFunc
+	lastQRBytes    []byte
+	lastQRStr      string
+	isPairing      bool
+	qrChan         <-chan whatsmeow.QRChannelItem
+	cancelQR       context.CancelFunc
+	onLoginSuccess func()
+}
+
+func NewNativeAdapter(channelID, name string, device *store.Device, settings WhatsAppSettings, orch *agent.Orchestrator, db *storage.DB) *NativeAdapter {
+	store.SetOSInfo("Chrome (Windows)", [3]uint32{128, 0, 0})
+
+	adapter := &NativeAdapter{
+		channelID:    channelID,
+		name:         name,
+		device:       device,
+		settings:     settings,
+		orchestrator: orch,
+		db:           db,
+	}
+
+	logger := waLog.Stdout("WA-"+channelID, "WARN", true)
+	adapter.client = whatsmeow.NewClient(device, logger)
+	adapter.client.AddEventHandler(adapter.handleEvent)
+
+	return adapter
+}
+
+func (a *NativeAdapter) ID() string   { return a.channelID }
+func (a *NativeAdapter) Type() string { return "whatsapp" }
+func (a *NativeAdapter) Name() string { return a.name }
+
+func (a *NativeAdapter) GetSettings() WhatsAppSettings {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.settings
+}
+
+func (a *NativeAdapter) UpdateSettings(s WhatsAppSettings) error {
+	a.mu.Lock()
+	a.settings = s
+	a.mu.Unlock()
+	return a.saveSettings()
+}
+
+func (a *NativeAdapter) saveSettings() error {
+	a.mu.RLock()
+	stBytes, _ := json.Marshal(a.settings)
+	a.mu.RUnlock()
+
+	ch, err := a.db.GetChannel(a.channelID)
+	if err != nil || ch == nil {
+		return err
+	}
+	ch.SettingsJSON = string(stBytes)
+	if a.device.ID != nil {
+		ch.Identifier = a.device.ID.String()
+	}
+	return a.db.SaveChannel(ch)
+}
+
+func (a *NativeAdapter) IsConnected() bool {
+	return a.client != nil && a.client.IsConnected()
+}
+
+func (a *NativeAdapter) IsLoggedIn() bool {
+	return a.client != nil && a.client.IsLoggedIn()
+}
+
+func (a *NativeAdapter) GetLastQR() ([]byte, string) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.lastQRBytes, a.lastQRStr
+}
+
+func (a *NativeAdapter) Start(ctx context.Context) error {
+	if a.client == nil {
+		return fmt.Errorf("client whatsmeow belum diinisialisasi")
+	}
+
+	if a.client.Store.ID == nil {
+		// Device not logged in yet, start QR channel
+		a.StartPairing()
+	} else {
+		// Connect directly
+		if err := a.client.Connect(); err != nil {
+			log.Printf("⚠️ [Channel-WA] Gagal menghubungkan WhatsApp '%s': %v", a.name, err)
+			return err
+		}
+		log.Printf("🟢 [Channel-WA] WhatsApp '%s' terhubung (JID: %s)", a.name, a.client.Store.ID.String())
+	}
+	return nil
+}
+
+func (a *NativeAdapter) Stop() error {
+	if a.cancelQR != nil {
+		a.cancelQR()
+	}
+	if a.client != nil {
+		a.client.Disconnect()
+	}
+	return nil
+}
+
+func (a *NativeAdapter) SetOnLoginSuccess(cb func()) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.onLoginSuccess = cb
+}
+
+// StartPairing initiates the QR code generation loop
+// StartPairing initiates the QR code generation loop
+func (a *NativeAdapter) StartPairing() error {
+	a.mu.Lock()
+	if a.cancelQR != nil {
+		a.cancelQR()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.cancelQR = cancel
+	a.isPairing = true
+	a.mu.Unlock()
+
+	// Ensure client is connected before requesting QR channel
+	if !a.client.IsConnected() {
+		if err := a.client.Connect(); err != nil {
+			return fmt.Errorf("gagal menghubungkan ke server WhatsApp: %w", err)
+		}
+	}
+
+	qrChan, err := a.client.GetQRChannel(ctx)
+	if err != nil {
+		return fmt.Errorf("gagal mendapatkan QR channel: %w", err)
+	}
+
+	go func() {
+		for item := range qrChan {
+			if item.Event == "code" {
+				// Generate QR Code PNG with good resolution & border
+				pngBytes, err := qrcode.Encode(item.Code, qrcode.Medium, 400)
+				a.mu.Lock()
+				if err == nil {
+					a.lastQRBytes = pngBytes
+				}
+				a.lastQRStr = item.Code
+				a.mu.Unlock()
+				log.Printf("📱 [Channel-WA] QR Code baru dihasilkan untuk channel '%s'", a.name)
+			} else if item.Event == "success" {
+				a.mu.Lock()
+				a.isPairing = false
+				a.lastQRBytes = nil
+				a.lastQRStr = ""
+				cb := a.onLoginSuccess
+				a.mu.Unlock()
+
+				log.Printf("🎉 [Channel-WA] WhatsApp '%s' BERHASIL TERHUBUNG!", a.name)
+				if a.client.Store.ID != nil {
+					a.mu.Lock()
+					a.settings.JID = a.client.Store.ID.String()
+					a.mu.Unlock()
+					_ = a.saveSettings()
+				}
+				if cb != nil {
+					go cb()
+				}
+				return
+			} else if item.Event == "timeout" {
+				log.Printf("⏳ [Channel-WA] QR Code timeout untuk channel '%s'", a.name)
+			}
+		}
+	}()
+
+	return nil
+}
+
+// PairPhone requests an 8-character pairing code for linking via phone number
+func (a *NativeAdapter) PairPhone(phone string) (string, error) {
+	if !a.client.IsConnected() {
+		if err := a.client.Connect(); err != nil {
+			return "", fmt.Errorf("gagal menghubungkan ke WhatsApp: %w", err)
+		}
+	}
+	cleanPhone := strings.TrimPrefix(strings.TrimSpace(phone), "+")
+	cleanPhone = strings.ReplaceAll(cleanPhone, " ", "")
+	cleanPhone = strings.ReplaceAll(cleanPhone, "-", "")
+
+	code, err := a.client.PairPhone(context.Background(), cleanPhone, true, whatsmeow.PairClientChrome, "Chrome (Windows)")
+	if err != nil {
+		return "", fmt.Errorf("gagal meminta pairing code: %w", err)
+	}
+	return code, nil
+}
+
+// Logout unlinks and deletes session
+func (a *NativeAdapter) Logout(ctx context.Context) error {
+	if a.client != nil && a.client.IsLoggedIn() {
+		_ = a.client.Logout(ctx)
+	}
+	a.mu.Lock()
+	a.settings.JID = ""
+	a.settings.PushName = ""
+	a.lastQRBytes = nil
+	a.lastQRStr = ""
+	a.mu.Unlock()
+	return a.saveSettings()
+}
+
+// SendMessage sends an outgoing text message to a WhatsApp number/JID
+func (a *NativeAdapter) SendMessage(targetID, text string) error {
+	if a.client == nil || !a.client.IsConnected() {
+		return fmt.Errorf("whatsapp client '%s' belum terkoneksi", a.name)
+	}
+
+	targetJID, err := parseJID(targetID)
+	if err != nil {
+		return fmt.Errorf("invalid WhatsApp JID %s: %w", targetID, err)
+	}
+
+	formattedText := waformat.MarkdownToWhatsApp(text)
+	if formattedText == "" {
+		formattedText = text
+	}
+
+	msg := &waE2E.Message{
+		Conversation: proto.String(formattedText),
+	}
+
+	_, err = a.client.SendMessage(context.Background(), targetJID, msg)
+	return err
+}
+
+// SendFile uploads and sends an image or document attachment to a WhatsApp number/JID
+func (a *NativeAdapter) SendFile(targetID, filePath, caption string) error {
+	if a.client == nil || !a.client.IsConnected() {
+		return fmt.Errorf("whatsapp client '%s' belum terkoneksi", a.name)
+	}
+
+	targetJID, err := parseJID(targetID)
+	if err != nil {
+		return fmt.Errorf("invalid WhatsApp JID %s: %w", targetID, err)
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("gagal membaca file %s: %w", filePath, err)
+	}
+
+	formattedCaption := waformat.MarkdownToWhatsApp(caption)
+
+	mimeType := http.DetectContentType(data)
+	ext := strings.ToLower(filepath.Ext(filePath))
+	isImage := strings.HasPrefix(mimeType, "image/") || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp"
+
+	if isImage {
+		uploaded, err := a.client.Upload(context.Background(), data, whatsmeow.MediaImage)
+		if err != nil {
+			return fmt.Errorf("gagal upload gambar WhatsApp: %w", err)
+		}
+		msg := &waE2E.Message{
+			ImageMessage: &waE2E.ImageMessage{
+				Caption:       proto.String(formattedCaption),
+				Mimetype:      proto.String(mimeType),
+				URL:           &uploaded.URL,
+				DirectPath:    &uploaded.DirectPath,
+				MediaKey:      uploaded.MediaKey,
+				FileEncSHA256: uploaded.FileEncSHA256,
+				FileSHA256:    uploaded.FileSHA256,
+				FileLength:    proto.Uint64(uint64(len(data))),
+			},
+		}
+		_, err = a.client.SendMessage(context.Background(), targetJID, msg)
+		return err
+	}
+
+	uploaded, err := a.client.Upload(context.Background(), data, whatsmeow.MediaDocument)
+	if err != nil {
+		return fmt.Errorf("gagal upload dokumen WhatsApp: %w", err)
+	}
+	fileName := filepath.Base(filePath)
+	msg := &waE2E.Message{
+		DocumentMessage: &waE2E.DocumentMessage{
+			Caption:       proto.String(formattedCaption),
+			Title:         proto.String(fileName),
+			FileName:      proto.String(fileName),
+			Mimetype:      proto.String(mimeType),
+			URL:           &uploaded.URL,
+			DirectPath:    &uploaded.DirectPath,
+			MediaKey:      uploaded.MediaKey,
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    proto.Uint64(uint64(len(data))),
+		},
+	}
+	_, err = a.client.SendMessage(context.Background(), targetJID, msg)
+	return err
+}
+
+func parseJID(target string) (waTypes.JID, error) {
+	if strings.Contains(target, "@") {
+		parsed, err := waTypes.ParseJID(target)
+		if err != nil {
+			return parsed, err
+		}
+		// For standard user messages, ensure device part is cleared (Server requires standard user JID)
+		if parsed.Server == waTypes.DefaultUserServer && parsed.Device != 0 {
+			parsed.Device = 0
+		}
+		return parsed, nil
+	}
+	// Default to standard user JID
+	cleanNum := strings.TrimPrefix(target, "+")
+	if colonIdx := strings.Index(cleanNum, ":"); colonIdx != -1 {
+		cleanNum = cleanNum[:colonIdx]
+	}
+	return waTypes.NewJID(cleanNum, waTypes.DefaultUserServer), nil
+}
+
+// handleEvent processes incoming events from whatsmeow
+func (a *NativeAdapter) handleEvent(evt interface{}) {
+	switch v := evt.(type) {
+	case *events.Message:
+		a.handleMessage(v)
+	case *events.Connected:
+		log.Printf("🟢 [Channel-WA] WhatsApp '%s' tersambung ke server.", a.name)
+		if a.client.Store.ID != nil {
+			a.mu.Lock()
+			a.settings.JID = a.client.Store.ID.String()
+			a.mu.Unlock()
+			_ = a.saveSettings()
+		}
+	case *events.LoggedOut:
+		log.Printf("🔴 [Channel-WA] WhatsApp '%s' LOGGED OUT dari perangkat.", a.name)
+		a.mu.Lock()
+		a.settings.JID = ""
+		a.mu.Unlock()
+		_ = a.saveSettings()
+	}
+}
+
+// handleMessage evaluates policies and routes incoming messages to Orchestrator
+func (a *NativeAdapter) handleMessage(msg *events.Message) {
+	if msg.Info.IsFromMe {
+		return // Ignore own messages
+	}
+
+	chatJID := msg.Info.Chat
+	senderJID := msg.Info.Sender
+	isGroup := msg.Info.IsGroup
+
+	chatID := chatJID.String()
+
+	// Resolve real JIDs (in case WhatsApp uses LID instead of Phone Number)
+	realSenderJID := a.resolveRealJID(senderJID)
+	realChatJID := a.resolveRealJID(chatJID)
+
+	senderID := realSenderJID.User
+	if senderID == "" {
+		senderID = senderJID.User
+	}
+	if senderID == "" {
+		senderID = senderJID.String()
+	}
+	senderName := msg.Info.PushName
+	if senderName == "" {
+		senderName = senderID
+	}
+
+	// 1. Extract Text
+	text := extractMessageText(msg.Message)
+	cleanText := strings.TrimSpace(text)
+	lowerText := strings.ToLower(cleanText)
+
+	log.Printf("📩 [Channel-WA] Pesan masuk dari %s (%s) [Resolved: %s] [Group: %v]: '%s'", senderJID.String(), chatID, realSenderJID.String(), isGroup, cleanText)
+
+	// 2. Policy Checks
+	a.mu.RLock()
+	st := a.settings
+	a.mu.RUnlock()
+
+	if isGroup {
+		// Group Policy
+		if st.GroupPolicy == GroupPolicyBlock {
+			log.Printf("🛡️ [Channel-WA] Pesan grup %s diabaikan (Policy: Block Groups)", chatID)
+			return // Group messages blocked
+		}
+		if st.GroupPolicy == GroupPolicyWhitelist {
+			allowed := false
+			for _, g := range st.AllowedGroups {
+				cleanG := strings.TrimSpace(g)
+				if strings.EqualFold(cleanG, chatID) || strings.EqualFold(cleanG, chatJID.User) || strings.EqualFold(cleanG, realChatJID.User) || strings.Contains(chatID, cleanG) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				log.Printf("🛡️ [Channel-WA] Pesan grup %s diabaikan karena tidak ada di Whitelist Groups", chatID)
+				return // Group not in whitelist
+			}
+		}
+
+		// Mention Policy
+		if st.MentionPolicy == MentionPolicyRequire {
+			if !a.isBotMentionedOrReplied(msg) {
+				return // Silently ignore if not mentioned or replied
+			}
+		}
+	} else {
+		// DM Policy
+		if st.DMPolicy == DMPolicyBlock {
+			log.Printf("🛡️ [Channel-WA] Pesan DM dari %s diabaikan (Policy: Block All DM)", senderJID.String())
+			return // DM blocked
+		}
+		if st.DMPolicy == DMPolicyTrusted {
+			trusted := false
+			for _, num := range st.TrustedNumbers {
+				if a.isPhoneMatching(num, senderJID, chatJID) {
+					trusted = true
+					break
+				}
+			}
+			if !trusted {
+				log.Printf("🛡️ [Channel-WA] Pesan DM dari %s (%s) [Resolved: %s] diabaikan karena tidak terdaftar di Trusted List (%v)", senderJID.String(), chatID, realSenderJID.String(), st.TrustedNumbers)
+				return // Sender not in trusted list
+			}
+		}
+	}
+
+	// 2b. GraPARI Zero-LLM Authorization Interceptor (Strictly Zero-Token for Unregistered Users)
+	if st.GrapariOnly {
+		dataDir := "./data"
+		if cfg := config.Get(); cfg != nil && cfg.Server.DataDir != "" {
+			dataDir = cfg.Server.DataDir
+		}
+		gdb, gErr := storage.OpenGrapariDB(dataDir, a.channelID, a.name)
+		if gErr == nil && gdb != nil {
+			// Strip device suffix (e.g. :73) for canonical JID
+			canonicalSenderJID := realSenderJID.ToNonAD()
+			if canonicalSenderJID.IsEmpty() {
+				canonicalSenderJID = senderJID.ToNonAD()
+			}
+			targetJID := canonicalSenderJID.String()
+			if targetJID == "" {
+				targetJID = realSenderJID.String()
+			}
+			if targetJID == "" {
+				targetJID = senderJID.String()
+			}
+
+			userPhone := normalizePhone(realSenderJID.User)
+			if userPhone == "" {
+				userPhone = normalizePhone(senderID)
+			}
+			if userPhone == "" {
+				userPhone = realSenderJID.User
+			}
+
+			existingUser, _ := gdb.GetUser(targetJID)
+			if existingUser == nil && userPhone != "" {
+				// Fallback lookup by phone number
+				existingUser, _ = gdb.GetUser(userPhone)
+			}
+			if existingUser == nil && realSenderJID.String() != "" {
+				existingUser, _ = gdb.GetUser(realSenderJID.String())
+			}
+
+			// If user is not AUTHORIZED, intercept with Zero-LLM wizard
+			if existingUser == nil || existingUser.Status != storage.GrapariStatusAuthorized {
+				handled, replyText, completedUser := GetGrapariAuthWizard().HandleIncomingMessage(
+					targetJID, userPhone, senderName, cleanText, existingUser,
+				)
+				if handled {
+					if completedUser != nil {
+						_ = gdb.UpsertUser(completedUser)
+						// Notify Telegram Awesome Leap Bot group if notifier registered
+						if gAuthNotifier != nil {
+							go func(cu *storage.GrapariUser) {
+								_ = gAuthNotifier(a.channelID, a.name, cu)
+							}(completedUser)
+						}
+					}
+					if replyText != "" {
+						go func() {
+							_ = a.SendMessage(chatID, replyText)
+						}()
+					}
+					return // INTERCEPTED: Stop further execution, do NOT pass to LLM
+				}
+			}
+		}
+	}
+
+	// 3. Handle Interactive Commands
+	if a.handleTopicCommand(chatID, senderID, cleanText, lowerText) {
+		return
+	}
+
+	if lowerText == "/stop" || lowerText == "!stop" || lowerText == "/cancel" || lowerText == "stop" || lowerText == "batal" {
+		if cancelVal, loaded := a.activeTasks.LoadAndDelete(chatID); loaded {
+			if cancel, ok := cancelVal.(context.CancelFunc); ok {
+				cancel()
+			}
+			go func() {
+				_ = a.SendMessage(chatID, "🛑 *PROSES DIHENTIKAN*\n\nRespon AI yang sedang diproses telah dibatalkan.")
+			}()
+		} else {
+			go func() {
+				_ = a.SendMessage(chatID, "ℹ️ Tidak ada proses respon AI yang sedang berjalan.")
+			}()
+		}
+		return
+	}
+
+	if lowerText == "/new" || lowerText == "/reset" || lowerText == "!reset" || lowerText == "/clear" {
+		if cancelVal, loaded := a.activeTasks.LoadAndDelete(chatID); loaded {
+			if cancel, ok := cancelVal.(context.CancelFunc); ok {
+				cancel()
+			}
+		}
+		_ = a.db.ClearActiveSessionMessages(a.channelID, chatID)
+		go func() {
+			_ = a.SendMessage(chatID, "✨ *SESI BARU DIMULAI*\n\nRiwayat dan konteks percakapan topik aktif telah direset.\nSilakan ajukan pertanyaan atau instruksi baru!")
+		}()
+		return
+	}
+
+	if lowerText == "/retry" || lowerText == "!retry" || lowerText == "retry" || lowerText == "coba lagi" {
+		lastPrompt := a.orchestrator.GetLastPrompt(a.channelID, chatID, senderID)
+		if strings.TrimSpace(lastPrompt) == "" {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ *Tidak ada pesan sebelumnya yang dapat dicoba lagi.*\nSilakan kirimkan pertanyaan atau instruksi baru Anda.")
+			}()
+			return
+		}
+		cleanText = lastPrompt
+		log.Printf("🔄 [Channel-WA] Menjalankan retry untuk pesan sebelumnya dari %s: '%s'", senderID, cleanText)
+	}
+
+	if lowerText == "/help" || lowerText == "!help" {
+		go func() {
+			helpText := "👋 *PANDUAN ASISTEN AI (WHATSAPP)*\n\n" +
+				"Silakan kirimkan pertanyaan atau perintah langsung di chat ini.\n\n" +
+				"📂 *Pengelolaan Multi-Topik:*\n" +
+				"• */topic* - Daftar & status topik percakapan\n" +
+				"• */newtopic [nama]* - Buat & aktifkan topik baru\n" +
+				"• */switchtopic <no/ID>* - Pindah ke topik lain\n" +
+				"• */renametopic <nama>* - Ganti nama topik aktif\n" +
+				"• */deltopic <no/ID>* - Hapus topik obrolan\n" +
+				"• */resettopic* - Reset riwayat topik aktif\n\n" +
+				"📌 *Perintah Umum:*\n" +
+				"• */retry* - Coba lagi permintaan atau pesan terakhir\n" +
+				"• */new* / */reset* - Reset sesi percakapan topik aktif\n" +
+				"• */stop* - Batalkan/hentikan proses respon AI\n" +
+				"• */status* - Cek status sesi & kebijakan limit\n" +
+				"• */help* - Buka panduan ini"
+			_ = a.SendMessage(chatID, helpText)
+		}()
+		return
+	}
+
+	if lowerText == "/status" || lowerText == "!status" {
+		go func() {
+			session, _ := a.db.GetOrCreateSession(a.channelID, chatID, senderID)
+			msgCount := 0
+			if session != nil {
+				msgCount, _ = a.db.CountSessionMessages(session.ID)
+			}
+			policy := a.db.GetResolvedPolicy(a.channelID, chatID)
+
+			var mem runtime.MemStats
+			runtime.ReadMemStats(&mem)
+			allocMB := float64(mem.Alloc) / (1024 * 1024)
+			sysMB := float64(mem.Sys) / (1024 * 1024)
+
+			tsStats := tokensaver.GetStats()
+			savedTokens := tsStats.TotalTokensSaved.Load()
+			origTokens := tsStats.TotalOriginalTokens.Load()
+			var pctSaved float64
+			if origTokens > 0 {
+				pctSaved = (float64(savedTokens) / float64(origTokens)) * 100
+			}
+
+			modelInfo := "Default / Auto Router"
+			if policy.ModelOverride != "" {
+				modelInfo = fmt.Sprintf("`%s`", policy.ModelOverride)
+			}
+
+			totalSessions, _ := a.db.CountActiveSessions()
+
+			statusText := fmt.Sprintf("⚡ *STATUS SISTEM & ASISTEN AI (WHATSAPP)*\n\n"+
+				"🖥️ *Sistem & Runtime:*\n"+
+				"• Versi: `%s`\n"+
+				"• RAM (Heap/Sys): `%.2f MB / %.2f MB`\n"+
+				"• Goroutines: `%d aktif` | Cores: `%d CPU`\n\n"+
+				"🤖 *AI Engine & Obrolan:*\n"+
+				"• Channel: *%s* (`%s`)\n"+
+				"• Chat ID: `%s`\n"+
+				"• Sesi Percakapan: `%d pesan` (Maks: `%d`)\n"+
+				"• Model Aktif: %s\n"+
+				"• Total Sesi Aktif: `%d sesi`\n\n"+
+				"🌿 *Token Saver:*\n"+
+				"• Mode: `%s`\n"+
+				"• Total Hemat: `%d tokens` (`%.1f%%` efisiensi)\n\n"+
+				"💡 *Perintah Cepat:*\n"+
+				"• */retry* - Coba lagi permintaan terakhir yang gagal\n"+
+				"• */new* - Reset sesi & mulai percakapan baru\n"+
+				"• */stop* - Batalkan proses respon yang sedang berjalan\n"+
+				"• */help* - Buka panduan bantuan",
+				version.GetFullVersion(), allocMB, sysMB, runtime.NumGoroutine(), runtime.NumCPU(),
+				a.name, a.channelID, chatID, msgCount, policy.MaxHistoryTurns, modelInfo, totalSessions,
+				policy.TokenSaverMode, savedTokens, pctSaved)
+			_ = a.SendMessage(chatID, statusText)
+		}()
+		return
+	}
+
+	// 3. Extract Media & Images (WhatsApp Vision Support)
+	var attachedImages []string
+	var attachedFileMB float64
+	if a.client != nil && msg.Message != nil {
+		if imgMsg := msg.Message.GetImageMessage(); imgMsg != nil {
+			if data, err := a.client.Download(context.Background(), imgMsg); err == nil && len(data) > 0 {
+				optBytes, mime, _ := util.OptimizeImageBytes(data, util.DefaultMaxDimension, util.DefaultJPEGQuality)
+				attachedFileMB = float64(len(optBytes)) / (1024 * 1024)
+				attachedImages = append(attachedImages, fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(optBytes)))
+				if cleanText == "" {
+					cleanText = "Tolong analisis dan jelaskan gambar/foto terlampir."
+				}
+				log.Printf("📷 [Channel-WA] Berhasil mengunduh & mengoptimalkan foto terlampir (%.2f MB, base64 len: %d)", attachedFileMB, len(attachedImages[0]))
+			} else if err != nil {
+				log.Printf("⚠️ [Channel-WA] Gagal mengunduh gambar pesan: %v", err)
+			}
+		} else if docMsg := msg.Message.GetDocumentMessage(); docMsg != nil {
+			ext := strings.ToLower(filepath.Ext(docMsg.GetFileName()))
+			mime := docMsg.GetMimetype()
+			if strings.HasPrefix(mime, "image/") || ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp" {
+				if data, err := a.client.Download(context.Background(), docMsg); err == nil && len(data) > 0 {
+					optBytes, optMime, _ := util.OptimizeImageBytes(data, util.DefaultMaxDimension, util.DefaultJPEGQuality)
+					attachedFileMB = float64(len(optBytes)) / (1024 * 1024)
+					attachedImages = append(attachedImages, fmt.Sprintf("data:%s;base64,%s", optMime, base64.StdEncoding.EncodeToString(optBytes)))
+					if cleanText == "" {
+						cleanText = fmt.Sprintf("Tolong analisis berkas gambar terlampir: %s", docMsg.GetFileName())
+					}
+					log.Printf("📎 [Channel-WA] Berhasil mengunduh dokumen gambar %s (%.2f MB)", docMsg.GetFileName(), attachedFileMB)
+				} else if err != nil {
+					log.Printf("⚠️ [Channel-WA] Gagal mengunduh dokumen gambar: %v", err)
+				}
+			}
+		}
+	}
+
+	if cleanText == "" && len(attachedImages) == 0 {
+		return
+	}
+
+	// 4. Process Message through Orchestrator
+	go func() {
+		if cancelVal, loaded := a.activeTasks.LoadAndDelete(chatID); loaded {
+			if cancel, ok := cancelVal.(context.CancelFunc); ok {
+				cancel()
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(),
+			time.Duration(config.Get().Timeouts.HandlerSeconds)*time.Second)
+		a.activeTasks.Store(chatID, cancel)
+		defer func() {
+			a.activeTasks.Delete(chatID)
+			cancel()
+		}()
+
+		// Continuous typing presence indicator
+		presenceStop := make(chan struct{})
+		if a.client != nil && a.client.IsConnected() {
+			_ = a.client.SendChatPresence(context.Background(), chatJID, waTypes.ChatPresenceComposing, waTypes.ChatPresenceMediaText)
+			go func() {
+				ticker := time.NewTicker(3500 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						if a.client != nil && a.client.IsConnected() {
+							_ = a.client.SendChatPresence(context.Background(), chatJID, waTypes.ChatPresenceComposing, waTypes.ChatPresenceMediaText)
+						}
+					case <-presenceStop:
+						if a.client != nil && a.client.IsConnected() {
+							_ = a.client.SendChatPresence(context.Background(), chatJID, waTypes.ChatPresencePaused, waTypes.ChatPresenceMediaText)
+						}
+						return
+					}
+				}
+			}()
+		}
+		defer func() {
+			close(presenceStop)
+		}()
+
+		resp, err := a.orchestrator.ProcessMessage(ctx, agent.UserRequest{
+			ChannelType:    "whatsapp",
+			ChannelID:      a.channelID,
+			ChannelName:    a.name,
+			ChatID:         chatID,
+			UserID:         senderID,
+			UserName:       senderName,
+			UserPrompt:     cleanText,
+			AttachedImages: attachedImages,
+			AttachedFileMB: attachedFileMB,
+			OnProgress: func(status string) {
+				if a.client != nil && a.client.IsConnected() {
+					_ = a.client.SendChatPresence(context.Background(), chatJID, waTypes.ChatPresenceComposing, waTypes.ChatPresenceMediaText)
+				}
+			},
+		})
+
+		if err != nil {
+			log.Printf("⚠️ [WhatsApp] Request gagal/timeout (Chat: %s, User: %s, Prompt: %q): %v",
+				chatID, senderName, cleanText, err)
+			if ctx.Err() == context.Canceled {
+				return
+			}
+			isGrapari := a.settings.GrapariOnly
+			if a.db != nil {
+				if chRec, errDb := a.db.GetChannel(a.channelID); errDb == nil && chRec != nil {
+					isGrapari = chRec.IsGrapariOnly()
+				}
+			}
+			log.Printf("⚠️ [WhatsApp] Error processing prompt: %v", err)
+			friendlyErr := agent.FormatUserFriendlyErrorForChannel(err, isGrapari)
+			_ = a.SendMessage(chatID, friendlyErr)
+			return
+		}
+
+		if resp != nil {
+			if resp.Text != "" {
+				formattedText := formatWhatsAppOptions(resp.Text)
+				_ = a.SendMessage(chatID, formattedText)
+			}
+			for _, mf := range resp.MediaFiles {
+				if mf.FilePath != "" {
+					_ = a.SendFile(chatID, mf.FilePath, mf.Caption)
+					// Hapus file screenshot sementara dari server segera setelah berhasil dikirim
+					if isTempScreenshot(mf.FilePath) {
+						_ = os.Remove(mf.FilePath)
+					}
+				}
+			}
+		}
+	}()
+}
+
+func isTempScreenshot(fPath string) bool {
+	clean := filepath.ToSlash(fPath)
+	return strings.Contains(clean, "/screenshots/") || strings.HasPrefix(clean, "screenshots/") || strings.Contains(clean, "data/screenshots/")
+}
+
+var (
+	reOptionsTagWA   = regexp.MustCompile(`(?is)\[(?:OPSI|OPTIONS):\s*([^\]]+)\]`)
+	reOptNumberingWA = regexp.MustCompile(`^(?:\d+[\.\)]\s*|[•\-\*]\s*)`)
+)
+
+const waAIDisclaimer = "\n\n_Mohon diperiksa kembali, AI Dapat melakukan kesalahan_"
+
+func formatWhatsAppOptions(text string) string {
+	cleanText := strings.TrimSpace(reOptionsTagWA.ReplaceAllString(text, ""))
+	if cleanText == "" {
+		return ""
+	}
+	return cleanText + waAIDisclaimer
+}
+
+// JoinedGroupInfo holds basic info about a WhatsApp group
+type JoinedGroupInfo struct {
+	JID           string
+	Name          string
+	Topic         string
+	OwnerJID      string
+	IsWhitelisted bool
+}
+
+// GetJoinedGroups retrieves list of WhatsApp groups the bot account is currently a member of
+func (a *NativeAdapter) GetJoinedGroups(ctx context.Context) ([]*JoinedGroupInfo, error) {
+	if a.client == nil || !a.client.IsConnected() {
+		return nil, fmt.Errorf("WhatsApp adapter '%s' tidak sedang terhubung", a.name)
+	}
+
+	rawGroups, err := a.client.GetJoinedGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	st := a.GetSettings()
+	whitelistedMap := make(map[string]bool)
+	for _, g := range st.AllowedGroups {
+		clean := strings.TrimSpace(g)
+		if clean != "" {
+			whitelistedMap[clean] = true
+			whitelistedMap[strings.ToLower(clean)] = true
+		}
+	}
+
+	var res []*JoinedGroupInfo
+	for _, rg := range rawGroups {
+		if rg == nil {
+			continue
+		}
+		gJID := rg.JID.String()
+		name := rg.GroupName.Name
+		if strings.TrimSpace(name) == "" {
+			name = "(Tanpa Nama)"
+		}
+
+		isWhite := whitelistedMap[gJID] || whitelistedMap[rg.JID.User] || whitelistedMap[strings.ToLower(gJID)]
+		res = append(res, &JoinedGroupInfo{
+			JID:           gJID,
+			Name:          name,
+			Topic:         rg.GroupTopic.Topic,
+			OwnerJID:      rg.OwnerJID.String(),
+			IsWhitelisted: isWhite,
+		})
+	}
+
+	return res, nil
+}
+
+// isBotMentionedOrReplied checks if the bot is @mentioned or quoted in a group message
+func (a *NativeAdapter) isBotMentionedOrReplied(msg *events.Message) bool {
+	if a.client == nil || a.client.Store == nil || a.client.Store.ID == nil {
+		return false
+	}
+
+	botID := *a.client.Store.ID
+	botUser := botID.User
+	normBotPhone := normalizePhone(botUser)
+
+	var botLID waTypes.JID
+	if !a.client.Store.LID.IsEmpty() {
+		botLID = a.client.Store.LID
+	}
+
+	// 1. Check ContextInfo for mentions and reply
+	ctxInfo := getContextInfo(msg.Message)
+	if ctxInfo != nil {
+		// Check @mentions list
+		for _, mStr := range ctxInfo.GetMentionedJID() {
+			mStr = strings.TrimSpace(mStr)
+			if mStr == "" {
+				continue
+			}
+
+			// Direct string matching with Phone JID, LID, or bot User ID
+			if botUser != "" && strings.Contains(mStr, botUser) {
+				return true
+			}
+			if !botLID.IsEmpty() && (mStr == botLID.String() || strings.Contains(mStr, botLID.User)) {
+				return true
+			}
+			if normBotPhone != "" && strings.Contains(normalizePhone(mStr), normBotPhone) {
+				return true
+			}
+
+			// Parse and resolve Real JID (LID -> Phone JID)
+			if parsedJID, err := waTypes.ParseJID(mStr); err == nil {
+				realJID := a.resolveRealJID(parsedJID)
+				if realJID.User == botUser || (!botLID.IsEmpty() && realJID.User == botLID.User) {
+					return true
+				}
+				if normBotPhone != "" && normalizePhone(realJID.User) == normBotPhone {
+					return true
+				}
+			}
+		}
+
+		// Check Quote Reply (Participant who sent original message)
+		if partStr := ctxInfo.GetParticipant(); partStr != "" {
+			if botUser != "" && strings.Contains(partStr, botUser) {
+				return true
+			}
+			if !botLID.IsEmpty() && (partStr == botLID.String() || strings.Contains(partStr, botLID.User)) {
+				return true
+			}
+			if normBotPhone != "" && strings.Contains(normalizePhone(partStr), normBotPhone) {
+				return true
+			}
+
+			if parsedJID, err := waTypes.ParseJID(partStr); err == nil {
+				realJID := a.resolveRealJID(parsedJID)
+				if realJID.User == botUser || (!botLID.IsEmpty() && realJID.User == botLID.User) {
+					return true
+				}
+				if normBotPhone != "" && normalizePhone(realJID.User) == normBotPhone {
+					return true
+				}
+			}
+		}
+	}
+
+	// 2. Check if raw prompt text includes @botUser, phone number, or bot name
+	text := extractMessageText(msg.Message)
+	if text != "" {
+		if botUser != "" && strings.Contains(text, "@"+botUser) {
+			return true
+		}
+		if normBotPhone != "" && (strings.Contains(text, "@"+normBotPhone) || strings.Contains(text, "@08"+strings.TrimPrefix(normBotPhone, "628"))) {
+			return true
+		}
+		if a.name != "" {
+			cleanName := strings.TrimSpace(a.name)
+			if len(cleanName) >= 3 && strings.Contains(strings.ToLower(text), "@"+strings.ToLower(cleanName)) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func extractMessageText(m *waE2E.Message) string {
+	if m == nil {
+		return ""
+	}
+	if conv := m.GetConversation(); conv != "" {
+		return conv
+	}
+	if ext := m.GetExtendedTextMessage(); ext != nil {
+		return ext.GetText()
+	}
+	if img := m.GetImageMessage(); img != nil {
+		return img.GetCaption()
+	}
+	if vid := m.GetVideoMessage(); vid != nil {
+		return vid.GetCaption()
+	}
+	if doc := m.GetDocumentMessage(); doc != nil {
+		return doc.GetCaption()
+	}
+	return ""
+}
+
+func getContextInfo(m *waE2E.Message) *waE2E.ContextInfo {
+	if m == nil {
+		return nil
+	}
+	if ext := m.GetExtendedTextMessage(); ext != nil {
+		return ext.GetContextInfo()
+	}
+	if img := m.GetImageMessage(); img != nil {
+		return img.GetContextInfo()
+	}
+	if vid := m.GetVideoMessage(); vid != nil {
+		return vid.GetContextInfo()
+	}
+	if doc := m.GetDocumentMessage(); doc != nil {
+		return doc.GetContextInfo()
+	}
+	return nil
+}
+
+func (a *NativeAdapter) resolveRealJID(jid waTypes.JID) waTypes.JID {
+	if jid.IsEmpty() {
+		return jid
+	}
+	if jid.Server == waTypes.HiddenUserServer || jid.Server == "lid" {
+		if a.device != nil {
+			if altJID, err := a.device.GetAltJID(context.Background(), jid); err == nil && !altJID.IsEmpty() {
+				return altJID
+			}
+			if a.device.LIDs != nil {
+				if pnJID, err := a.device.LIDs.GetPNForLID(context.Background(), jid); err == nil && !pnJID.IsEmpty() {
+					return pnJID
+				}
+			}
+		}
+	}
+	return jid
+}
+
+func normalizePhone(s string) string {
+	var digits strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	str := digits.String()
+	if strings.HasPrefix(str, "08") {
+		str = "628" + str[2:]
+	}
+	return str
+}
+
+func (a *NativeAdapter) isPhoneMatching(trustedPattern string, senderJID, chatJID waTypes.JID) bool {
+	normTrusted := normalizePhone(trustedPattern)
+	if normTrusted == "" {
+		return false
+	}
+
+	realSender := a.resolveRealJID(senderJID)
+	realChat := a.resolveRealJID(chatJID)
+
+	candidates := []string{
+		normalizePhone(senderJID.User),
+		normalizePhone(senderJID.ToNonAD().User),
+		normalizePhone(realSender.User),
+		normalizePhone(realSender.ToNonAD().User),
+		normalizePhone(chatJID.User),
+		normalizePhone(chatJID.ToNonAD().User),
+		normalizePhone(realChat.User),
+		normalizePhone(realChat.ToNonAD().User),
+	}
+
+	for _, c := range candidates {
+		if c != "" && (c == normTrusted || strings.HasSuffix(c, normTrusted) || strings.HasSuffix(normTrusted, c)) {
+			return true
+		}
+	}
+
+	cleanTrusted := strings.TrimPrefix(strings.TrimSpace(trustedPattern), "+")
+	if strings.Contains(senderJID.String(), cleanTrusted) || strings.Contains(chatJID.String(), cleanTrusted) ||
+		strings.Contains(realSender.String(), cleanTrusted) || strings.Contains(realChat.String(), cleanTrusted) {
+		return true
+	}
+
+	return false
+}
+
+func (a *NativeAdapter) handleTopicCommand(chatID, senderID, cleanText, lowerText string) bool {
+	cmd := strings.Fields(cleanText)
+	if len(cmd) == 0 {
+		return false
+	}
+	baseCmd := strings.ToLower(cmd[0])
+
+	switch {
+	case baseCmd == "/topic" || baseCmd == "/topics" || baseCmd == "!topic" || baseCmd == "!topics":
+		sessions, err := a.db.ListChatSessions(a.channelID, chatID)
+		if err != nil || len(sessions) == 0 {
+			_, _ = a.db.GetOrCreateSession(a.channelID, chatID, senderID)
+			sessions, _ = a.db.ListChatSessions(a.channelID, chatID)
+		}
+
+		var sb strings.Builder
+		sb.WriteString("📂 *DAFTAR TOPIK OBROLAN (WHATSAPP)*\n\n")
+		sb.WriteString(fmt.Sprintf("Total %d topik percakapan di chat ini:\n\n", len(sessions)))
+
+		for i, s := range sessions {
+			badge := "⚪"
+			status := ""
+			if s.IsActive {
+				badge = "🟢"
+				status = " *[AKTIF]*"
+			}
+			msgCount, _ := a.db.CountSessionMessages(s.ID)
+			sb.WriteString(fmt.Sprintf("%d. %s *%s*%s\n   • Pesan: `%d` | ID: `%s`\n", i+1, badge, s.Title, status, msgCount, s.ID))
+		}
+
+		sb.WriteString("\n💡 *Perintah Topik:*\n")
+		sb.WriteString("• */newtopic [nama]* - Buat & aktifkan topik baru\n")
+		sb.WriteString("• */switchtopic <nomor/ID>* - Pindah topik aktif\n")
+		sb.WriteString("• */renametopic <nama baru>* - Ubah judul topik aktif\n")
+		sb.WriteString("• */deltopic <nomor/ID>* - Hapus topik percakapan\n")
+		sb.WriteString("• */resettopic* - Reset riwayat topik aktif")
+
+		outMsg := sb.String()
+		go func() {
+			_ = a.SendMessage(chatID, outMsg)
+		}()
+		return true
+
+	case baseCmd == "/newtopic" || baseCmd == "!newtopic":
+		title := strings.TrimSpace(strings.TrimPrefix(cleanText, cmd[0]))
+		if title == "" {
+			title = "Topik Baru"
+		}
+		sess, err := a.db.CreateChatSession(a.channelID, chatID, senderID, title, true)
+		if err != nil {
+			errMsg := fmt.Sprintf("❌ *Gagal membuat topik baru:* %v", err)
+			go func() {
+				_ = a.SendMessage(chatID, errMsg)
+			}()
+			return true
+		}
+		msg := fmt.Sprintf("✨ *TOPIK BARU DIBUAT & DIAKTIFKAN*\n\n📌 *Judul:* %s\n🆔 *ID:* `%s`\n\nTopik ini sekarang aktif. Pertanyaan berikutnya akan disimpan secara terpisah di topik ini.", sess.Title, sess.ID)
+		go func() {
+			_ = a.SendMessage(chatID, msg)
+		}()
+		return true
+
+	case baseCmd == "/switchtopic" || baseCmd == "!switchtopic":
+		arg := strings.TrimSpace(strings.TrimPrefix(cleanText, cmd[0]))
+		if arg == "" {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ *Format perintah salah.*\nGunakan: `/switchtopic <nomor atau ID>`\nKetik `/topic` untuk melihat daftar topik.")
+			}()
+			return true
+		}
+		sessions, err := a.db.ListChatSessions(a.channelID, chatID)
+		if err != nil || len(sessions) == 0 {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ Belum ada topik yang terdaftar.")
+			}()
+			return true
+		}
+
+		var targetID string
+		var targetTitle string
+
+		if idx, parseErr := strconv.Atoi(arg); parseErr == nil {
+			if idx >= 1 && idx <= len(sessions) {
+				targetID = sessions[idx-1].ID
+				targetTitle = sessions[idx-1].Title
+			}
+		} else {
+			for _, s := range sessions {
+				if s.ID == arg || strings.HasPrefix(s.ID, arg) {
+					targetID = s.ID
+					targetTitle = s.Title
+					break
+				}
+			}
+		}
+
+		if targetID == "" {
+			errMsg := fmt.Sprintf("⚠️ Topik dengan nomor atau ID `%s` tidak ditemukan.\nKetik `/topic` untuk melihat daftar topik.", arg)
+			go func() {
+				_ = a.SendMessage(chatID, errMsg)
+			}()
+			return true
+		}
+
+		if _, err := a.db.SwitchChatSession(a.channelID, chatID, targetID); err != nil {
+			errMsg := fmt.Sprintf("❌ *Gagal berpindah topik:* %v", err)
+			go func() {
+				_ = a.SendMessage(chatID, errMsg)
+			}()
+			return true
+		}
+
+		msg := fmt.Sprintf("🔀 *TOPIK AKTIF DIPINDAHKAN*\n\n📌 *Topik Sekarang:* %s\n🆔 *ID:* `%s`\n\nRiwayat percakapan untuk topik ini sekarang aktif.", targetTitle, targetID)
+		go func() {
+			_ = a.SendMessage(chatID, msg)
+		}()
+		return true
+
+	case baseCmd == "/renametopic" || baseCmd == "!renametopic":
+		newTitle := strings.TrimSpace(strings.TrimPrefix(cleanText, cmd[0]))
+		if newTitle == "" {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ *Format perintah salah.*\nGunakan: `/renametopic <nama topik baru>`")
+			}()
+			return true
+		}
+		curr, err := a.db.GetOrCreateSession(a.channelID, chatID, senderID)
+		if err != nil || curr == nil {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ Gagal menemukan topik aktif.")
+			}()
+			return true
+		}
+		if err := a.db.RenameChatSession(curr.ID, newTitle); err != nil {
+			errMsg := fmt.Sprintf("❌ *Gagal mengubah nama topik:* %v", err)
+			go func() {
+				_ = a.SendMessage(chatID, errMsg)
+			}()
+			return true
+		}
+		msg := fmt.Sprintf("✏️ *NAMA TOPIK BERHASIL DIUBAH*\n\n📌 *Judul Baru:* %s\n🆔 *ID:* `%s`", newTitle, curr.ID)
+		go func() {
+			_ = a.SendMessage(chatID, msg)
+		}()
+		return true
+
+	case baseCmd == "/deltopic" || baseCmd == "!deltopic":
+		arg := strings.TrimSpace(strings.TrimPrefix(cleanText, cmd[0]))
+		if arg == "" {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ *Format perintah salah.*\nGunakan: `/deltopic <nomor atau ID>`\nKetik `/topic` untuk melihat nomor topik.")
+			}()
+			return true
+		}
+		sessions, err := a.db.ListChatSessions(a.channelID, chatID)
+		if err != nil || len(sessions) == 0 {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ Belum ada topik yang terdaftar.")
+			}()
+			return true
+		}
+		if len(sessions) <= 1 {
+			go func() {
+				_ = a.SendMessage(chatID, "⚠️ Tidak dapat menghapus topik satu-satunya di chat ini. Gunakan `/reset` jika ingin membersihkan riwayat pesan.")
+			}()
+			return true
+		}
+
+		var targetID string
+		var targetTitle string
+
+		if idx, parseErr := strconv.Atoi(arg); parseErr == nil {
+			if idx >= 1 && idx <= len(sessions) {
+				targetID = sessions[idx-1].ID
+				targetTitle = sessions[idx-1].Title
+			}
+		} else {
+			for _, s := range sessions {
+				if s.ID == arg || strings.HasPrefix(s.ID, arg) {
+					targetID = s.ID
+					targetTitle = s.Title
+					break
+				}
+			}
+		}
+
+		if targetID == "" {
+			errMsg := fmt.Sprintf("⚠️ Topik dengan nomor atau ID `%s` tidak ditemukan.", arg)
+			go func() {
+				_ = a.SendMessage(chatID, errMsg)
+			}()
+			return true
+		}
+
+		if _, err := a.db.DeleteChatSession(a.channelID, chatID, targetID); err != nil {
+			errMsg := fmt.Sprintf("❌ *Gagal menghapus topik:* %v", err)
+			go func() {
+				_ = a.SendMessage(chatID, errMsg)
+			}()
+			return true
+		}
+
+		msg := fmt.Sprintf("🗑️ *TOPIK BERHASIL DIHAPUS*\n\nTopik *%s* telah dihapus beserta seluruh riwayat pesannya.\nJika topik tersebut sedang aktif, sistem otomatis beralih ke topik yang tersisa.", targetTitle)
+		go func() {
+			_ = a.SendMessage(chatID, msg)
+		}()
+		return true
+
+	case baseCmd == "/resettopic" || baseCmd == "!resettopic":
+		if cancelVal, loaded := a.activeTasks.LoadAndDelete(chatID); loaded {
+			if cancel, ok := cancelVal.(context.CancelFunc); ok {
+				cancel()
+			}
+		}
+		_ = a.db.ClearActiveSessionMessages(a.channelID, chatID)
+		go func() {
+			_ = a.SendMessage(chatID, "✨ *TOPIK DIRESET*\n\nRiwayat dan konteks percakapan pada topik aktif telah dibersihkan.")
+		}()
+		return true
+	}
+
+	return false
+}
+

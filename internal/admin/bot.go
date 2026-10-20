@@ -1,0 +1,165 @@
+package admin
+
+import (
+	"fmt"
+	"log"
+	"strings"
+	"sync"
+	"time"
+
+	"goassistant/internal/agent"
+	"goassistant/internal/checkin"
+	"goassistant/internal/config"
+	"goassistant/internal/cron"
+	"goassistant/internal/memory"
+	"goassistant/internal/provider"
+	"goassistant/internal/proxy"
+	"goassistant/internal/storage"
+	"goassistant/internal/tgprompt"
+	"goassistant/internal/tools"
+	"goassistant/internal/webadmin"
+
+	tele "gopkg.in/telebot.v3"
+)
+
+type AdminBot struct {
+	bot          *tele.Bot
+	db           *storage.DB
+	cfg          *config.AppConfig
+	mdLoader     *agent.MDLoader
+	orchestrator *agent.Orchestrator
+	scheduler    *cron.Scheduler
+	toolRegistry *tools.Registry
+	provManager  *provider.Manager
+	memManager   *memory.Manager
+	sessManager  *memory.SessionManager
+	proxyPool    *proxy.Pool
+	checkinSvc   *checkin.Service
+	activeTasks    sync.Map
+	pendingOptions sync.Map
+
+	modelUI      *ModelUI
+	limitsUI     *LimitsUI
+	providerUI   *ProviderUI
+	wizard       *ProviderWizard
+	comboUI      *ComboUI
+	comboWizard  *ComboWizard
+	channelUI    *ChannelUI
+	proxyUI      *ProxyUIHandler
+	tokenSaverUI *TokenSaverUIHandler
+	mdUI         *MDUI
+	cronUI       *CronUI
+	memoryUI     *MemoryUI
+	auditUI      *AuditUI
+	updateUI     *UpdateUI
+	checkinUI    *CheckinUI
+	topicUI      *TopicUI
+	webAdminUI   *WebAdminUI
+	searchUI      *SearchUIHandler
+	bifrostUI     *BifrostUIHandler
+	promptManager *tgprompt.PromptManager
+	grapariApproval *GrapariApprovalManager
+}
+
+func NewAdminBot(
+	token string,
+	cfg *config.AppConfig,
+	db *storage.DB,
+	loader *agent.MDLoader,
+	orch *agent.Orchestrator,
+	sched *cron.Scheduler,
+	tr *tools.Registry,
+	pm *provider.Manager,
+	mm *memory.Manager,
+	sm *memory.SessionManager,
+	pool *proxy.Pool,
+	checkinSvc *checkin.Service,
+) (*AdminBot, error) {
+	pref := tele.Settings{
+		Token:  token,
+		Poller: &tele.LongPoller{Timeout: time.Duration(cfg.AdminTelegram.PollTimeout) * time.Second},
+		OnError: func(err error, c tele.Context) {
+			if c != nil && c.Chat() != nil {
+				log.Printf("[Admin-TG] Error chat %d: %v", c.Chat().ID, err)
+				if strings.Contains(err.Error(), "MESSAGE_TOO_LONG") {
+					_ = c.Send("⚠️ <b>Pesan melebihi batas Telegram (4096 karakter).</b>\nSistem telah mencegah pengiriman pesan berlebih.", tele.ModeHTML)
+				}
+			} else {
+				log.Printf("[Admin-TG] Error: %v", err)
+			}
+		},
+	}
+
+	bot, err := tele.NewBot(pref)
+	if err != nil {
+		return nil, fmt.Errorf("gagal menginisialisasi admin telebot: %w", err)
+	}
+
+	a := &AdminBot{
+		bot:          bot,
+		db:           db,
+		cfg:          cfg,
+		mdLoader:     loader,
+		orchestrator: orch,
+		scheduler:    sched,
+		toolRegistry: tr,
+		provManager:  pm,
+		memManager:   mm,
+		sessManager:  sm,
+		proxyPool:    pool,
+		checkinSvc:   checkinSvc,
+
+		modelUI:      NewModelUI(db, pm),
+		limitsUI:     NewLimitsUI(db, pm),
+		providerUI:   NewProviderUI(db, pm, pool),
+		wizard:       NewProviderWizard(db, pm, pool, bot),
+		comboUI:      NewComboUI(db, pm),
+		comboWizard:  NewComboWizard(db, pm, bot),
+		channelUI:    NewChannelUI(db, tr),
+		proxyUI:      NewProxyUIHandler(db, pool),
+		tokenSaverUI: NewTokenSaverUIHandler(db),
+		mdUI:         NewMDUI(loader, db, bot),
+		cronUI:       NewCronUI(db, sched),
+		memoryUI:     NewMemoryUI(db, mm, sm),
+		auditUI:      NewAuditUI(db),
+		updateUI:     NewUpdateUI(cfg, bot),
+		checkinUI:    NewCheckinUI(db, checkinSvc),
+		topicUI:      NewTopicUI(db, sm, bot),
+		searchUI:     NewSearchUIHandler(cfg, db),
+		bifrostUI:    NewBifrostUIHandler(db, bot),
+		promptManager: tgprompt.NewPromptManager(bot),
+		grapariApproval: InitGrapariApprovalManager(bot, db, cfg),
+	}
+
+	a.registerRoutes()
+	return a, nil
+}
+
+func (a *AdminBot) Start() {
+	log.Printf("[Admin-TG] Control Plane Bot aktif (@%s). Menunggu perintah admin...", a.bot.Me.Username)
+	a.bot.Start()
+}
+
+func (a *AdminBot) Stop() {
+	a.bot.Stop()
+}
+
+// Bot returns the telebot instance
+func (a *AdminBot) Bot() *tele.Bot {
+	return a.bot
+}
+
+// PromptManager returns the underlying tgprompt.PromptManager instance
+func (a *AdminBot) PromptManager() *tgprompt.PromptManager {
+	return a.promptManager
+}
+
+// GrapariApproval returns the underlying GrapariApprovalManager
+func (a *AdminBot) GrapariApproval() *GrapariApprovalManager {
+	return a.grapariApproval
+}
+
+// SetWebAdminServer connects the WebAdminServer instance for dynamic control
+func (a *AdminBot) SetWebAdminServer(server *webadmin.Server) {
+	a.webAdminUI = NewWebAdminUI(server, a.db, a.bot)
+}

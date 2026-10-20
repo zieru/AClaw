@@ -1,0 +1,1355 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	"goassistant/internal/config"
+	"goassistant/internal/memory"
+	"goassistant/internal/provider"
+	"goassistant/internal/storage"
+	"goassistant/internal/tokensaver"
+	"goassistant/internal/tools"
+)
+
+type Orchestrator struct {
+	db              *storage.DB
+	sessionManager  *memory.SessionManager
+	memoryManager   *memory.Manager
+	promptBuilder   *PromptBuilder
+	toolRegistry    *tools.Registry
+	providerManager *provider.Manager
+	commandRouter   *CommandRouter
+}
+
+func NewOrchestrator(
+	db *storage.DB,
+	sm *memory.SessionManager,
+	mm *memory.Manager,
+	pb *PromptBuilder,
+	tr *tools.Registry,
+	pm *provider.Manager,
+) *Orchestrator {
+	return &Orchestrator{
+		db:              db,
+		sessionManager:  sm,
+		memoryManager:   mm,
+		promptBuilder:   pb,
+		toolRegistry:    tr,
+		providerManager: pm,
+		commandRouter:   NewCommandRouter(),
+	}
+}
+
+// ProviderManager returns the underlying provider manager instance
+func (o *Orchestrator) ProviderManager() *provider.Manager {
+	if o == nil {
+		return nil
+	}
+	return o.providerManager
+}
+
+// MemoryManager returns the standalone memory manager instance
+func (o *Orchestrator) MemoryManager() *memory.Manager {
+	if o == nil {
+		return nil
+	}
+	return o.memoryManager
+}
+
+const GrapariOutOfScopeRejection = "Mohon maaf, channel asisten ini beroperasi dalam mode khusus panduan SOP & operasional GraPARI. Pertanyaan atau permintaan Anda berada di luar konteks dokumen SOP GraPARI."
+const GrapariServerError = "Mohon maaf, server ngadat"
+
+func isObviousGrapariOutOfScope(prompt string) bool {
+	lower := strings.ToLower(strings.TrimSpace(prompt))
+	if lower == "" {
+		return false
+	}
+
+	// Keywords indicating telecom / GraPARI domain
+	telecomKeywords := []string{
+		"grapari", "telkomsel", "kartu", "simcard", "esim", "msisdn", "kuota", "pulsa",
+		"paket", "jaringan", "sinyal", "roaming", "byu", "orbit", "pascabayar", "prabayar",
+		"indihome", "mytelkomsel", "ktp", "nik", "kk", "dukcapil", "antrean", "loket",
+		"customer service", "cs", "tagihan", "billing", "sop", "operasional", "tsel",
+		"nomor", "hangus", "upgrade", "migrasi", "registrasi", "unreg", "blokir",
+	}
+	for _, kw := range telecomKeywords {
+		if strings.Contains(lower, kw) {
+			return false
+		}
+	}
+
+	// Keywords indicating obviously out-of-scope non-telecom tasks
+	outOfScopeTriggers := []string{
+		"script", "program", "koding", "coding", "python", "javascript", "golang", "source code", "html", "css",
+		"puisi", "cerpen", "dongeng", "pantun", "lirik lagu", "chord gitar",
+		"resep masakan", "cara masak", "bumbu", "resep kue",
+		"integral", "trigonometri", "rumus fisika", "rumus kimia", "rumus matematika",
+		"siapa presiden", "ibukota", "jarak bumi",
+	}
+	for _, trg := range outOfScopeTriggers {
+		if strings.Contains(lower, trg) {
+			return true
+		}
+	}
+
+	return false
+}
+
+type UserRequest struct {
+	ChannelType    string
+	ChannelID      string
+	ChannelName    string
+	ChatID         string
+	UserID         string
+	UserName       string
+	UserPrompt     string
+	AttachedFileMB float64
+	AttachedImages []string // Base64 data URLs for vision models
+	PreferredRole  string
+	PreferredProv  string
+	PreferredModel string
+	ThinkingLevel  string // e.g. "low", "medium", "high", "disabled", "xhigh"
+	ThinkingBudget int    // budget tokens
+	OnProgress     func(status string)
+	OnStreamChunk  func(chunk provider.StreamChunk)
+}
+
+type progressKey struct{}
+type activeModelKey struct{}
+type activeProvKey struct{}
+
+// WithProgressReporter attaches an OnProgress callback to context
+func WithProgressReporter(ctx context.Context, fn func(string)) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, progressKey{}, fn)
+}
+
+// GetProgressReporter extracts OnProgress callback from context
+func GetProgressReporter(ctx context.Context) func(string) {
+	if fn, ok := ctx.Value(progressKey{}).(func(string)); ok {
+		return fn
+	}
+	return nil
+}
+
+// WithActiveModelInfo attaches the active provider and model to context for tool/subagent inheritance
+func WithActiveModelInfo(ctx context.Context, prov, model string) context.Context {
+	ctx = context.WithValue(ctx, activeProvKey{}, prov)
+	return context.WithValue(ctx, activeModelKey{}, model)
+}
+
+// GetActiveModelInfo retrieves the active provider and model from context
+func GetActiveModelInfo(ctx context.Context) (prov, model string) {
+	if p, ok := ctx.Value(activeProvKey{}).(string); ok {
+		prov = p
+	}
+	if m, ok := ctx.Value(activeModelKey{}).(string); ok {
+		model = m
+	}
+	return
+}
+
+// BrowserSessionArg menanamkan session_id (dari chat_id pada context) ke argumen tool browser
+// bila belum diisi oleh model. Ini menjaga sesi Camoufox persisten antar turn percakapan,
+// sehingga setelah bot menanyakan kredensial, panggilan browser berikutnya melanjutkan
+// sesi yang sama (resume browsing) alih-alih membuka browser baru dari nol.
+func BrowserSessionArg(ctx context.Context, args map[string]interface{}) {
+	if args == nil {
+		return
+	}
+	if _, ok := args["session_id"].(string); ok {
+		return
+	}
+	if chatID, ok := ctx.Value("chat_id").(string); ok && strings.TrimSpace(chatID) != "" {
+		args["session_id"] = chatID
+	}
+}
+
+type MediaAttachment struct {
+	FilePath string
+	Caption  string
+}
+
+type AgentResponse struct {
+	Text             string
+	RawText          string
+	ThinkingContent  string // Thinking/reasoning output from model
+	Footer           string
+	MediaFiles       []MediaAttachment
+	ToolsUsed        []string
+	PromptTokens     int
+	CompletionTokens int
+	ThinkingTokens   int
+	TotalTokens      int
+	TokensSaved      int
+	Latency          time.Duration
+	ProviderUsed     string
+	ModelUsed        string
+}
+
+// GetLastPrompt retrieves the last user prompt from session manager
+func (o *Orchestrator) GetLastPrompt(channelID, chatID, userID string) string {
+	if o.sessionManager != nil {
+		return o.sessionManager.GetLastPrompt(channelID, chatID, userID)
+	}
+	return ""
+}
+
+// ProcessMessage handles the complete pipeline of governance, context building, tool execution, and logging
+func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (resp *AgentResponse, err error) {
+	start := time.Now()
+
+	var allToolsCalled []string
+	var messages []provider.ChatMessage
+	var sysPrompt string
+	var totalPromptTokens int
+	var totalCompletionTokens int
+	var totalThinkingTokens int
+	var totalTokensUsed int
+	var totalTokensSaved int
+	var totalTries int
+	var totalCostUSD float64
+	var lastModel string
+	var lastProviderName string
+
+	var provToCall string
+	var modelToUse string
+	var activeProvName string
+	var activeModelName string
+	var activeSession *storage.ChatSessionRecord
+
+	defer func() {
+		if err != nil {
+			latency := time.Since(start)
+			errStatus := "error"
+			errLower := strings.ToLower(err.Error())
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) || strings.Contains(errLower, "deadline") || strings.Contains(errLower, "timeout") {
+				errStatus = "timeout"
+				if activeSession != nil && o.db != nil {
+					_ = o.db.TruncateOldMessages(activeSession.ID, 2)
+				}
+			} else if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) || strings.Contains(errLower, "canceled") {
+				errStatus = "canceled"
+			}
+
+			logProv := provToCall
+			if logProv == "" {
+				logProv = lastProviderName
+			}
+			if logProv == "" {
+				logProv = activeProvName
+			}
+			if logProv == "" && o.providerManager != nil {
+				allP := o.providerManager.ListAll()
+				if len(allP) > 0 {
+					logProv = allP[0].Name()
+				}
+			}
+
+			logModel := modelToUse
+			if logModel == "" {
+				logModel = lastModel
+			}
+			if logModel == "" {
+				logModel = activeModelName
+			}
+			if logModel == "" && logProv != "" && o.providerManager != nil {
+				if p, ok := o.providerManager.Get(logProv); ok && p != nil {
+					logModel = p.DefaultModel()
+				}
+			}
+
+			log.Printf("⚠️ [Orchestrator] Request gagal/timeout (Status: %s, User: %s, Chat: %s, Latensi: %v): %v",
+				errStatus, req.UserName, req.ChatID, latency, err)
+
+			var toolsJSON []byte
+			if len(allToolsCalled) > 0 {
+				toolsJSON, _ = json.Marshal(allToolsCalled)
+			}
+			var fullPayloadJSON []byte
+			if len(messages) > 0 {
+				fullPayloadJSON, _ = json.Marshal(messages)
+			}
+
+			if totalTries <= 0 {
+				totalTries = 1
+			}
+
+			_ = o.db.InsertAuditLog(&storage.AuditLogRecord{
+				ChannelType:        req.ChannelType,
+				ChannelID:          req.ChannelID,
+				ChatID:             req.ChatID,
+				UserID:             req.UserID,
+				UserName:           req.UserName,
+				Provider:           logProv,
+				Model:              logModel,
+				PromptTokens:       totalPromptTokens,
+				CompletionTokens:   totalCompletionTokens,
+				ThinkingTokens:     totalThinkingTokens,
+				TotalTokens:        totalTokensUsed,
+				TokensSaved:        totalTokensSaved,
+				NumberOfTries:      totalTries,
+				LatencyMs:          int(latency.Milliseconds()),
+				CostUSD:            totalCostUSD,
+				ToolsCalled:        string(toolsJSON),
+				ClientRequest:      req.UserPrompt,
+				SystemPrompt:       sysPrompt,
+				FullRequestPayload: string(fullPayloadJSON),
+				Status:             errStatus,
+				ErrorMessage:       err.Error(),
+			})
+		}
+	}()
+
+	// Track last user prompt for quick retry
+	if o.sessionManager != nil && strings.TrimSpace(req.UserPrompt) != "" {
+		o.sessionManager.SetLastPrompt(req.ChannelID, req.ChatID, req.UserID, req.UserPrompt)
+	}
+
+	// Enrich context with request metadata for tools
+	if req.UserID != "" {
+		ctx = context.WithValue(ctx, "user_id", req.UserID)
+	}
+	if req.ChannelID != "" {
+		ctx = context.WithValue(ctx, "channel_id", req.ChannelID)
+	}
+	if req.ChatID != "" {
+		ctx = context.WithValue(ctx, "chat_id", req.ChatID)
+	}
+	if req.UserName != "" {
+		ctx = context.WithValue(ctx, "user_name", req.UserName)
+	}
+
+	// 0. Handle Local Deterministic Commands (0 Token, Instant)
+	if localResp, handled := o.commandRouter.TryHandleLocal(ctx, req); handled {
+		return localResp, nil
+	}
+
+	// 0b. Resolve Mode Khusus GraPARI & Zero-Token Pre-Check Guard
+	isGrapariOnly := false
+	if o.db != nil && req.ChannelID != "" {
+		if ch, err := o.db.GetChannel(req.ChannelID); err == nil && ch != nil {
+			isGrapariOnly = ch.IsGrapariOnly()
+		}
+	}
+	if isGrapariOnly && isObviousGrapariOutOfScope(req.UserPrompt) {
+		return &AgentResponse{
+			Text:         GrapariOutOfScopeRejection,
+			Latency:      1 * time.Millisecond,
+			ProviderUsed: "grapari_guard",
+			ModelUsed:    "deterministic",
+		}, nil
+	}
+
+	// 1. Resolve Governance Policy (Hierarchical: Chat -> Channel -> Global -> Default)
+	policy := o.db.GetResolvedPolicy(req.ChannelID, req.ChatID)
+
+	// 2. Guard: Max Upload File Size
+	if req.AttachedFileMB > 0 && req.AttachedFileMB > float64(policy.MaxUploadFileMB) {
+		return &AgentResponse{
+			Text: fmt.Sprintf("⚠️ File yang diunggah (%.1f MB) melebihi batas maksimal untuk channel/grup ini (%d MB). Silakan unggah file dengan ukuran lebih kecil.", req.AttachedFileMB, policy.MaxUploadFileMB),
+		}, nil
+	}
+
+	// 3. Resolve Active Provider & Model Early
+	activeProvName = req.PreferredProv
+	activeModelName = policy.ModelOverride
+	var activeProv provider.Provider
+
+	// Parse provider binding or resilient provider mode from ModelOverride
+	if policy.ModelOverride != "" && !strings.HasPrefix(strings.ToLower(policy.ModelOverride), "combo:") {
+		lowerOverride := strings.ToLower(policy.ModelOverride)
+		if strings.HasPrefix(lowerOverride, "provider:") || strings.HasPrefix(lowerOverride, "resilient:") {
+			colonIdx := strings.Index(policy.ModelOverride, ":")
+			provPart := strings.TrimSpace(policy.ModelOverride[colonIdx+1:])
+			if p, ok := o.providerManager.Get(provPart); ok && p != nil {
+				if activeProvName == "" {
+					activeProvName = p.Name()
+				}
+				activeProv = p
+				activeModelName = p.DefaultModel()
+			}
+		} else if strings.Contains(policy.ModelOverride, ":") {
+			parts := strings.SplitN(policy.ModelOverride, ":", 2)
+			if p, ok := o.providerManager.Get(parts[0]); ok && p != nil {
+				if activeProvName == "" {
+					activeProvName = p.Name()
+				}
+				activeProv = p
+				activeModelName = parts[1]
+			}
+		}
+	}
+
+	if activeProvName != "" && activeProv == nil {
+		activeProv, _ = o.providerManager.Get(activeProvName)
+	}
+	if activeProv == nil {
+		allProvs := o.providerManager.ListAll()
+		if len(allProvs) > 0 {
+			activeProv = allProvs[0]
+			activeProvName = activeProv.Name()
+		}
+	} else {
+		activeProvName = activeProv.Name()
+	}
+
+	if activeModelName == "" && activeProv != nil {
+		activeModelName = activeProv.DefaultModel()
+	}
+
+	provToCall = req.PreferredProv
+	if provToCall == "" {
+		provToCall = activeProvName
+	}
+
+	if req.PreferredModel != "" {
+		if strings.HasPrefix(strings.ToLower(req.PreferredModel), "provider:") ||
+			strings.HasPrefix(strings.ToLower(req.PreferredModel), "resilient:") {
+			colonIdx := strings.Index(req.PreferredModel, ":")
+			provToCall = strings.TrimSpace(req.PreferredModel[colonIdx+1:])
+			modelToUse = ""
+		} else if strings.Contains(req.PreferredModel, ":") && !strings.HasPrefix(strings.ToLower(req.PreferredModel), "combo:") {
+			parts := strings.SplitN(req.PreferredModel, ":", 2)
+			provToCall = parts[0]
+			modelToUse = parts[1]
+		} else {
+			modelToUse = req.PreferredModel
+		}
+		activeModelName = modelToUse
+	} else if policy.ModelOverride != "" {
+		modelToUse = policy.ModelOverride
+		if strings.HasPrefix(strings.ToLower(policy.ModelOverride), "provider:") ||
+			strings.HasPrefix(strings.ToLower(policy.ModelOverride), "resilient:") {
+			colonIdx := strings.Index(policy.ModelOverride, ":")
+			provToCall = strings.TrimSpace(policy.ModelOverride[colonIdx+1:])
+			modelToUse = ""
+		} else if strings.Contains(policy.ModelOverride, ":") && !strings.HasPrefix(strings.ToLower(policy.ModelOverride), "combo:") {
+			parts := strings.SplitN(policy.ModelOverride, ":", 2)
+			provToCall = strings.TrimSpace(parts[0])
+			modelToUse = strings.TrimSpace(parts[1])
+		}
+		activeModelName = modelToUse
+	}
+
+	// 4a. Custom Dedicated Execution Path for Gemini Web Scrape
+	if provider.IsGeminiWeb(provToCall) || provider.IsGeminiWeb(modelToUse) || provider.IsGeminiWeb(req.PreferredModel) || provider.IsGeminiWeb(policy.ModelOverride) {
+		provToCall = "gemini_web"
+		if modelToUse == "" || strings.EqualFold(modelToUse, "auto") || strings.EqualFold(modelToUse, "gemini_web") || strings.EqualFold(modelToUse, "gemini-web") {
+			modelToUse = "gemini-web-pro"
+		}
+		activeModelName = modelToUse
+		log.Printf("🌐 [GeminiWeb] Menjalankan jalur custom khusus Gemini Web Scraper (Model: %s)", modelToUse)
+	}
+
+	if (activeModelName == "" || strings.EqualFold(activeModelName, "auto")) && activeProv != nil {
+		if activeProv.DefaultModel() != "" && !strings.HasPrefix(activeProv.DefaultModel(), "/") && !strings.EqualFold(activeProv.DefaultModel(), "auto") {
+			activeModelName = activeProv.DefaultModel()
+		}
+	}
+
+	// 4b. Vision Capability Guard & Dynamic Fallback
+	var visionFallbackNotice string
+	if len(req.AttachedImages) > 0 {
+		cat := provider.GetCatalog()
+		cap := cat.Resolve(activeModelName)
+		if !cap.SupportsVision {
+			if strings.TrimSpace(policy.FallbackVisionModel) != "" {
+				fbModel := strings.TrimSpace(policy.FallbackVisionModel)
+				log.Printf("📷 [VisionGuard] Model aktif %q tidak mendukung gambar. Mengalihkan ke fallback vision: %q", activeModelName, fbModel)
+				if strings.Contains(fbModel, ":") && !strings.HasPrefix(strings.ToLower(fbModel), "combo:") {
+					parts := strings.SplitN(fbModel, ":", 2)
+					provToCall = parts[0]
+					modelToUse = parts[1]
+				} else {
+					modelToUse = fbModel
+				}
+				activeModelName = modelToUse
+				visionFallbackNotice = fmt.Sprintf("⚡ <i>(Gambar diproses dengan model vision: %s)</i>\n\n", activeModelName)
+			} else {
+				rejectMsg := fmt.Sprintf("⚠️ <b>Model Tidak Mendukung Gambar</b>\n\nModel aktif saat ini (<code>%s</code>) adalah model berbasis teks murni dan tidak mendukung analisis gambar.\n\n💡 <i>Silakan atur <b>Model Failback Vision</b> melalui menu <code>/model</code> atau beralih ke model multimodal (seperti Gemini 2.0 Flash atau GPT-4o).</i>", activeModelName)
+				return &AgentResponse{
+					Text:    rejectMsg,
+					RawText: rejectMsg,
+				}, nil
+			}
+		}
+	}
+
+	// 5. Get or Create Session
+	session, err := o.sessionManager.GetOrCreate(req.ChannelID, req.ChatID, req.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("gagal inisialisasi sesi percakapan: %w", err)
+	}
+	activeSession = session
+	if o.sessionManager != nil {
+		o.sessionManager.MaybeAutoTitleTopic(session, req.UserPrompt)
+	}
+
+	// 6. Auto-Compaction Check
+	msgCount, _ := o.db.CountSessionMessages(session.ID)
+	if policy.AutoCompaction && msgCount >= policy.CompactionThreshold {
+		// Pick active provider for compaction
+		activeProviders := o.providerManager.ListAll()
+		if len(activeProviders) > 0 {
+			compactionProv := activeProviders[0]
+			summary, compErr := o.sessionManager.SummarizeSession(ctx, session.ID, compactionProv)
+			if compErr == nil && summary != "" {
+				// Truncate old messages, keep recent half
+				keepCount := policy.MaxHistoryTurns / 2
+				if keepCount < 4 {
+					keepCount = 4
+				}
+				_ = o.db.TruncateOldMessages(session.ID, keepCount)
+				session.Summary = summary
+			}
+		}
+	}
+
+	// 6. Retrieve History & Allowed Tools
+	history, err := o.sessionManager.GetHistory(session.ID, policy.MaxHistoryTurns)
+	if err != nil {
+		return nil, fmt.Errorf("gagal mengambil riwayat sesi: %w", err)
+	}
+
+	var perms map[string]bool
+	if o.db != nil {
+		perms, _ = o.db.GetChannelToolPerms(req.ChannelID)
+	}
+	// Exclude dedicated subagent tools (capture_visit_performance) from root orchestrator
+	// to prevent tool schema and prompt bloat on non-visit interactions, unless explicitly allowed or role is analyst.
+	effectivePerms := make(map[string]bool)
+	for k, v := range perms {
+		effectivePerms[k] = v
+	}
+	if _, exists := effectivePerms["capture_visit_performance"]; !exists && strings.ToLower(req.PreferredRole) != "analyst" {
+		effectivePerms["capture_visit_performance"] = false
+	}
+	allowedTools := o.toolRegistry.ListAllowed(effectivePerms)
+	if isGrapariOnly {
+		var grapariTools []tools.Tool
+		for _, t := range o.toolRegistry.ListAll() {
+			if t.Name() == "g3a_search_grapari_knowledge" || t.Name() == "search_telkomsel_web" {
+				grapariTools = append(grapariTools, t)
+			}
+		}
+		allowedTools = grapariTools
+	}
+
+	// 7. Build Memory & System Prompt
+	memContext, _ := o.memoryManager.GetContextMemory(req.ChannelID, req.UserID, req.UserPrompt, isGrapariOnly)
+
+	sysPrompt, err = o.promptBuilder.BuildSystemPrompt(PromptContext{
+		ChannelID:       req.ChannelID,
+		AgentRole:       req.PreferredRole,
+		ChannelType:     req.ChannelType,
+		ChannelName:     req.ChannelName,
+		UserName:        req.UserName,
+		UserID:          req.UserID,
+		MemoryContext:   memContext,
+		SessionSummary:  session.Summary,
+		ActiveModel:     activeModelName,
+		ActiveProvider:  activeProvName,
+		ThinkingEnabled: policy.ThinkingEnabled,
+		StreamMode:      policy.StreamingEnabled,
+		AllowedTools:    allowedTools,
+		IsGrapariOnly:   isGrapariOnly,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("gagal membangun prompt: %w", err)
+	}
+
+	// 8. Prepare Messages for LLM
+	messages = []provider.ChatMessage{
+		{
+			Role:    provider.RoleSystem,
+			Content: sysPrompt,
+		},
+	}
+	messages = append(messages, history...)
+	messages = append(messages, provider.ChatMessage{
+		Role:    provider.RoleUser,
+		Content: req.UserPrompt,
+		Images:  req.AttachedImages,
+	})
+
+	// 9. Execute with Tool Loop (up to 5 turns)
+	var finalContent string
+	var finalThinking string
+	var mediaFiles []MediaAttachment
+
+	extractAttachments := func(s string) {
+		for {
+			idx := strings.Index(s, "[ATTACH_FILE:")
+			if idx == -1 {
+				break
+			}
+			endIdx := strings.Index(s[idx:], "]")
+			if endIdx == -1 {
+				break
+			}
+			tag := s[idx+len("[ATTACH_FILE:") : idx+endIdx]
+			parts := strings.SplitN(tag, "|CAPTION:", 2)
+			fPath := strings.TrimSpace(parts[0])
+			capText := ""
+			if len(parts) == 2 {
+				capText = strings.TrimSpace(parts[1])
+			}
+			if fPath != "" {
+				// Deduplikasi ketat agar file yang sama tidak pernah dimasukkan dua kali (mencegah double attachment)
+				alreadyExists := false
+				cleanTarget := filepath.Clean(fPath)
+				for i, existing := range mediaFiles {
+					if strings.EqualFold(filepath.Clean(existing.FilePath), cleanTarget) {
+						alreadyExists = true
+						if capText != "" && existing.Caption == "" {
+							mediaFiles[i].Caption = capText
+						}
+						break
+					}
+				}
+				if !alreadyExists {
+					mediaFiles = append(mediaFiles, MediaAttachment{FilePath: fPath, Caption: capText})
+				}
+			}
+			s = s[idx+endIdx+1:]
+		}
+	}
+
+	tracker := NewProgressTracker(req.OnProgress)
+
+	maxTurns := 8
+	for turn := 0; turn < maxTurns; turn++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		// Run Token Saver RTK / Caveman compression pipeline
+		compressedMsgs, saverReport := tokensaver.CompressMessages(messages, policy.TokenSaverMode, policy.MaxTokens*4)
+		totalTokensSaved += saverReport.TokensSaved
+
+		isStreaming := (policy.StreamingEnabled || req.ChannelType == "web") && req.OnStreamChunk != nil
+		thinkingLevel := policy.ThinkingLevel
+		if req.ThinkingLevel != "" {
+			thinkingLevel = req.ThinkingLevel
+		}
+		if thinkingLevel == "" {
+			thinkingLevel = "low"
+		}
+		thinkingEnabled := policy.ThinkingEnabled
+		if thinkingLevel == "disabled" || thinkingLevel == "none" || thinkingLevel == "off" {
+			thinkingEnabled = false
+		}
+
+		chatReq := provider.ChatRequest{
+			Model:           modelToUse,
+			PreferredModel:  req.PreferredModel,
+			Messages:        compressedMsgs,
+			Tools:           allowedTools,
+			Temperature:     0.7,
+			MaxTokens:       policy.MaxTokens,
+			ThinkingEnabled: thinkingEnabled,
+			ThinkingLevel:   thinkingLevel,
+			ThinkingBudget:  req.ThinkingBudget,
+			OnProgress:      req.OnProgress,
+			Stream:          isStreaming,
+			StreamCallback:  req.OnStreamChunk,
+			CacheKey:        "goassistant:" + req.ChannelID + ":" + req.ChatID + ":" + req.UserID,
+		}
+		if !isStreaming {
+			chatReq.StreamCallback = nil
+		}
+
+		var genResp *provider.ChatResponse
+		var genErr error
+		genResp, genErr = o.providerManager.GenerateWithFallback(ctx, provToCall, chatReq)
+		if genErr != nil {
+			if errors.Is(ctx.Err(), context.Canceled) || errors.Is(genErr, context.Canceled) {
+				return nil, context.Canceled
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			// Special handling for Gemini Web Scraper: do NOT retry or mask as generic error
+			if provider.IsGeminiWeb(provToCall) || provider.IsGeminiWeb(modelToUse) {
+				log.Printf("⚠️ [GeminiWeb] Kendala eksekusi web scraper: %v", genErr)
+				return nil, genErr
+			}
+			// Check if error is timeout, stream stalled, context length exceeded, or network issue
+			errStr := strings.ToLower(genErr.Error())
+			isStreamStalled := strings.Contains(errStr, "stream stalled") ||
+				strings.Contains(errStr, "stream read error") ||
+				strings.Contains(errStr, "unexpected eof")
+			isContextOrTimeout := strings.Contains(errStr, "context deadline exceeded") ||
+				strings.Contains(errStr, "timeout") ||
+				strings.Contains(errStr, "context_length_exceeded") ||
+				strings.Contains(errStr, "maximum context length") ||
+				strings.Contains(errStr, "token limit") ||
+				strings.Contains(errStr, "rate limit") ||
+				isStreamStalled
+
+			retrySeconds := 120
+			if cfg := config.Get(); cfg != nil && cfg.Timeouts.RetrySeconds > 0 {
+				retrySeconds = cfg.Timeouts.RetrySeconds
+			}
+
+			// If error happened and we had history turns in the request, try auto-compacting and retrying once with minimal context
+			if isContextOrTimeout && len(history) > 0 {
+				if isStreamStalled {
+					tracker.SetCurrent("Aliran respon AI sempat terhenti, menyambung ulang otomatis")
+				} else {
+					tracker.SetCurrent("Konteks penuh/timeout, merampingkan riwayat & mencoba ulang")
+				}
+
+				// Auto clean old session messages in DB (keep only the very latest 2 messages)
+				_ = o.db.TruncateOldMessages(session.ID, 2)
+				history = nil // Clear history from memory for this attempt
+
+				// Rebuild clean messages: system prompt + user prompt
+				messages = []provider.ChatMessage{
+					{
+						Role:    provider.RoleSystem,
+						Content: sysPrompt,
+					},
+					{
+						Role:    provider.RoleUser,
+						Content: req.UserPrompt,
+					},
+				}
+
+				retryCompressedMsgs, retrySaverReport := tokensaver.CompressMessages(messages, "aggressive", policy.MaxTokens*2)
+				totalTokensSaved += retrySaverReport.TokensSaved
+
+				retryChatReq := provider.ChatRequest{
+					Model:           modelToUse,
+					PreferredModel:  req.PreferredModel,
+					Messages:        retryCompressedMsgs,
+					Tools:           allowedTools,
+					Temperature:     0.7,
+					MaxTokens:       policy.MaxTokens,
+					ThinkingEnabled: thinkingEnabled,
+					ThinkingLevel:   req.ThinkingLevel,
+					ThinkingBudget:  req.ThinkingBudget,
+					OnProgress:      req.OnProgress,
+					Stream:          isStreaming,
+					StreamCallback:  req.OnStreamChunk,
+				}
+
+				// Linked context that respects parent cancellation and timeout budget
+				retryCtx, cancelRetry := context.WithTimeout(ctx,
+					time.Duration(retrySeconds)*time.Second)
+				genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, retryChatReq)
+				cancelRetry()
+			} else if ctx.Err() == nil {
+				// Auto-retry once for transient provider/network glitches before failing
+				if isStreamStalled {
+					tracker.SetCurrent("Aliran respon AI terputus, memulihkan koneksi...")
+				} else {
+					tracker.SetCurrent("Kendala koneksi/server sementara, mencoba ulang otomatis")
+				}
+				select {
+				case <-time.After(1200 * time.Millisecond):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				retryCtx, cancelRetry := context.WithTimeout(ctx,
+					time.Duration(retrySeconds)*time.Second)
+				genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, chatReq)
+				cancelRetry()
+			}
+
+			if genErr != nil {
+				return nil, genErr
+			}
+		}
+
+		resp := genResp
+
+		if resp != nil {
+			if resp.Tries > 0 {
+				totalTries += resp.Tries
+			} else {
+				totalTries++
+			}
+		}
+
+		totalPromptTokens += resp.PromptTokens
+		totalCompletionTokens += resp.CompletionTokens
+		totalThinkingTokens += resp.ThinkingTokens
+		totalTokensUsed += resp.TotalTokens
+		totalTokensSaved += resp.CacheReadTokens
+		totalCostUSD += resp.CostUSD
+		lastModel = resp.Model
+		if lastModel == "" || strings.EqualFold(lastModel, "auto") {
+			lastModel = activeModelName
+		}
+		lastProviderName = resp.ProviderName
+		if lastProviderName == "" {
+			lastProviderName = activeProvName
+		}
+		if resp.Thinking != "" {
+			finalThinking = resp.Thinking
+		}
+
+		if len(resp.ToolCalls) == 0 {
+			// No more tool calls; final response reached
+			finalContent = resp.Content
+			if resp.Thinking != "" {
+				finalThinking = resp.Thinking
+			}
+			extractAttachments(finalContent)
+
+			// If the model produced empty text response (e.g. only thinking or finished tools without text),
+			// attempt an auto-continue prompt to prompt the model for its final text answer
+			if strings.TrimSpace(finalContent) == "" && strings.TrimSpace(finalThinking) == "" && turn < maxTurns-1 {
+				assistantContent := resp.Content
+				if assistantContent == "" {
+					assistantContent = "..."
+				}
+				messages = append(messages, provider.ChatMessage{
+					Role:    provider.RoleAssistant,
+					Content: assistantContent,
+				})
+				messages = append(messages, provider.ChatMessage{
+					Role:    provider.RoleUser,
+					Content: "Lanjutkan dan berikan jawaban teks akhirmu berdasarkan analisis atau pemikiran di atas secara lengkap dan jelas.",
+				})
+				tracker.SetCurrent("Menyusun respon akhir")
+				continue
+			}
+
+			// If the model produced an unfinished transitional message or explicitly says "Lanjutkan" / promises future action without calling a tool,
+			// and we still have turns left, don't stop prematurely! Prompt the model to execute the action immediately!
+			if isUnfinishedTransition(finalContent) && turn < maxTurns-1 {
+				messages = append(messages, provider.ChatMessage{
+					Role:    provider.RoleAssistant,
+					Content: finalContent,
+				})
+				messages = append(messages, provider.ChatMessage{
+					Role:    provider.RoleUser,
+					Content: "Jangan hanya menarasikan rencana berikutnya atau berhenti dengan kata 'Lanjutkan'. Langsung eksekusi tindakan tersebut sekarang dengan memanggil tool yang diperlukan sampai tuntas!",
+				})
+				tracker.SetCurrent("Melanjutkan eksekusi tindakan otomatis")
+				continue
+			}
+
+			break
+		}
+
+		// Assistant called tools
+		if turn == 0 && strings.TrimSpace(resp.Content) != "" {
+			tracker.SetPlan(resp.Content)
+		}
+
+		assistantMsg := provider.ChatMessage{
+			Role:      provider.RoleAssistant,
+			Content:   resp.Content,
+			ToolCalls: resp.ToolCalls,
+		}
+		messages = append(messages, assistantMsg)
+
+		for _, tc := range resp.ToolCalls {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			allToolsCalled = append(allToolsCalled, tc.Name)
+			toolDesc := DescribeToolCall(tc.Name, tc.Arguments)
+			tracker.StartStep(toolDesc)
+
+			toolCtx := WithProgressReporter(ctx, func(status string) {
+				cleanStatus := strings.TrimSpace(status)
+				if cleanStatus != "" {
+					if tc.Name == "delegate_task" {
+						tracker.SetCurrent(cleanStatus)
+					} else {
+						tracker.SetCurrent(fmt.Sprintf("%s: %s", toolDesc, cleanStatus))
+					}
+				}
+			})
+			toolCtx = WithActiveModelInfo(toolCtx, provToCall, modelToUse)
+			if tc.Name == "browser" {
+				if tc.Arguments == nil {
+					tc.Arguments = make(map[string]interface{})
+				}
+				if m, ok := tc.Arguments["model"].(string); !ok || m == "" || m == "auto" {
+					tc.Arguments["model"] = modelToUse
+				}
+				if p, ok := tc.Arguments["provider"].(string); !ok || p == "" {
+					tc.Arguments["provider"] = provToCall
+				}
+				BrowserSessionArg(toolCtx, tc.Arguments)
+			}
+			var toolOut string
+			var toolErr error
+			if isGrapariOnly && tc.Name != "g3a_search_grapari_knowledge" && tc.Name != "search_telkomsel_web" {
+				toolOut = fmt.Sprintf("Error: Akses tool '%s' ditolak. Channel ini dalam mode khusus GraPARI dan hanya diizinkan memanggil 'g3a_search_grapari_knowledge' dan 'search_telkomsel_web'.", tc.Name)
+				toolErr = fmt.Errorf("tool '%s' diblokir pada channel khusus GraPARI", tc.Name)
+			} else {
+				toolOut, toolErr = o.toolRegistry.Execute(toolCtx, tc.Name, tc.Arguments)
+				if toolErr != nil {
+					toolOut = fmt.Sprintf("Error eksekusi tool %s: %v", tc.Name, toolErr)
+				}
+			}
+
+			tracker.CompleteStep(toolDesc, toolErr)
+			extractAttachments(toolOut)
+
+			// Pre-compress tool output before appending to message history
+			compressedToolOut := tokensaver.CompressContent(toolOut, policy.TokenSaverMode)
+
+			toolMsg := provider.ChatMessage{
+				Role:       provider.RoleTool,
+				Name:       tc.Name,
+				ToolCallID: tc.ID,
+				Content:    compressedToolOut,
+			}
+			messages = append(messages, toolMsg)
+
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+		}
+
+		if len(resp.ToolCalls) > 0 {
+			tracker.SetCurrent("Menganalisis hasil data")
+		}
+	}
+
+	// Jika loop tool selesai tapi teks respon masih kosong (misal model hanya menjalankan tools beruntun),
+	// lakukan final synthesis call tanpa tools agar model merumuskan jawaban lengkap
+	if strings.TrimSpace(finalContent) == "" {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		tracker.SetCurrent("Menyusun kesimpulan & analisis akhir")
+
+		synthMsgs := append([]provider.ChatMessage{}, messages...)
+		synthMsgs = append(synthMsgs, provider.ChatMessage{
+			Role:    provider.RoleUser,
+			Content: "Berdasarkan seluruh hasil dan data yang telah diperoleh dari eksekusi tool di atas, berikan kesimpulan analisis lengkap, terstruktur, dan jawaban akhirmu sekarang secara jelas dalam format teks.",
+		})
+
+		synthCompressedMsgs, synthSaverReport := tokensaver.CompressMessages(synthMsgs, policy.TokenSaverMode, policy.MaxTokens*4)
+		totalTokensSaved += synthSaverReport.TokensSaved
+
+		synthReq := provider.ChatRequest{
+			Model:           modelToUse,
+			PreferredModel:  req.PreferredModel,
+			Messages:        synthCompressedMsgs,
+			Tools:           nil, // Paksa hasil berupa teks (tanpa pemanggilan tool lagi)
+			Temperature:     0.7,
+			MaxTokens:       policy.MaxTokens,
+			ThinkingEnabled: policy.ThinkingEnabled,
+			OnProgress:      req.OnProgress,
+			Stream:          (policy.StreamingEnabled || req.ChannelType == "web") && req.OnStreamChunk != nil,
+			StreamCallback:  req.OnStreamChunk,
+		}
+
+		synthResp, synthErr := o.providerManager.GenerateWithFallback(ctx, provToCall, synthReq)
+		if synthErr != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if synthErr == nil && synthResp != nil {
+			if strings.TrimSpace(synthResp.Content) != "" {
+				finalContent = synthResp.Content
+			} else if strings.TrimSpace(synthResp.Thinking) != "" {
+				finalContent = synthResp.Thinking
+			}
+			if synthResp.Thinking != "" {
+				finalThinking = synthResp.Thinking
+			}
+			totalPromptTokens += synthResp.PromptTokens
+			totalCompletionTokens += synthResp.CompletionTokens
+			totalThinkingTokens += synthResp.ThinkingTokens
+			totalTokensUsed += synthResp.TotalTokens
+			totalTokensSaved += synthResp.CacheReadTokens
+			totalCostUSD += synthResp.CostUSD
+			lastModel = synthResp.Model
+			lastProviderName = synthResp.ProviderName
+			extractAttachments(finalContent)
+		}
+	}
+
+	// Strip thinking tags if any remained in finalContent
+	if strings.Contains(finalContent, "<think>") || strings.Contains(finalContent, "<thought>") || strings.Contains(finalContent, "<reasoning>") {
+		cleaned, extracted := provider.ExtractThinkingTags(finalContent)
+		if extracted != "" {
+			finalContent = cleaned
+			if finalThinking == "" {
+				finalThinking = extracted
+			}
+		}
+	}
+	// Bersihkan tag internal [ATTACH_FILE:...] dari teks agar pengguna tidak melihat format bracket teknis
+	finalCleanContent := stripAttachmentTags(finalContent)
+
+	// Intersepsi tag [OUT_OF_SCOPE] pada channel khusus GraPARI ke pesan penolakan resmi hardcoded
+	if isGrapariOnly && (strings.Contains(finalCleanContent, "[OUT_OF_SCOPE]") || strings.EqualFold(strings.TrimSpace(finalCleanContent), "[OUT_OF_SCOPE]")) {
+		finalCleanContent = GrapariOutOfScopeRejection
+	}
+
+	if strings.TrimSpace(finalCleanContent) == "" {
+		if strings.TrimSpace(finalThinking) != "" {
+			// Fallback: use thinking/reasoning content as the main text
+			finalCleanContent = strings.TrimSpace(finalThinking)
+		} else {
+			finalCleanContent = "(Tidak ada respon teks dari model)"
+		}
+	}
+
+	// 10. Persist User & Assistant Messages (clean content without metadata footer)
+	_ = o.sessionManager.AddMessage(session.ID, "user", req.UserPrompt, len(req.UserPrompt)/4)
+	_ = o.sessionManager.AddMessage(session.ID, "assistant", finalCleanContent, len(finalCleanContent)/4)
+
+	// 10b. Asynchronous Memory Auto-Extraction
+	if o.memoryManager != nil && o.memoryManager.IsAutoExtractEnabled() {
+		o.memoryManager.AutoExtractAsync(req.ChannelID, req.UserID, req.UserPrompt, finalCleanContent, activeModelName, activeProvName)
+	}
+
+	// 11. Audit Logging
+	fullPayloadJSON, _ := json.Marshal(messages)
+	toolsJSON, _ := json.Marshal(allToolsCalled)
+	latency := time.Since(start)
+	if totalTries <= 0 {
+		totalTries = 1
+	}
+
+	_ = o.db.InsertAuditLog(&storage.AuditLogRecord{
+		ChannelType:        req.ChannelType,
+		ChannelID:          req.ChannelID,
+		ChatID:             req.ChatID,
+		UserID:             req.UserID,
+		UserName:           req.UserName,
+		Provider:           lastProviderName,
+		Model:              lastModel,
+		PromptTokens:       totalPromptTokens,
+		CompletionTokens:   totalCompletionTokens,
+		ThinkingTokens:     totalThinkingTokens,
+		TotalTokens:        totalTokensUsed,
+		TokensSaved:        totalTokensSaved,
+		NumberOfTries:      totalTries,
+		LatencyMs:          int(latency.Milliseconds()),
+		CostUSD:            totalCostUSD,
+		ToolsCalled:        string(toolsJSON),
+		ClientRequest:      req.UserPrompt,
+		SystemPrompt:       sysPrompt,
+		FullRequestPayload: string(fullPayloadJSON),
+		ProviderResponse:   finalCleanContent,
+		Status:             "success",
+	})
+
+	// 12. Format footer according to policy
+	cleanText := strings.TrimSpace(finalCleanContent)
+	footer := FormatFooter(policy.FooterMode, totalPromptTokens, totalCompletionTokens, totalThinkingTokens, totalTokensUsed, totalTokensSaved, latency, lastModel, lastProviderName, allToolsCalled)
+	finalText := cleanText
+
+	// Prepend thinking content if enabled and available (and not already used as main content fallback)
+	isTelegram := req.ChannelType == "telegram" || req.ChannelType == "telegram_admin"
+	thinkingAllowed := policy.ThinkingEnabled || isTelegram
+	if isGrapariOnly {
+		// Bot GraPARI runs in strict customer-facing mode: omit internal thought preview bubble
+		thinkingAllowed = false
+	}
+	if finalThinking != "" && thinkingAllowed && cleanText != strings.TrimSpace(finalThinking) {
+		displayMode := strings.ToLower(policy.ThinkingDisplay)
+		if isTelegram && (displayMode == "hidden" || displayMode == "") {
+			displayMode = "full" // On Telegram, never drop thinking result
+		}
+		switch displayMode {
+		case "full":
+			if req.ChannelType == "whatsapp" {
+				// For WhatsApp, default to a clean summary / first 64 chars to avoid message bloating
+				thinkPreview := strings.TrimSpace(finalThinking)
+				thinkPreview = strings.ReplaceAll(thinkPreview, "\n", " ")
+				if len(thinkPreview) > 64 {
+					thinkPreview = thinkPreview[:64] + "..."
+				}
+				finalText = "💭 <i>" + thinkPreview + "</i>\n\n" + finalText
+			} else {
+				cleanThinking := strings.TrimSpace(finalThinking)
+				if isTelegram {
+					cleanThinking = cleanThinkingForTelegram(cleanThinking)
+				}
+				finalText = "💭 <b>Proses Berpikir:</b>\n<blockquote expandable>" + cleanThinking + "</blockquote>\n\n" + finalText
+			}
+		case "summary":
+			// Truncate thinking to single-line preview (64 chars)
+			thinkPreview := strings.TrimSpace(finalThinking)
+			thinkPreview = strings.ReplaceAll(thinkPreview, "\n", " ")
+			if len(thinkPreview) > 64 {
+				thinkPreview = thinkPreview[:64] + "..."
+			}
+			finalText = "💭 <i>" + thinkPreview + "</i>\n\n" + finalText
+			// "hidden" — don't show thinking
+		}
+	}
+
+	if footer != "" {
+		finalText = finalText + "\n\n" + footer
+	}
+
+	if visionFallbackNotice != "" {
+		finalText = visionFallbackNotice + finalText
+	}
+
+	agentResp := &AgentResponse{
+		Text:             finalText,
+		RawText:          cleanText,
+		ThinkingContent:  finalThinking,
+		Footer:           footer,
+		MediaFiles:       mediaFiles,
+		ToolsUsed:        allToolsCalled,
+		PromptTokens:     totalPromptTokens,
+		CompletionTokens: totalCompletionTokens,
+		ThinkingTokens:   totalThinkingTokens,
+		TotalTokens:      totalTokensUsed,
+		TokensSaved:      totalTokensSaved,
+		Latency:          latency,
+		ProviderUsed:     lastProviderName,
+		ModelUsed:        lastModel,
+	}
+
+	return agentResp, nil
+}
+
+// FormatFooter formats the footer according to policy mode ('off', 'tokens', 'full')
+func FormatFooter(mode string, promptTokens, completionTokens, thinkingTokens, totalTokens, tokensSaved int, latency time.Duration, model, providerName string, toolsCalled []string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "tokens":
+		tokDisplay := totalTokens
+		if tokDisplay <= 0 {
+			tokDisplay = promptTokens + completionTokens
+		}
+		var result string
+		if tokDisplay > 0 {
+			result = fmt.Sprintf("🪙 %s tokens", formatThousands(tokDisplay))
+		} else {
+			result = "🪙 (tokens recorded)"
+		}
+		if thinkingTokens > 0 {
+			result += fmt.Sprintf(" (💭 %s)", formatThousands(thinkingTokens))
+		}
+		if tokensSaved > 0 {
+			result += fmt.Sprintf(" • 🌿 hemat: %s", formatThousands(tokensSaved))
+		}
+		return "—\n" + result
+
+	case "full":
+		var parts []string
+
+		// Latency
+		ms := latency.Milliseconds()
+		if ms > 0 {
+			if ms < 1000 {
+				parts = append(parts, fmt.Sprintf("⚡ %dms", ms))
+			} else {
+				parts = append(parts, fmt.Sprintf("⚡ %.1fs", float64(ms)/1000.0))
+			}
+		}
+
+		// Tokens
+		tokDisplay := totalTokens
+		if tokDisplay <= 0 {
+			tokDisplay = promptTokens + completionTokens
+		}
+		if tokDisplay > 0 {
+			if promptTokens > 0 && completionTokens > 0 {
+				tokStr := fmt.Sprintf("🪙 %s (in: %s / out: %s)", formatThousands(tokDisplay), formatThousands(promptTokens), formatThousands(completionTokens))
+				if thinkingTokens > 0 {
+					tokStr += fmt.Sprintf(" 💭 %s", formatThousands(thinkingTokens))
+				}
+				if tokensSaved > 0 {
+					tokStr += fmt.Sprintf(" • 🌿 hemat %s", formatThousands(tokensSaved))
+				}
+				parts = append(parts, tokStr)
+			} else {
+				tokStr := fmt.Sprintf("🪙 %s tokens", formatThousands(tokDisplay))
+				if tokensSaved > 0 {
+					tokStr += fmt.Sprintf(" • 🌿 hemat %s", formatThousands(tokensSaved))
+				}
+				parts = append(parts, tokStr)
+			}
+		} else if tokensSaved > 0 {
+			parts = append(parts, fmt.Sprintf("🌿 hemat %s tokens", formatThousands(tokensSaved)))
+		}
+
+		// Tools
+		if len(toolsCalled) > 0 {
+			parts = append(parts, fmt.Sprintf("🔧 %d tools", len(toolsCalled)))
+		}
+
+		// Model / Provider
+		if providerName != "" && model != "" {
+			if strings.EqualFold(providerName, model) {
+				parts = append(parts, fmt.Sprintf("🤖 %s", model))
+			} else {
+				parts = append(parts, fmt.Sprintf("🤖 %s • %s", providerName, model))
+			}
+		} else if model != "" {
+			parts = append(parts, fmt.Sprintf("🤖 %s", model))
+		} else if providerName != "" {
+			parts = append(parts, fmt.Sprintf("🤖 %s", providerName))
+		}
+
+		if len(parts) == 0 {
+			return "—\n⚡ respons selesai"
+		}
+
+		return "—\n" + strings.Join(parts, " • ")
+
+	default: // "off", "none", "", etc.
+		return ""
+	}
+}
+
+func formatThousands(n int) string {
+	in := fmt.Sprintf("%d", n)
+	out := make([]byte, len(in)+(len(in)-1)/3)
+	for i, j, k := len(in)-1, len(out)-1, 0; i >= 0; i, j = i-1, j-1 {
+		out[j] = in[i]
+		k++
+		if k%3 == 0 && i > 0 {
+			j--
+			out[j] = ','
+		}
+	}
+	return string(out)
+}
+
+// FormatUserFriendlyError converts internal technical error traces into clean, polite messages for end-users
+func FormatUserFriendlyError(err error) string {
+	return FormatUserFriendlyErrorForChannel(err, false)
+}
+
+// FormatUserFriendlyErrorForChannel converts error traces with GrapariMode awareness
+func FormatUserFriendlyErrorForChannel(err error, isGrapariOnly bool) string {
+	if err == nil {
+		return ""
+	}
+	if isGrapariOnly {
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "canceled") {
+			return "🛑 **Proses Dibatalkan**\nEksekusi permintaan atau proses telah dihentikan oleh pengguna."
+		}
+		return GrapariServerError
+	}
+	errStr := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "canceled"):
+		return "🛑 **Proses Dibatalkan**\nEksekusi permintaan atau proses telah dihentikan oleh pengguna."
+	case strings.Contains(errStr, "context deadline exceeded") || strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline"):
+		return "⏳ **Waktu Tunggu Habis (Timeout)**\nServer AI membutuhkan waktu terlalu lama untuk memproses (beban server tinggi atau konteks terlalu panjang). Riwayat percakapan telah disederhanakan secara otomatis. Silakan coba kirim ulang pertanyaan Anda (gunakan `/retry`), atau gunakan `/reset` jika kendala berlanjut."
+	case strings.Contains(errStr, "context_length_exceeded") || strings.Contains(errStr, "maximum context length") || strings.Contains(errStr, "token limit"):
+		return "📏 **Batas Konteks Terlampaui**\nRiwayat percakapan melebihi kapasitas memori model AI. Riwayat telah dibersihkan otomatis. Silakan kirim ulang pertanyaan Anda atau gunakan `/retry`."
+	case strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "429") || strings.Contains(errStr, "quota"):
+		return "⚠️ **Batas Kuota / Rate Limit**\nLayanan AI sedang mencapai batas frekuensi panggilan atau kuota provider telah habis. Silakan coba beberapa saat lagi dengan `/retry` atau hubungi admin."
+	case strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no such host") || strings.Contains(errStr, "dial tcp"):
+		return "🔌 **Koneksi Terputus**\nGagal terhubung ke endpoint server AI. Mohon periksa koneksi jaringan atau coba beberapa saat lagi dengan `/retry`."
+	case strings.Contains(errStr, "seluruh target gagal"):
+		return "❌ **Layanan AI Sedang Gangguan**\nTarget provider/model AI saat ini tidak dapat merespons. Silakan coba lagi dengan `/retry` atau hubungi admin."
+	case strings.Contains(errStr, "login") || strings.Contains(errStr, "cookie") || strings.Contains(errStr, "autentikasi") || strings.Contains(errStr, "snlm0e") || strings.Contains(errStr, "unauthorized") || strings.Contains(errStr, "401") || strings.Contains(errStr, "gemini web"):
+		return fmt.Sprintf("🔐 **Kendala Sesi Gemini Web (Google Auth)**\n%s\n\n💡 <i>Silakan login ke https://gemini.google.com/app di browser Anda, salin cookie <code>__Secure-1PSID</code> (dan <code>__Secure-1PSIDTS</code> bila ada), lalu kirimkan via perintah <code>/gemini_login</code>.</i>", err.Error())
+	default:
+		return "❌ **Maaf, terjadi kendala teknis pada layanan AI.**\nSilakan coba lagi beberapa saat lagi (bisa gunakan `/retry`) atau gunakan `/reset` untuk memulai percakapan baru."
+	}
+}
+
+// stripAttachmentTags removes [ATTACH_FILE:path|CAPTION:text] and [ATTACH_FILE:path] tags from the content
+func stripAttachmentTags(s string) string {
+	for {
+		idx := strings.Index(s, "[ATTACH_FILE:")
+		if idx == -1 {
+			break
+		}
+		endIdx := strings.Index(s[idx:], "]")
+		if endIdx == -1 {
+			break
+		}
+		s = s[:idx] + s[idx+endIdx+1:]
+	}
+	return strings.TrimSpace(s)
+}
+
+// cleanThinkingForTelegram ensures thinking content is clean readable text without code block fences or code tags
+func cleanThinkingForTelegram(think string) string {
+	think = strings.TrimSpace(think)
+	if think == "" {
+		return ""
+	}
+
+	// 1. Strip HTML code/pre tags if present
+	reCodeTags := regexp.MustCompile(`(?i)</?(?:pre|code)[^>]*>`)
+	think = reCodeTags.ReplaceAllString(think, "")
+
+	// 2. Strip outer markdown code blocks: ```thinking ... ``` or ``` ... ```
+	for strings.HasPrefix(think, "```") {
+		firstNL := strings.Index(think, "\n")
+		if firstNL != -1 {
+			think = strings.TrimSpace(think[firstNL+1:])
+			if strings.HasSuffix(think, "```") {
+				think = strings.TrimSpace(think[:len(think)-3])
+			}
+		} else {
+			think = strings.TrimPrefix(think, "```")
+			think = strings.TrimSuffix(think, "```")
+			break
+		}
+	}
+
+	// 3. Remove any remaining ``` fences so thinking is not rendered as a code block
+	reFences := regexp.MustCompile("(?m)^```[a-zA-Z0-9_-]*$")
+	think = reFences.ReplaceAllString(think, "")
+
+	return strings.TrimSpace(think)
+}
+
+// isUnfinishedTransition detects if the assistant output indicates talking to itself, promising next action,
+// or ending with "Lanjutkan" without calling a tool when the task is not yet concluded.
+func isUnfinishedTransition(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+
+	// Explicit continuation signals at the end or standalone
+	if strings.HasSuffix(lower, "lanjutkan.") || strings.HasSuffix(lower, "lanjutkan") ||
+		strings.HasSuffix(lower, "mari kita lanjutkan.") || strings.HasSuffix(lower, "mari kita lanjutkan") ||
+		strings.HasSuffix(lower, "lanjutkan?") || strings.HasSuffix(lower, "silakan lanjutkan.") {
+		return true
+	}
+
+	// Transitional cues promising next action without finishing
+	transitionalPhrases := []string{
+		"tinggal klik",
+		"selanjutnya saya akan",
+		"berikutnya saya akan",
+		"langkah selanjutnya adalah",
+		"sekarang kita klik",
+		"sekarang tinggal",
+		"mari kita buka",
+	}
+
+	for _, phrase := range transitionalPhrases {
+		if strings.Contains(lower, phrase) {
+			// Ensure it's not already a finished summary
+			if !strings.Contains(lower, "kesimpulan") && !strings.Contains(lower, "selesai") && !strings.Contains(lower, "berhasil") {
+				return true
+			}
+		}
+	}
+
+	return false
+}

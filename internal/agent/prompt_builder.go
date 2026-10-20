@@ -1,0 +1,313 @@
+package agent
+
+import (
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"goassistant/internal/sysenv"
+	"goassistant/internal/tools"
+)
+
+type PromptBuilder struct {
+	mdLoader *MDLoader
+}
+
+func NewPromptBuilder(mdLoader *MDLoader) *PromptBuilder {
+	return &PromptBuilder{mdLoader: mdLoader}
+}
+
+type PromptContext struct {
+	ChannelID       string
+	AgentRole       string
+	ChannelType     string
+	ChannelName     string
+	UserName        string
+	UserID          string
+	MemoryContext   string
+	SessionSummary  string
+	ActiveModel     string
+	ActiveProvider  string
+	ThinkingEnabled bool
+	StreamMode      bool
+	AllowedTools    []tools.Tool
+	IsGrapariOnly   bool
+}
+
+var (
+	reHTMLComments  = regexp.MustCompile(`(?s)<!--.*?-->`)
+	reMultiNewlines = regexp.MustCompile(`\n{3,}`)
+)
+
+// MinifySystemPrompt strips HTML comments, trims whitespace, and collapses blank lines
+func MinifySystemPrompt(prompt string) string {
+	prompt = reHTMLComments.ReplaceAllString(prompt, "")
+	lines := strings.Split(prompt, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimRight(l, " \t\r")
+	}
+	prompt = strings.Join(lines, "\n")
+	prompt = reMultiNewlines.ReplaceAllString(prompt, "\n\n")
+	return strings.TrimSpace(prompt)
+}
+
+// filterToolsGuidelines dynamically filters TOOLS.md to only keep guidelines for allowed tools
+func filterToolsGuidelines(toolsMD string, allowedTools []tools.Tool) string {
+	if allowedTools == nil {
+		return toolsMD
+	}
+	if len(allowedTools) == 0 {
+		return ""
+	}
+	allowedMap := make(map[string]bool)
+	for _, t := range allowedTools {
+		allowedMap[strings.ToLower(t.Name())] = true
+	}
+
+	// Split by numbered sections e.g. "1. **"
+	sectionSplitter := regexp.MustCompile(`(?m)^(\d+\.\s+\*\*.*?\*\*:?)`)
+	parts := sectionSplitter.Split(toolsMD, -1)
+	headers := sectionSplitter.FindAllString(toolsMD, -1)
+
+	if len(headers) == 0 {
+		return toolsMD
+	}
+
+	var sb strings.Builder
+	if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+		sb.WriteString(strings.TrimSpace(parts[0]))
+		sb.WriteString("\n\n")
+	}
+
+	for i, h := range headers {
+		body := ""
+		if i+1 < len(parts) {
+			body = parts[i+1]
+		}
+		full := h + body
+		lower := strings.ToLower(full)
+
+		// Check if any allowed tool matches this section
+		keep := false
+		for toolName := range allowedMap {
+			if strings.Contains(lower, "`"+toolName+"`") || strings.Contains(lower, toolName) {
+				keep = true
+				break
+			}
+		}
+		if keep {
+			sb.WriteString(strings.TrimSpace(full))
+			sb.WriteString("\n\n")
+		}
+	}
+
+	return strings.TrimSpace(sb.String())
+}
+
+// BuildSystemPrompt builds the complete system prompt from Markdown files and context
+func (pb *PromptBuilder) BuildSystemPrompt(ctx PromptContext) (string, error) {
+	var sb strings.Builder
+
+	// 1. Load IDENTITY.md (scoped to channel or global fallback) - STATIC
+	if ctx.IsGrapariOnly {
+		// Dedicated lean identity for GraPARI Assistant (Zero Token Bloat: ~200 chars vs ~3500 chars)
+		sb.WriteString("# Identity & Persona (Asisten Layanan GraPARI)\n")
+		sb.WriteString("Kamu adalah Asisten Layanan & SOP GraPARI Telkomsel yang ramah, sopan, profesional, dan to-the-point.\n")
+		sb.WriteString("Tugas utamamu adalah membantu menjawab pertanyaan seputar SOP operasional, prosedur layanan, dan informasi resmi Telkomsel.\n")
+		sb.WriteString("Gunakan format Markdown yang rapi (bold, bullet points) agar mudah dibaca di WhatsApp.\n\n")
+	} else {
+		identity, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "IDENTITY.md")
+		if err == nil && identity != "" {
+			sb.WriteString(identity)
+			sb.WriteString("\n\n")
+		} else {
+			sb.WriteString("# Identity\nKamu adalah GoAssistant, sebuah AI assistant cerdas, tanggap, dan membantu yang berjalan di lingkungan server mandiri.\n\n")
+		}
+	}
+
+	// 2. Load SOUL.md / KNOWLEDGE.md - STATIC (Skip in GraPARI-only mode to conserve tokens)
+	if !ctx.IsGrapariOnly {
+		soul, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "SOUL.md")
+		if err == nil && soul != "" {
+			sb.WriteString("## Core Knowledge & SOP:\n")
+			sb.WriteString(soul)
+			sb.WriteString("\n\n")
+		}
+	}
+
+	// 3. Load AGENTS.md for Multi-Agent & Specialized Roles - STATIC (Skip in GraPARI-only mode to conserve tokens)
+	if !ctx.IsGrapariOnly {
+		agentsMD, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "AGENTS.md")
+		if err == nil && agentsMD != "" {
+			sb.WriteString("## Multi-Agent Delegation & Specialized Roles:\n")
+			sb.WriteString("Kamu dapat memecah masalah kompleks dan mendelegasikan sub-tugas ke sub-agen spesialis melalui tool `delegate_task` agar konteks tetap fokus dan tidak membengkak.\n")
+			sb.WriteString(agentsMD)
+			sb.WriteString("\n\n")
+		}
+	}
+
+	// 4. Tool Instructions if TOOLS.md exists (scoped to channel or global fallback) - STATIC
+	// (Skip in GraPARI-only mode because tools are already concisely specified in Section 5 below)
+	if !ctx.IsGrapariOnly {
+		toolsMD, err := pb.mdLoader.GetFileForChannel(ctx.ChannelID, "TOOLS.md")
+		if err == nil && toolsMD != "" {
+			if ctx.AllowedTools != nil {
+				toolsMD = filterToolsGuidelines(toolsMD, ctx.AllowedTools)
+			}
+			if toolsMD != "" {
+				sb.WriteString("## Tool Usage Guidelines:\n")
+				sb.WriteString(toolsMD)
+				sb.WriteString("\n\n")
+			}
+		}
+	}
+
+	// 5. Mode Khusus GraPARI Compliance Policy (if enabled)
+	if ctx.IsGrapariOnly {
+		sb.WriteString("## MODE KHUSUS OPERASIONAL & SOP GRAPARI (STRICT COMPLIANCE POLICY):\n")
+		sb.WriteString("1. **Fokus Eksklusif:** Channel ini beroperasi dalam mode KHUSUS SOP, PANDUAN KERJA, DAN OPERASIONAL LAYANAN GRAPARI / TELKOMSEL.\n")
+		sb.WriteString("2. **Akses Tools:** Kamu memiliki akses ke dua tool resmi:\n")
+		sb.WriteString("   - `g3a_search_grapari_knowledge`: Gunakan tool ini untuk mencari informasi resmi SOP internal GraPARI, flowchart, prosedur penanganan, link/spreadsheet, petunjuk MSISDN, dan email PIC/eskalasi.\n")
+		sb.WriteString("   - `search_telkomsel_web`: Gunakan tool ini khusus untuk mencari dan memverifikasi informasi publik terkini, produk, paket kuota/internet, roaming, ketentuan eSIM, tarif, dan panduan resmi langsung dari situs telkomsel.com.\n")
+		sb.WriteString("3. **ATURAN PENOLAKAN SINGKAT (1-TOKEN MINIMIZER):** Jika pengguna mengajukan pertanyaan, tugas, atau obrolan DI LUAR konteks dokumen SOP GraPARI dan layanan Telkomsel (seperti permintaan coding/program, matematika umum, dongeng/puisi, trivia acak, atau topik umum non-GraPARI), kamu DILARANG membuat penjelasan panjang. Kamu WAJIB menjawab HANYA dengan satu kata persis: `[OUT_OF_SCOPE]`. Sistem akan secara otomatis menggantinya dengan template penolakan resmi bagi pengguna.\n")
+		sb.WriteString("4. **INTEGRITAS DATA & ANTI-HALUSINASI KETAT (ZERO HALLUCINATION):**\n")
+		sb.WriteString("   - DILARANG KERAS MENGARANG, MENYIMPULKAN, ATAU MENEBAK NAMA, ALAMAT, ATAU LOKASI GRAPARI jika tidak tertulis secara eksplisit pada hasil pencarian tool!\n")
+		sb.WriteString("   - Berikan jawaban HANYA berdasarkan referensi nyata yang ditemukan dari knowledge base GraPARI (`g3a_search_grapari_knowledge`) atau portal resmi telkomsel.com (`search_telkomsel_web`).\n")
+		sb.WriteString("   - Jika informasi lokasi atau jawaban spesifik TIDAK DITEMUKAN pada hasil pencarian tool, kamu WAJIB jujur menyatakan bahwa data alamat/lokasi spesifik GraPARI di kota/wilayah tersebut tidak tercantum dalam ringkasan resmi saat ini, dan arahkan pengguna untuk memeriksa langsung daftar GraPARI terdekat di: https://www.telkomsel.com/support/grapariterdekat atau via aplikasi MyTelkomsel / call center 188.\n\n")
+	}
+
+	// 6. Injected Dynamic Context & Memory (Placed at suffix to maximize static prefix prompt caching)
+	sb.WriteString("## Environment & Session Context:\n")
+	sb.WriteString(fmt.Sprintf("- Channel: %s (%s)\n", ctx.ChannelName, ctx.ChannelType))
+	if ctx.UserName != "" {
+		sb.WriteString(fmt.Sprintf("- User: %s (ID: %s)\n", ctx.UserName, ctx.UserID))
+	}
+	if ctx.ActiveModel != "" {
+		sb.WriteString(fmt.Sprintf("- Active AI Model: %s\n", ctx.ActiveModel))
+	}
+	if ctx.ActiveProvider != "" {
+		sb.WriteString(fmt.Sprintf("- AI Provider Gateway: %s\n", ctx.ActiveProvider))
+	}
+	sb.WriteString(fmt.Sprintf("- Current Time: %s\n", time.Now().Format("Monday, 02 January 2006 15:04:05 MST")))
+	sb.WriteString("\n")
+
+	// Injected Host System Environment (dynamic detection of OS, privilege tools, package managers, init systems)
+	// GraPARI-only bot does not need server host environment details
+	if !ctx.IsGrapariOnly {
+		sb.WriteString(sysenv.GetHostInfo().FormatPrompt())
+		sb.WriteString("\n")
+	}
+
+	if ctx.SessionSummary != "" {
+		sb.WriteString("### Previous Conversation Summary:\n")
+		sb.WriteString(ctx.SessionSummary)
+		sb.WriteString("\n\n")
+	}
+
+	if ctx.MemoryContext != "" {
+		sb.WriteString(ctx.MemoryContext)
+		sb.WriteString("\n")
+	}
+
+	rawPrompt := sb.String()
+
+	// Replace template variables
+	rawPrompt = strings.ReplaceAll(rawPrompt, "{{time}}", time.Now().Format("2006-01-02 15:04:05"))
+	rawPrompt = strings.ReplaceAll(rawPrompt, "{{user_name}}", ctx.UserName)
+	rawPrompt = strings.ReplaceAll(rawPrompt, "{{channel}}", ctx.ChannelName)
+	rawPrompt = strings.ReplaceAll(rawPrompt, "{{model}}", ctx.ActiveModel)
+	rawPrompt = strings.ReplaceAll(rawPrompt, "{{provider}}", ctx.ActiveProvider)
+	if ctx.ThinkingEnabled {
+		rawPrompt = strings.ReplaceAll(rawPrompt, "{{thinking_enabled}}", "true")
+	} else {
+		rawPrompt = strings.ReplaceAll(rawPrompt, "{{thinking_enabled}}", "false")
+	}
+	if ctx.StreamMode {
+		rawPrompt = strings.ReplaceAll(rawPrompt, "{{stream_mode}}", "streaming")
+	} else {
+		rawPrompt = strings.ReplaceAll(rawPrompt, "{{stream_mode}}", "batch")
+	}
+
+	return MinifySystemPrompt(rawPrompt), nil
+}
+
+// BuildSubagentPrompt constructs a dedicated, focused system prompt for a specialized subagent
+func (pb *PromptBuilder) BuildSubagentPrompt(role string, optTools ...[]tools.Tool) (string, error) {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("# Specialized Sub-Agent Role: %s\n", strings.ToUpper(role)))
+	sb.WriteString("Kamu adalah Sub-Agen Spesialis independen yang bertugas menyelesaikan satu sub-tugas tertentu dengan fokus penuh, cepat, dan presisi.\n\n")
+
+	agentsMD, err := pb.mdLoader.GetFile("AGENTS.md")
+	if err == nil && agentsMD != "" {
+		sb.WriteString("## Spesialisasi & Aturan Peran:\n")
+		sb.WriteString(agentsMD)
+		sb.WriteString("\n\n")
+	}
+
+	// Tool Guidelines if available for allowed tools
+	var allowedTools []tools.Tool
+	if len(optTools) > 0 {
+		allowedTools = optTools[0]
+	}
+	toolsMD, err := pb.mdLoader.GetFile("TOOLS.md")
+	if err == nil && toolsMD != "" && len(allowedTools) > 0 {
+		filtered := filterToolsGuidelines(toolsMD, allowedTools)
+		if filtered != "" {
+			sb.WriteString("## Pedoman Penggunaan Tools:\n")
+			sb.WriteString(filtered)
+			sb.WriteString("\n\n")
+		}
+
+		// Host Environment if bash_exec is allowed
+		for _, t := range allowedTools {
+			if t.Name() == "bash_exec" {
+				sb.WriteString(sysenv.GetHostInfo().FormatPrompt())
+				sb.WriteString("\n")
+				break
+			}
+		}
+	}
+
+	// Role-specific enhancements
+	switch strings.ToLower(role) {
+	case "coder", "programmer", "developer":
+		sb.WriteString("## Pedoman Khusus Coder:\n")
+		sb.WriteString("- Tulis kode yang bersih, efisien, dan terdokumentasi.\n")
+		sb.WriteString("- Sertakan error handling dan edge cases.\n")
+		sb.WriteString("- Gunakan best practices dari bahasa pemrograman yang diminta.\n\n")
+	case "analyst", "analyzer", "visit_analyst":
+		sb.WriteString("## Pedoman Khusus Analyst:\n")
+		sb.WriteString("- Analisis data secara sistematis dan terstruktur.\n")
+		sb.WriteString("- Berikan insight yang actionable dan didukung bukti data numerik.\n")
+		sb.WriteString("- Gunakan tabel atau bullet points untuk kejelasan penyajian.\n")
+		sb.WriteString("- Jika tugas berkaitan dengan Visit Performance / Antrean GraPARI / Dashboard bt1 (https://a1.tsel.my.id):\n")
+		sb.WriteString("  * Panggil tool `capture_visit_performance` (parameter section: 'overview', 'kpi', 'charts', atau 'tables').\n")
+		sb.WriteString("  * Susun Laporan Eksekutif dengan struktur: Ringkasan Eksekutif (Total Area Sumatera), Kepatuhan SLA Antrean (target < 5 menit), Breakdown Regional, Highlight Anomali & Bottlenecks (> 6 menit), dan Rekomendasi Operasional.\n\n")
+
+	case "researcher":
+		sb.WriteString("## Pedoman Khusus Researcher:\n")
+		sb.WriteString("- Lakukan riset mendalam dan komprehensif.\n")
+		sb.WriteString("- Sertakan sumber dan referensi jika memungkinkan.\n")
+		sb.WriteString("- Bandingkan multiple perspektif dan sudut pandang.\n\n")
+	case "writer", "copywriter":
+		sb.WriteString("## Pedoman Khusus Writer:\n")
+		sb.WriteString("- Tulis dengan gaya yang sesuai konteks dan audiens.\n")
+		sb.WriteString("- Perhatikan struktur, alur, dan kejelasan pesan.\n")
+		sb.WriteString("- Gunakan bahasa yang menarik dan persuasif.\n\n")
+	case "reviewer":
+		sb.WriteString("## Pedoman Khusus Reviewer:\n")
+		sb.WriteString("- Review secara kritis dan konstruktif.\n")
+		sb.WriteString("- Identifikasi kekuatan dan kelemahan.\n")
+		sb.WriteString("- Berikan saran perbaikan yang spesifik.\n\n")
+	}
+
+	sb.WriteString("## Prinsip Kerja Sub-Agen:\n")
+	sb.WriteString("1. Fokus hanya pada instruksi tugas yang didelegasikan kepadamu.\n")
+	sb.WriteString("2. Gunakan data/konteks terisolasi yang diberikan tanpa memerlukan seluruh riwayat percakapan.\n")
+	sb.WriteString("3. Kembalikan hasil yang padat, akurat, solutif, dan terstruktur tanpa basa-basi pembuka yang berlebihan.\n")
+	sb.WriteString("4. Jika tugas memerlukan tools, gunakan tools yang tersedia secara efisien.\n")
+
+	return sb.String(), nil
+}
+

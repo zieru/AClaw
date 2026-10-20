@@ -1,0 +1,175 @@
+server:
+  data_dir: "./data"
+  db_path: "./data/goassistant.db"
+  md_dir: "./data/md"
+  log_dir: "./data/logs"
+  log_level: "info"
+
+admin_telegram:
+  bot_token: "5331591811:AAH3lr4DyWkmJJrmUM4EhWmlCErVuCU5Am0"
+  allowed_user_ids: [399999658,6265897325] # Masukkan Telegram User ID Admin (contoh: [123456789]), kosongkan jika belum tahu
+  poll_timeout: 30
+
+defaults:
+  default_provider: "wz"
+  default_model: "wz/gpt-6-luna"
+  temperature: 0.7
+  max_tokens: 2048
+  max_context_turns: 20
+  token_budget: 8000
+
+# 9Router Built-in Engine Configurations
+proxy_pool:
+  enabled: true
+  strategy: "round-robin" # round-robin, least-errors, best-latency, random
+  initial_proxies: [] # Contoh: ["http://user:pass@127.0.0.1:8080", "socks5://127.0.0.1:1080"]
+
+token_saver:
+  default_mode: "auto" # auto (RTK), aggressive, caveman, off
+
+# Streaming & Thinking Configuration
+streaming:
+  enabled: true              # Enable/disable streaming response secara global
+  thinking_enabled: true     # Tampilkan proses berpikir/reasoning dari model AI
+  thinking_display: "full"   # full (tampilkan semua), summary (ringkasan), hidden (sembunyikan)
+  chunk_delay_ms: 500        # Delay (ms) antara update streaming ke Telegram (500ms = 2x/detik)
+
+timeouts:
+  api_call_seconds: 90
+  handler_seconds: 180
+  retry_seconds: 120
+
+# Sub-Agent Multi-Task Delegation
+subagent:
+  max_parallel: 3            # Max sub-agent berjalan bersamaan (3-5 direkomendasikan)
+  timeout_seconds: 90        # Batas waktu per sub-task (detik, cukup untuk browser screenshot & sintesis laporan)
+  auto_delegate: false       # Matikan auto-delegate agar prompt analitik/query dieksekusi langsung
+  token_budget_per_task: 4096 # Budget token per sub-agent task
+
+# GoAssist HTTP Server Configuration
+http_server:
+  enabled: true              # Aktifkan HTTP server bersamaan dengan daemon
+  port: 12110                 # Port HTTP Server
+  endpoints_file: "configs/endpoints.yaml" # Path konfigurasi endpoint dinamis
+  read_timeout_seconds: 15
+  write_timeout_seconds: 45
+
+# GoAssistant Web Admin Configuration (Khusus Administrator)
+web_admin:
+  enabled: true              # Aktifkan Web Admin dashboard & web chat
+  bind_address: "0.0.0.0"    # Binding IP host (0.0.0.0 untuk semua interface, 127.0.0.1 untuk localhost)
+  port: 12111                # Port Web Admin (bisa diubah dinamis lewat Telegram: /setwebport [ip] <port>)
+  session_ttl_minutes: 1440  # Masa aktif login admin (menit)
+  otp_ttl_minutes: 5         # Masa berlaku kode OTP Telegram (menit)
+  api_key: "sk-goassist-default-admin-key" # Bearer token untuk programmatic AI HTTP API (prefix: sk-)
+
+# Auto-Updater Configuration (GitHub Releases)
+updater:
+  github_repo: "zieru/AClaw"  # Repository target untuk auto-update binary
+
+# Webshare.io Proxy Pool Provider (https://apidocs.webshare.io/)
+webshare:
+  api_key: ""                 # Masukkan API Token Webshare (atau set env WEBSHARE_API_KEY)
+  mode: "direct"              # "direct" atau "backbone" (backbone untuk rotating/residential)
+  protocol: "http"            # "http" atau "socks5"
+  countries: []               # Filter negara, contoh: ["US", "SG"] atau kosongkan untuk semua
+  auto_sync: false            # Otomatis sinkronisasi proxy saat daemon berjalan
+  sync_interval_minutes: 60   # Interval pembaruan otomatis (menit)
+  group_name: "webshare"      # Nama grup proxy di database
+
+# MCP (Model Context Protocol) External Tools Configuration
+mcp_servers:
+  - name: "g3a"
+    enabled: true
+    transport: "stdio"        # "stdio" (subprocess otomatis) atau "sse" (HTTP)
+    command: "/home/zieru/bin/g3a"  # Path executable g3a (misal: /root/bin/g3a atau /home/<user>/bin/g3a)
+    args: ["mcp"]
+    prefix: "g3a"            # Prefix tool: g3a_query_analytics, g3a_run_sql, g3a_describe_dataset, dll.
+
+  - name: "browser_use"
+    enabled: true
+    transport: "sse"
+    url: "http://127.0.0.1:20129/sse"
+    prefix: ""
+    env:
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      OMNIROUTE_BASE_URL: "http://localhost:20128/v1"
+
+
+# Web Search Multi-Provider Configuration (Tavily, Firecrawl, DuckDuckGo)
+search:
+  enabled: true
+  provider: "auto"             # "auto" (Tavily, Firecrawl, DuckDuckGo), "tavily", "firecrawl", "duckduckgo"
+  strategy: "fallback"         # "fallback" (priority failover) atau "roundrobin" (rotasi berimbang)
+  max_results: 5
+  fallback_enabled: true       # Otomatis fallback jika provider utama gagal/kuota habis
+  timeout_seconds: 15
+  tavily:
+    api_key: ""                # API key Tavily (atau via env TAVILY_API_KEY)
+    base_url: "https://api.tavily.com"
+    search_depth: "basic"      # "basic" atau "advanced"
+    include_answer: true       # Sertakan ringkasan AI instant answer dari Tavily
+  firecrawl:
+    api_key: ""                # API key Firecrawl (atau via env FIRECRAWL_API_KEY)
+    base_url: "https://api.firecrawl.dev" # Bisa diarahkan ke self-hosted Firecrawl
+
+# OmniRoute Local Gateway Collaboration (:20128)
+omniroute:
+  enabled: false               # Dinonaktifkan: GoAssistant kini berjalan mandiri tanpa OmniRoute
+  base_url: "http://localhost:20128" # Localhost internal pada server yang sama
+  password: ""                      # Masukkan master password dashboard atau set via env OMNIROUTE_PASSWORD
+  api_key: ""                       # Optional: Bearer token jika menggunakan OmniRoute API Key (atau env OMNIROUTE_API_KEY)
+  use_upstream_search: false         # Diputus: Web search kini mandiri via Tavily / Firecrawl multiprovider
+  use_upstream_memory: false         # Diputus: Sistem memory sekarang 100% mandiri di dalam GoAssistant
+
+
+# Embedded Bifrost AI Gateway
+bifrost:
+  enabled: true
+  vector_store: "none"
+  vector_store_addr: "127.0.0.1:6379"
+  semantic_cache: false
+  semantic_cache_ttl: "5m"
+  prompt_cache: true
+  logging: false
+  log_store: "none"
+  proxy_url: ""
+
+# GoAssistant Standalone Memory Engine (SQLite + FTS5 + Hybrid/Vector + Auto-Compaction)
+memory:
+  enabled: true
+  auto_extract: true                 # Ekstraksi otomatis fakta & memori dari dialog
+  
+  # Strategi pencarian memori (OmniRoute standard: recent, semantic, hybrid)
+  strategy: "hybrid"                 # "hybrid" (FTS5 BM25 + Vektor + Recency), "recent" (kronologis), "semantic" (vektor murni)
+  
+  # Batas anggaran token yang dialokasikan untuk injeksi memori ke system prompt
+  max_tokens: 2000                   # Maksimal anggaran token (default 2000)
+  max_context_items: 20              # Batas cadangan jumlah memori maksimal
+  
+  # Jendela waktu penyimpanan memori sebelum kedaluwarsa (1-365 hari)
+  # Memori yang diakses berulang kali (>= promotion_threshold) otomatis dipromosikan (kebal kedaluwarsa)
+  retention_days: 30                 # Masa simpan memori sebelum kedaluwarsa (default 30 hari)
+  promotion_threshold: 3             # Ambang batas pemakaian untuk promosi otomatis ke memori permanen
+  
+  # Auto-Compaction: Merampingkan & memadatkan memori secara berkala
+  auto_compaction: true              # Aktifkan auto-compaction (deduplikasi, pruning kedaluwarsa & FTS vacuum)
+  compaction_interval_hours: 24      # Interval jadwal auto-compaction berjalan (default: 24 jam)
+  compaction_threshold: 100          # Jumlah memori per user/scope sebelum kompresi dipicu otomatis
+  
+  similarity_threshold: 0.60         # Minimum cosine similarity score untuk semantic search
+  seed_csv_path: "D:/Users/Grapari_Infomedia/Downloads/AyuGram Desktop/memories_export.csv"
+  
+  # Remote embedding source khusus Google Gemini (Auto-detect model via Google API)
+  embedding_source:
+    enabled: false                   # Aktifkan true jika ingin menggunakan semantic vector embedding
+    provider: "gemini"               # Google Gemini eksklusif untuk memory embedding
+    model: "gemini-embedding-001"    # Model embedding Gemini resmi (auto-detect via Google AI Studio)
+    base_url: ""                     # Default: https://generativelanguage.googleapis.com
+    api_key: ""                      # Google AI Studio API Key (AIzaSy...) atau setel via /memory key <key>
+    dimensions: 768                  # Dimensi vektor embedding (default: 768)
+
+
+

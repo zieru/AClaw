@@ -1,0 +1,471 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"goassistant/internal/config"
+	"goassistant/internal/provider"
+	"goassistant/internal/tokensaver"
+	"goassistant/internal/tools"
+)
+
+// SubTask represents a single task to be delegated to a sub-agent
+type SubTask struct {
+	Role        string `json:"role"`
+	Instruction string `json:"instruction"`
+	ContextData string `json:"context_data,omitempty"`
+}
+
+// SubTaskResult holds the result from a single sub-agent execution
+type SubTaskResult struct {
+	Role     string        `json:"role"`
+	Output   string        `json:"output"`
+	Thinking string        `json:"thinking,omitempty"`
+	Error    string        `json:"error,omitempty"`
+	Tokens   int           `json:"tokens"`
+	Latency  time.Duration `json:"latency"`
+	Success  bool          `json:"success"`
+}
+
+func cleanThinkingPreview(text string, maxLen int) string {
+	clean := strings.TrimSpace(text)
+	clean = strings.ReplaceAll(clean, "\n", " ")
+	for strings.Contains(clean, "  ") {
+		clean = strings.ReplaceAll(clean, "  ", " ")
+	}
+	if len(clean) > maxLen {
+		clean = clean[:maxLen-3] + "..."
+	}
+	return clean
+}
+
+// SubagentTool implements tools.Tool for delegating subtasks to specialized subagents.
+// Supports both single-task and parallel multi-task delegation for token efficiency.
+type SubagentTool struct {
+	promptBuilder   *PromptBuilder
+	toolRegistry    *tools.Registry
+	providerManager *provider.Manager
+}
+
+// NewSubagentTool creates a new subagent delegation tool
+func NewSubagentTool(pb *PromptBuilder, tr *tools.Registry, pm *provider.Manager) *SubagentTool {
+	return &SubagentTool{
+		promptBuilder:   pb,
+		toolRegistry:    tr,
+		providerManager: pm,
+	}
+}
+
+func (s *SubagentTool) Name() string {
+	return "delegate_task"
+}
+
+func (s *SubagentTool) Description() string {
+	return `Mendelegasikan sub-tugas ke sub-agen spesialis dengan konteks terisolasi.
+
+SINGLE TASK: Kirim satu tugas dengan "role" dan "instruction".
+PARALLEL MULTI-TASK: Kirim array "tasks" berisi beberapa sub-tugas sekaligus.
+
+Sub-agen spesialis efisien karena: konteks terisolasi (hemat token), bisa berjalan paralel, dan masing-masing fokus pada satu aspek.
+
+Gunakan untuk: analisis data multi-aspek, riset terpisah, penulisan kode, review, atau tugas apapun yang bisa dipecah.
+
+Contoh peran: 'coder', 'researcher', 'analyst', 'secretary', 'reviewer', 'writer', 'translator'.`
+}
+
+func (s *SubagentTool) Parameters() tools.ParametersSchema {
+	return tools.ParametersSchema{
+		Type: "object",
+		Properties: map[string]tools.ParameterProperty{
+			"role": {
+				Type:        "string",
+				Description: "Peran sub-agen untuk single task (contoh: 'coder', 'researcher', 'analyst').",
+			},
+			"instruction": {
+				Type:        "string",
+				Description: "Instruksi tugas spesifik untuk single task.",
+			},
+			"context_data": {
+				Type:        "string",
+				Description: "Data/konteks relevan yang dibutuhkan sub-agen (hanya yang diperlukan).",
+			},
+			"model": {
+				Type:        "string",
+				Description: "Model AI spesifik untuk sub-tugas (opsional).",
+			},
+			"tasks": {
+				Type:        "string",
+				Description: "JSON array sub-tugas untuk parallel execution. Format: [{\"role\":\"analyst\",\"instruction\":\"...\",\"context_data\":\"...\"},...]. Jika diisi, 'role' dan 'instruction' di atas diabaikan.",
+			},
+		},
+		Required: []string{},
+	}
+}
+
+func (s *SubagentTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	modelOverride, _ := args["model"].(string)
+
+	// Check if this is a parallel multi-task request
+	tasksJSON, _ := args["tasks"].(string)
+	if strings.TrimSpace(tasksJSON) != "" {
+		return s.executeParallel(ctx, tasksJSON, modelOverride)
+	}
+
+	// Single task execution
+	role, _ := args["role"].(string)
+	if strings.TrimSpace(role) == "" {
+		role = "general"
+	}
+	role = strings.ToLower(strings.TrimSpace(role))
+
+	instruction, _ := args["instruction"].(string)
+	if strings.TrimSpace(instruction) == "" {
+		return "", fmt.Errorf("argumen 'instruction' wajib diisi untuk delegasi sub-agen")
+	}
+
+	contextData, _ := args["context_data"].(string)
+
+	result := s.executeSingleTask(ctx, SubTask{
+		Role:        role,
+		Instruction: instruction,
+		ContextData: contextData,
+	}, modelOverride)
+
+	if !result.Success {
+		return "", fmt.Errorf("sub-agen @%s gagal: %s", role, result.Error)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("=== [HASIL SUB-AGEN @%s] ===\n", role))
+	sb.WriteString(fmt.Sprintf("🎯 GOAL: %s\n", strings.TrimSpace(instruction)))
+	if result.Thinking != "" {
+		sb.WriteString(fmt.Sprintf("💭 PROSES PENALARAN (THINKING):\n%s\n", strings.TrimSpace(result.Thinking)))
+	}
+	sb.WriteString(fmt.Sprintf("📋 HASIL AKHIR:\n%s", strings.TrimSpace(result.Output)))
+
+	return sb.String(), nil
+}
+
+// executeParallel runs multiple sub-tasks concurrently with semaphore control
+func (s *SubagentTool) executeParallel(ctx context.Context, tasksJSON string, modelOverride string) (string, error) {
+	// Parse tasks array
+	var tasks []SubTask
+
+	// Try JSON parsing
+	tasksJSON = strings.TrimSpace(tasksJSON)
+	if err := parseJSONTasks(tasksJSON, &tasks); err != nil {
+		return "", fmt.Errorf("gagal parsing tasks JSON: %w", err)
+	}
+
+	if len(tasks) == 0 {
+		return "", fmt.Errorf("array 'tasks' kosong")
+	}
+
+	// Get concurrency limit from config
+	cfg := config.Get()
+	maxParallel := 3
+	if cfg != nil && cfg.SubAgent.MaxParallel > 0 {
+		maxParallel = cfg.SubAgent.MaxParallel
+	}
+	if maxParallel > len(tasks) {
+		maxParallel = len(tasks)
+	}
+
+	// Create semaphore for concurrency control
+	sem := make(chan struct{}, maxParallel)
+	results := make([]SubTaskResult, len(tasks))
+	var wg sync.WaitGroup
+
+	for i, task := range tasks {
+		wg.Add(1)
+		go func(idx int, t SubTask) {
+			defer wg.Done()
+
+			// Acquire semaphore with context cancellation awareness
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[idx] = SubTaskResult{
+					Role:    t.Role,
+					Error:   "dibatalkan: context canceled",
+					Success: false,
+				}
+				return
+			}
+
+			results[idx] = s.executeSingleTask(ctx, t, modelOverride)
+		}(i, task)
+	}
+
+	wg.Wait()
+
+	// Aggregate results
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("=== [HASIL %d SUB-AGEN PARALEL] ===\n\n", len(tasks)))
+
+	totalTokens := 0
+	successCount := 0
+	for i, result := range results {
+		sb.WriteString(fmt.Sprintf("--- Sub-Agen #%d @%s ---\n", i+1, tasks[i].Role))
+		sb.WriteString(fmt.Sprintf("🎯 GOAL: %s\n", strings.TrimSpace(tasks[i].Instruction)))
+		if result.Thinking != "" {
+			sb.WriteString(fmt.Sprintf("💭 PROSES PENALARAN (THINKING):\n%s\n", strings.TrimSpace(result.Thinking)))
+		}
+		if result.Success {
+			successCount++
+			sb.WriteString(fmt.Sprintf("📋 HASIL:\n%s", result.Output))
+		} else {
+			sb.WriteString(fmt.Sprintf("❌ Error: %s", result.Error))
+		}
+		totalTokens += result.Tokens
+		sb.WriteString(fmt.Sprintf("\n[⚡ %s | 🪙 ~%d tokens]\n\n", result.Latency.Round(time.Millisecond), result.Tokens))
+	}
+
+	sb.WriteString(fmt.Sprintf("=== [RINGKASAN: %d/%d berhasil | ~%d total tokens] ===", successCount, len(tasks), totalTokens))
+
+	if ctx.Err() != nil {
+		return sb.String(), ctx.Err()
+	}
+	return sb.String(), nil
+}
+
+// executeSingleTask runs one sub-agent task with isolated context
+func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, modelOverride string) SubTaskResult {
+	start := time.Now()
+	role := task.Role
+	if role == "" {
+		role = "general"
+	}
+
+	// Get timeout and default provider/model from config
+	cfg := config.Get()
+	timeout := 75 * time.Second
+	tokenBudget := 2048
+	preferredProv := ""
+	if cfg != nil {
+		if cfg.SubAgent.TimeoutSeconds > 0 {
+			timeout = time.Duration(cfg.SubAgent.TimeoutSeconds) * time.Second
+		}
+		if cfg.SubAgent.TokenBudgetPerTask > 0 {
+			tokenBudget = cfg.SubAgent.TokenBudgetPerTask
+		}
+		if modelOverride == "" {
+			modelOverride = cfg.Defaults.DefaultModel
+		}
+		preferredProv = cfg.Defaults.DefaultProvider
+	}
+
+	// Inherit active model and provider from parent context if not explicitly overridden
+	parentProv, parentModel := GetActiveModelInfo(ctx)
+	if modelOverride == "" || (cfg != nil && modelOverride == cfg.Defaults.DefaultModel && parentModel != "") {
+		if parentModel != "" {
+			modelOverride = parentModel
+		}
+	}
+	if preferredProv == "" || (cfg != nil && preferredProv == cfg.Defaults.DefaultProvider && parentProv != "") {
+		if parentProv != "" {
+			preferredProv = parentProv
+		}
+	}
+
+	// Clamp completion max_tokens to a safe limit (max 4096) to prevent provider rejection
+	completionMaxTokens := tokenBudget
+	if completionMaxTokens > 4096 {
+		completionMaxTokens = 4096
+	}
+	if completionMaxTokens <= 0 {
+		completionMaxTokens = 2048
+	}
+
+	// 1. Resolve tools for subagent (prevent recursive delegate_task)
+	subagentAllowedMap := map[string]bool{
+		"delegate_task": false, // Disallow nested subagent delegation
+	}
+	allowedTools := s.toolRegistry.ListAllowed(subagentAllowedMap)
+
+	// 2. Build Isolated Subagent System Prompt (with tool guidelines for allowed tools)
+	sysPrompt, err := s.promptBuilder.BuildSubagentPrompt(role, allowedTools)
+	if err != nil || sysPrompt == "" {
+		sysPrompt = fmt.Sprintf("Kamu adalah Sub-Agen Ahli dengan spesialisasi peran: %s.\nFokus hanya pada instruksi tugas yang didelegasikan kepadamu secara ringkas, akurat, dan langsung pada inti tugas.", role)
+	}
+
+	// 3. Prepare subagent user prompt with isolated context
+	var userPromptBuilder strings.Builder
+	userPromptBuilder.WriteString(fmt.Sprintf("### TUGAS SUB-AGEN (@%s):\n%s\n", role, task.Instruction))
+	if strings.TrimSpace(task.ContextData) != "" {
+		userPromptBuilder.WriteString("\n### KONTEKS TERISOLASI:\n")
+		userPromptBuilder.WriteString(strings.TrimSpace(task.ContextData))
+		userPromptBuilder.WriteString("\n")
+	}
+
+	messages := []provider.ChatMessage{
+		{
+			Role:    provider.RoleSystem,
+			Content: sysPrompt,
+		},
+		{
+			Role:    provider.RoleUser,
+			Content: userPromptBuilder.String(),
+		},
+	}
+
+	progress := GetProgressReporter(ctx)
+	if progress != nil {
+		shortInst := strings.TrimSpace(task.Instruction)
+		shortInst = strings.ReplaceAll(shortInst, "\n", " ")
+		for strings.Contains(shortInst, "  ") {
+			shortInst = strings.ReplaceAll(shortInst, "  ", " ")
+		}
+		if len(shortInst) > 75 {
+			shortInst = shortInst[:72] + "..."
+		}
+		progress(fmt.Sprintf("Sub-agen @%s: %s", role, shortInst))
+	}
+
+	// 4. Execute subagent inference loop (up to 3 turns)
+	maxTurns := 3
+	var finalOutput string
+	var collectedThinking []string
+	var collectedAttachments []string
+	totalTokens := 0
+
+	subCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	for turn := 0; turn < maxTurns; turn++ {
+		compressedMsgs, _ := tokensaver.CompressMessages(messages, "auto", tokenBudget*4)
+
+		chatReq := provider.ChatRequest{
+			Model:           modelOverride,
+			Messages:        compressedMsgs,
+			Tools:           allowedTools,
+			Temperature:     0.5,
+			MaxTokens:       completionMaxTokens,
+			ThinkingEnabled: true,
+		}
+
+		resp, err := s.providerManager.GenerateWithFallback(subCtx, preferredProv, chatReq)
+		if err != nil {
+			return SubTaskResult{
+				Role:     role,
+				Error:    fmt.Sprintf("gagal: %v", err),
+				Thinking: strings.Join(collectedThinking, "\n\n"),
+				Tokens:   totalTokens,
+				Latency:  time.Since(start),
+				Success:  false,
+			}
+		}
+
+		totalTokens += resp.TotalTokens
+
+		if resp.Thinking != "" {
+			collectedThinking = append(collectedThinking, resp.Thinking)
+			if progress != nil {
+				thinkPreview := cleanThinkingPreview(resp.Thinking, 75)
+				progress(fmt.Sprintf("Sub-agen @%s 💭 %s", role, thinkPreview))
+			}
+		}
+
+		if len(resp.ToolCalls) == 0 {
+			finalOutput = resp.Content
+			break
+		}
+
+		// Handle subagent tool calls
+		assistantMsg := provider.ChatMessage{
+			Role:      provider.RoleAssistant,
+			Content:   resp.Content,
+			ToolCalls: resp.ToolCalls,
+		}
+		messages = append(messages, assistantMsg)
+
+		for _, tc := range resp.ToolCalls {
+			if tc.Name == "delegate_task" {
+				continue // Guard against recursion
+			}
+			if progress != nil {
+				subToolDesc := DescribeToolCall(tc.Name, tc.Arguments)
+				progress(fmt.Sprintf("Sub-agen @%s 🔍 %s", role, subToolDesc))
+			}
+			if tc.Name == "browser" {
+				if tc.Arguments == nil {
+					tc.Arguments = make(map[string]interface{})
+				}
+				if m, ok := tc.Arguments["model"].(string); !ok || m == "" || m == "auto" {
+					tc.Arguments["model"] = modelOverride
+				}
+				if p, ok := tc.Arguments["provider"].(string); !ok || p == "" {
+					tc.Arguments["provider"] = preferredProv
+				}
+				BrowserSessionArg(subCtx, tc.Arguments)
+			}
+			toolOut, toolErr := s.toolRegistry.Execute(subCtx, tc.Name, tc.Arguments)
+			if toolErr != nil {
+				toolOut = fmt.Sprintf("Error tool %s: %v", tc.Name, toolErr)
+			} else if strings.Contains(toolOut, "[ATTACH_FILE:") {
+				// Bubble up media attachments (like screenshots or exported charts) to parent orchestrator
+				sTag := toolOut
+				for {
+					idx := strings.Index(sTag, "[ATTACH_FILE:")
+					if idx == -1 {
+						break
+					}
+					endIdx := strings.Index(sTag[idx:], "]")
+					if endIdx == -1 {
+						break
+					}
+					fullTag := sTag[idx : idx+endIdx+1]
+					collectedAttachments = append(collectedAttachments, fullTag)
+					sTag = sTag[idx+endIdx+1:]
+				}
+			}
+			toolMsg := provider.ChatMessage{
+				Role:       provider.RoleTool,
+				Name:       tc.Name,
+				ToolCallID: tc.ID,
+				Content:    toolOut,
+			}
+			messages = append(messages, toolMsg)
+		}
+
+		if progress != nil && turn < maxTurns-1 {
+			progress(fmt.Sprintf("Sub-agen @%s ✍️ Menyusun analisis & kesimpulan", role))
+		}
+	}
+
+	if finalOutput == "" {
+		finalOutput = "(Sub-agen selesai tanpa menghasilkan teks)"
+	}
+
+	// Prepend collected media attachments so parent orchestrator extracts and sends them to chat
+	if len(collectedAttachments) > 0 {
+		finalOutput = strings.Join(collectedAttachments, "\n") + "\n\n" + finalOutput
+	}
+
+	return SubTaskResult{
+		Role:     role,
+		Output:   finalOutput,
+		Thinking: strings.Join(collectedThinking, "\n\n"),
+		Tokens:   totalTokens,
+		Latency:  time.Since(start),
+		Success:  true,
+	}
+}
+
+// parseJSONTasks parses JSON array of tasks with error handling
+func parseJSONTasks(jsonStr string, tasks *[]SubTask) error {
+	jsonStr = strings.TrimSpace(jsonStr)
+
+	// Try direct JSON array parsing
+	if err := json.Unmarshal([]byte(jsonStr), tasks); err == nil && len(*tasks) > 0 {
+		return nil
+	}
+
+	return fmt.Errorf("format tasks tidak valid: harus JSON array [{\"role\":\"...\",\"instruction\":\"...\"}]")
+}

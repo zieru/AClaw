@@ -1,0 +1,81 @@
+# Binaries and executable files
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/goassistant
+/goassistant.exe
+/data/gocache/
+.gocache/
+.gocache
+gocache/
+# Build and distribution directories
+/dist/
+/bin/
+/build/
+
+# SQLite Databases & Runtime Data
+/data/*.db
+/data/*.db-journal
+/data/*.db-wal
+/data/*.db-shm
+*.sqlite
+*.sqlite3
+*.db
+
+# Logs
+/data/logs/
+*.log
+
+# Sensitive / Local Configurations
+.env
+.env.*
+configs/config.yaml
+*.local.yaml
+session_token.txt
+interact.py
+remote_exec.py
+test_camoufox.py
+
+# IDE & Editor Files
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test & Coverage Outputs
+*.test
+*.out
+coverage.html
+
+# Node.js & Frontend Build Outputs
+node_modules/
+**/node_modules/
+.nuxt/
+**/.nuxt/
+.output/
+**/.output/
+.nitro/
+**/.nitro/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+**/__pycache__/
+**/.venv/
+goassistant-linux-amd64

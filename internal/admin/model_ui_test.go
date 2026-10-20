@@ -1,0 +1,248 @@
+package admin
+
+import (
+	"context"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"goassistant/internal/provider"
+	"goassistant/internal/storage"
+)
+
+func setupTestModelUI(t *testing.T) (*ModelUI, *storage.DB, *provider.Manager) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_model_ui.db")
+
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create test db: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	pm := provider.GetManager()
+
+	// Register a test combo
+	pm.RegisterCombo(&storage.ModelComboRecord{
+		Name:     "combo_default",
+		Strategy: "failsafe",
+		IsActive: true,
+		Targets: []storage.ComboTarget{
+			{ProviderID: "testprov", Model: "test-model-1"},
+			{ProviderID: "testprov", Model: "test-model-2"},
+		},
+	})
+
+	ui := NewModelUI(db, pm)
+	return ui, db, pm
+}
+
+func TestModelUISessionManagement(t *testing.T) {
+	ui, _, _ := setupTestModelUI(t)
+	userID := int64(12345)
+
+	if sess := ui.getSession(userID); sess != nil {
+		t.Errorf("expected nil session initially, got %+v", sess)
+	}
+
+	ui.setSession(userID, ModelUIStepPickCombo, "", 0)
+	sess := ui.getSession(userID)
+	if sess == nil {
+		t.Fatalf("expected active session, got nil")
+	}
+	if sess.Step != ModelUIStepPickCombo {
+		t.Errorf("expected step %v, got %v", ModelUIStepPickCombo, sess.Step)
+	}
+
+	ui.CancelSession(userID)
+	if sess := ui.getSession(userID); sess != nil {
+		t.Errorf("expected nil session after CancelSession, got %+v", sess)
+	}
+}
+
+func TestModelUISaveOverride(t *testing.T) {
+	ui, db, _ := setupTestModelUI(t)
+	scope := "chat"
+	chatID := "1001"
+
+	// Save combo override
+	msg, err := ui.saveModelOverride(scope, chatID, "combo_default")
+	if err != nil {
+		t.Fatalf("unexpected error saving override: %v", err)
+	}
+	if msg == "" {
+		t.Errorf("expected non-empty success message")
+	}
+
+	pol := db.GetResolvedPolicy("admin", chatID)
+	if pol.ModelOverride != "combo_default" {
+		t.Errorf("expected ModelOverride 'combo_default', got '%s'", pol.ModelOverride)
+	}
+
+	// Reset to default
+	msg, err = ui.saveModelOverride(scope, chatID, "")
+	if err != nil {
+		t.Fatalf("unexpected error resetting override: %v", err)
+	}
+	pol = db.GetResolvedPolicy("admin", chatID)
+	if pol.ModelOverride != "" {
+		t.Errorf("expected empty ModelOverride, got '%s'", pol.ModelOverride)
+	}
+}
+
+type testMockProvider struct {
+	name         string
+	pType        string
+	defaultModel string
+	models       []string
+}
+
+func (m *testMockProvider) Name() string                     { return m.name }
+func (m *testMockProvider) Type() string                     { return m.pType }
+func (m *testMockProvider) DefaultModel() string             { return m.defaultModel }
+func (m *testMockProvider) Models() []string                 { return m.models }
+func (m *testMockProvider) SetHTTPClient(client interface{}) {}
+func (m *testMockProvider) GenerateChat(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	return &provider.ChatResponse{Content: "mock"}, nil
+}
+
+func TestGetAllModelsForProviderDefaultFirst(t *testing.T) {
+	ui, _, _ := setupTestModelUI(t)
+
+	// Create a provider where default model is "gpt-4o-mini" (starts with g)
+	// and other models include "anthropic/claude-3-5-sonnet", "ai21/jamba", "deepseek/deepseek-chat", "z-model"
+	p := &testMockProvider{
+		name:         "test_provider",
+		pType:        "openai",
+		defaultModel: "gpt-4o-mini", // Default model
+		models: []string{
+			"z-model",
+			"anthropic/claude-3-5-sonnet",
+			"gpt-4o-mini",
+			"ai21/jamba",
+			"deepseek/deepseek-chat",
+		},
+	}
+
+	models := ui.getAllModelsForProvider(p)
+	if len(models) != 5 {
+		t.Fatalf("expected 5 models, got %d: %v", len(models), models)
+	}
+
+	// First model MUST be the default model
+	if models[0] != "gpt-4o-mini" {
+		t.Errorf("expected models[0] to be default model 'gpt-4o-mini', got '%s'", models[0])
+	}
+
+	// Remaining models must be sorted alphabetically
+	expectedRemaining := []string{
+		"ai21/jamba",
+		"anthropic/claude-3-5-sonnet",
+		"deepseek/deepseek-chat",
+		"z-model",
+	}
+	for i, exp := range expectedRemaining {
+		if models[i+1] != exp {
+			t.Errorf("expected models[%d] to be '%s', got '%s'", i+1, exp, models[i+1])
+		}
+	}
+}
+
+func TestGetAllModelsForProvider_DisabledExcluded(t *testing.T) {
+	ui, _, _ := setupTestModelUI(t)
+
+	p := &testMockProvider{
+		name:         "dahl_provider",
+		pType:        "dahl",
+		defaultModel: "MiniMaxAI/MiniMax-M2.7",
+		models: []string{
+			"MiniMaxAI/MiniMax-M2.7",
+			"deepseek-ai/DeepSeek-V4-Flash-0731",
+			// zai-org/GLM-5.3-Flash is disabled and not passed
+		},
+	}
+
+	models := ui.getAllModelsForProvider(p)
+	if len(models) != 2 {
+		t.Fatalf("expected 2 enabled models, got %d: %v", len(models), models)
+	}
+
+	for _, m := range models {
+		if m == "zai-org/GLM-5.3-Flash" {
+			t.Errorf("disabled model 'zai-org/GLM-5.3-Flash' must not appear in switchmodel")
+		}
+	}
+}
+
+func TestFormatModelDesc_ProviderBindingAndResilient(t *testing.T) {
+	ui, _, pm := setupTestModelUI(t)
+
+	dahlProv := &testMockProvider{
+		name:         "dahl",
+		pType:        "dahl",
+		defaultModel: "deepseek-ai/DeepSeek-V4-Flash-0731",
+		models:       []string{"deepseek-ai/DeepSeek-V4-Flash-0731", "MiniMaxAI/MiniMax-M2.7"},
+	}
+	pm.RegisterWithID("dahl", dahlProv, 1)
+
+	// 1. Resilient Provider format
+	resilientDesc := ui.formatModelDesc("provider:dahl")
+	if !strings.Contains(resilientDesc, "Provider Resilient") || !strings.Contains(resilientDesc, "dahl") {
+		t.Errorf("expected resilient description, got: %s", resilientDesc)
+	}
+
+	// 2. Specific Model Binding format
+	bindingDesc := ui.formatModelDesc("dahl:deepseek-ai/DeepSeek-V4-Flash-0731")
+	if !strings.Contains(bindingDesc, "deepseek-ai/DeepSeek-V4-Flash-0731") || !strings.Contains(bindingDesc, "dahl") {
+		t.Errorf("expected binding description with provider dahl, got: %s", bindingDesc)
+	}
+
+	// 3. Short desc
+	shortRes := ui.formatShortDesc("provider:dahl")
+	if !strings.Contains(shortRes, "Resilient") || !strings.Contains(shortRes, "dahl") {
+		t.Errorf("expected short resilient description, got: %s", shortRes)
+	}
+
+	shortBind := ui.formatShortDesc("dahl:deepseek-ai/DeepSeek-V4-Flash-0731")
+	if !strings.Contains(shortBind, "[dahl]") {
+		t.Errorf("expected short binding description with [dahl], got: %s", shortBind)
+	}
+}
+
+func TestSaveModelOverride_ProviderBindingAndResilient(t *testing.T) {
+	ui, db, _ := setupTestModelUI(t)
+	scope := "chat"
+	chatID := "2002"
+
+	// 1. Save provider resilient
+	msg, err := ui.saveModelOverride(scope, chatID, "provider:dahl")
+	if err != nil {
+		t.Fatalf("unexpected error saving resilient override: %v", err)
+	}
+	if !strings.Contains(msg, "Mode Resilient: dahl") {
+		t.Errorf("expected success message mentioning Mode Resilient: dahl, got: %s", msg)
+	}
+
+	pol := db.GetResolvedPolicy("admin", chatID)
+	if pol.ModelOverride != "provider:dahl" {
+		t.Errorf("expected ModelOverride 'provider:dahl', got '%s'", pol.ModelOverride)
+	}
+
+	// 2. Save specific provider binding
+	msg, err = ui.saveModelOverride(scope, chatID, "dahl:deepseek-ai/DeepSeek-V4-Flash-0731")
+	if err != nil {
+		t.Fatalf("unexpected error saving bound override: %v", err)
+	}
+	if !strings.Contains(msg, "Provider: <b>dahl</b>") {
+		t.Errorf("expected success message mentioning Provider: dahl, got: %s", msg)
+	}
+
+	pol = db.GetResolvedPolicy("admin", chatID)
+	if pol.ModelOverride != "dahl:deepseek-ai/DeepSeek-V4-Flash-0731" {
+		t.Errorf("expected ModelOverride 'dahl:deepseek-ai/DeepSeek-V4-Flash-0731', got '%s'", pol.ModelOverride)
+	}
+}
+
+

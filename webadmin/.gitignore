@@ -1,0 +1,9 @@
+# Nuxt 3 & Node.js ignore rules
+node_modules/
+.nuxt/
+.output/
+.nitro/
+dist/
+*.log
+.env
+.env.*

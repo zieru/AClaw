@@ -1,0 +1,17 @@
+# Configuration for /etc/init.d/aclaw
+
+# User and group under which the service runs
+ACLAW_USER="zieru:zieru"
+
+# Working directory
+ACLAW_DIR="/home/zieru/AClaw"
+
+# Path to the executable binary
+ACLAW_BIN="/home/zieru/AClaw/goassistant-linux-amd64"
+
+# Command line arguments
+ACLAW_OPTS="-config /home/zieru/AClaw/configs/default_config.yaml"
+
+# Log files
+ACLAW_LOG="/var/log/aclaw.log"
+ACLAW_ERR="/var/log/aclaw.err"

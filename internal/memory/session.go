@@ -1,0 +1,207 @@
+package memory
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+
+	"goassistant/internal/provider"
+	"goassistant/internal/storage"
+)
+
+// SessionManager manages conversation messages per session
+type SessionManager struct {
+	db          *storage.DB
+	lastPrompts sync.Map // key: "channelID:chatID:userID" -> prompt string
+}
+
+func NewSessionManager(db *storage.DB) *SessionManager {
+	return &SessionManager{db: db}
+}
+
+// SetLastPrompt stores the latest user prompt for quick retry
+func (sm *SessionManager) SetLastPrompt(channelID, chatID, userID, prompt string) {
+	if prompt == "" {
+		return
+	}
+	key := fmt.Sprintf("%s:%s:%s", channelID, chatID, userID)
+	sm.lastPrompts.Store(key, prompt)
+}
+
+// GetLastPrompt retrieves the last user prompt from memory or recent messages
+func (sm *SessionManager) GetLastPrompt(channelID, chatID, userID string) string {
+	key := fmt.Sprintf("%s:%s:%s", channelID, chatID, userID)
+	if val, ok := sm.lastPrompts.Load(key); ok {
+		if p, ok := val.(string); ok && p != "" {
+			return p
+		}
+	}
+	// Fallback: check last user message in DB session
+	session, err := sm.db.GetOrCreateSession(channelID, chatID, userID)
+	if err == nil && session != nil {
+		msgs, err := sm.db.GetRecentMessages(session.ID, 5)
+		if err == nil {
+			for i := len(msgs) - 1; i >= 0; i-- {
+				if msgs[i].Role == "user" && msgs[i].Content != "" {
+					return msgs[i].Content
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// GetOrCreate gets an existing session or creates a new one
+func (sm *SessionManager) GetOrCreate(channelID, chatID, userID string) (*storage.ChatSessionRecord, error) {
+	return sm.db.GetOrCreateSession(channelID, chatID, userID)
+}
+
+// ListSessions retrieves all sessions/topics for a channel and chat
+func (sm *SessionManager) ListSessions(channelID, chatID string) ([]*storage.ChatSessionRecord, error) {
+	return sm.db.ListChatSessions(channelID, chatID)
+}
+
+// CreateNewTopic creates a new topic in the chat and sets it active
+func (sm *SessionManager) CreateNewTopic(channelID, chatID, userID, title string) (*storage.ChatSessionRecord, error) {
+	return sm.db.CreateChatSession(channelID, chatID, userID, title, true)
+}
+
+// SwitchTopic switches the active topic in the chat
+func (sm *SessionManager) SwitchTopic(channelID, chatID, sessionID string) (*storage.ChatSessionRecord, error) {
+	return sm.db.SwitchChatSession(channelID, chatID, sessionID)
+}
+
+// DeleteTopic deletes a topic and its messages, activating a remaining topic if needed
+func (sm *SessionManager) DeleteTopic(channelID, chatID, sessionID string) (*storage.ChatSessionRecord, error) {
+	return sm.db.DeleteChatSession(channelID, chatID, sessionID)
+}
+
+// RenameTopic renames a topic
+func (sm *SessionManager) RenameTopic(sessionID, newTitle string) error {
+	return sm.db.RenameChatSession(sessionID, newTitle)
+}
+
+// ResetActiveTopic clears messages only in the current active topic of the chat
+func (sm *SessionManager) ResetActiveTopic(channelID, chatID string) error {
+	return sm.db.ClearActiveSessionMessages(channelID, chatID)
+}
+
+// MaybeAutoTitleTopic sets a clean topic title from the first user prompt if the topic still has the default title
+func (sm *SessionManager) MaybeAutoTitleTopic(session *storage.ChatSessionRecord, firstPrompt string) {
+	if session == nil {
+		return
+	}
+	cleanPrompt := strings.TrimSpace(firstPrompt)
+	if cleanPrompt == "" {
+		return
+	}
+	// Only auto-title if the current title is default
+	if session.Title == "Topik Utama" || session.Title == "Topik Baru" || session.Title == "New Conversation" || session.Title == "" {
+		firstLine := strings.Split(cleanPrompt, "\n")[0]
+		firstLine = strings.TrimPrefix(firstLine, ">")
+		firstLine = strings.TrimSpace(firstLine)
+		if len(firstLine) > 35 {
+			firstLine = firstLine[:35] + "..."
+		}
+		if firstLine != "" {
+			_ = sm.db.RenameChatSession(session.ID, firstLine)
+			session.Title = firstLine
+		}
+	}
+}
+
+// AddMessage appends a message to session
+func (sm *SessionManager) AddMessage(sessionID, role, content string, tokens int) error {
+	return sm.db.AddMessage(sessionID, role, content, tokens)
+}
+
+// GetHistory retrieves the recent messages converted into Provider ChatMessage format
+func (sm *SessionManager) GetHistory(sessionID string, maxTurns int) ([]provider.ChatMessage, error) {
+	if maxTurns <= 0 {
+		maxTurns = 20
+	}
+	dbMsgs, err := sm.db.GetRecentMessages(sessionID, maxTurns)
+	if err != nil {
+		return nil, err
+	}
+
+	var chatMsgs []provider.ChatMessage
+	for _, m := range dbMsgs {
+		chatMsgs = append(chatMsgs, provider.ChatMessage{
+			Role:    provider.MessageRole(m.Role),
+			Content: m.Content,
+		})
+	}
+	return chatMsgs, nil
+}
+
+// ResetSession clears all history in the session
+func (sm *SessionManager) ResetSession(sessionID string) error {
+	return sm.db.ClearSessionMessages(sessionID)
+}
+
+// ResetChatSessions clears all history across any session for the given chat ID
+func (sm *SessionManager) ResetChatSessions(chatID string) error {
+	return sm.db.ClearSessionsByChatID(chatID)
+}
+
+// SummarizeSession uses LLM to compress earlier conversation history
+func (sm *SessionManager) SummarizeSession(ctx context.Context, sessionID string, p provider.Provider) (string, error) {
+	msgs, err := sm.db.GetRecentMessages(sessionID, 30)
+	if err != nil {
+		return "", err
+	}
+	if len(msgs) < 10 {
+		return "", nil // Not enough messages to warrant summarization
+	}
+
+	var convText string
+	for _, m := range msgs {
+		convText += fmt.Sprintf("%s: %s\n", m.Role, m.Content)
+	}
+
+	req := provider.ChatRequest{
+		Temperature: 0.3,
+		MaxTokens:   500,
+		Messages: []provider.ChatMessage{
+			{
+				Role:    provider.RoleSystem,
+				Content: "Kamu adalah asisten perangkum percakapan. Rangkumlah poin-poin penting, preferensi pengguna, dan konteks percakapan di bawah ini secara padat dalam 2-4 kalimat ringkas.",
+			},
+			{
+				Role:    provider.RoleUser,
+				Content: convText,
+			},
+		},
+	}
+
+	resp, err := p.GenerateChat(ctx, req)
+	if err != nil {
+		return "", err
+	}
+
+	cleanSummary := strings.TrimSpace(resp.Content)
+	// Strip thinking/reasoning blocks if present
+	if idx := strings.Index(cleanSummary, "</think>"); idx != -1 {
+		cleanSummary = strings.TrimSpace(cleanSummary[idx+len("</think>"):])
+	}
+	// Strip common thinking preamble patterns
+	lower := strings.ToLower(cleanSummary)
+	if strings.HasPrefix(lower, "here's a thinking process") || strings.HasPrefix(lower, "thinking process:") {
+		// If thinking leaked without tags, extract content after double newline
+		if splitIdx := strings.Index(cleanSummary, "\n\n"); splitIdx != -1 {
+			cleanSummary = strings.TrimSpace(cleanSummary[splitIdx+2:])
+		}
+	}
+	// Cap summary size to max 500 characters
+	if len(cleanSummary) > 500 {
+		cleanSummary = cleanSummary[:500] + "..."
+	}
+
+	if cleanSummary != "" {
+		_ = sm.db.UpdateSessionSummary(sessionID, cleanSummary)
+	}
+
+	return cleanSummary, nil
+}
