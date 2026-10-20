@@ -6,8 +6,8 @@ server:
   log_level: "info"
 
 admin_telegram:
-  bot_token: "5331591811:AAH3lr4DyWkmJJrmUM4EhWmlCErVuCU5Am0"
-  allowed_user_ids: [399999658,6265897325] # Masukkan Telegram User ID Admin (contoh: [123456789]), kosongkan jika belum tahu
+  bot_token: ""
+  allowed_user_ids: [] # Masukkan Telegram User ID Admin (contoh: [123456789]), kosongkan jika belum tahu
   poll_timeout: 30
 
 defaults:
