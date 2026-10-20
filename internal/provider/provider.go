@@ -143,6 +143,7 @@ type Manager struct {
 	mu            sync.RWMutex
 	providers     map[string]Provider
 	providersByID map[string]Provider // Map lowercase ID -> Provider instance
+	priorities    map[string]int      // Map provider name -> priority
 	order         []string            // Priority order
 	combos        map[string]*storage.ModelComboRecord
 	router        Router
@@ -163,6 +164,7 @@ func GetManager() *Manager {
 		globalManager = &Manager{
 			providers:     make(map[string]Provider),
 			providersByID: make(map[string]Provider),
+			priorities:    make(map[string]int),
 			combos:        make(map[string]*storage.ModelComboRecord),
 			comboCounters: make(map[string]*uint64),
 			comboLatency:  make(map[string]map[string]*comboLatencyEntry),
@@ -208,11 +210,16 @@ func (m *Manager) RegisterWithID(id string, p Provider, priority int) {
 		}
 	}
 	m.providers[p.Name()] = p
+	if m.priorities == nil {
+		m.priorities = make(map[string]int)
+	}
+	m.priorities[p.Name()] = priority
 	if m.providersByID == nil {
 		m.providersByID = make(map[string]Provider)
 	}
 	if id != "" {
 		m.providersByID[strings.ToLower(strings.TrimSpace(id))] = p
+		m.priorities[strings.ToLower(strings.TrimSpace(id))] = priority
 	}
 	m.updateOrderLocked()
 }
@@ -222,6 +229,10 @@ func (m *Manager) Unregister(nameOrID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.providers, nameOrID)
+	if m.priorities != nil {
+		delete(m.priorities, nameOrID)
+		delete(m.priorities, strings.ToLower(strings.TrimSpace(nameOrID)))
+	}
 	if m.providersByID != nil {
 		delete(m.providersByID, strings.ToLower(strings.TrimSpace(nameOrID)))
 	}
@@ -233,6 +244,28 @@ func (m *Manager) updateOrderLocked() {
 	for k := range m.providers {
 		list = append(list, k)
 	}
+	// Sort deterministically:
+	// 1. Non-scrapers before scrapers
+	// 2. Higher priority first
+	// 3. Alphabetical name tie-breaker
+	sort.SliceStable(list, func(i, j int) bool {
+		pi := m.providers[list[i]]
+		pj := m.providers[list[j]]
+		scI := isNativeScraper(pi)
+		scJ := isNativeScraper(pj)
+		if scI != scJ {
+			return !scI // non-scraper comes first
+		}
+		var prioI, prioJ int
+		if m.priorities != nil {
+			prioI = m.priorities[list[i]]
+			prioJ = m.priorities[list[j]]
+		}
+		if prioI != prioJ {
+			return prioI > prioJ // higher priority comes first
+		}
+		return strings.ToLower(list[i]) < strings.ToLower(list[j])
+	})
 	m.order = list
 }
 

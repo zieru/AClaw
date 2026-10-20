@@ -389,6 +389,36 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				activeProv = p
 				activeModelName = parts[1]
 			}
+		} else {
+			// Bare model override (e.g. "gemini-3.5-flash-lite", "deepseek-ai/DeepSeek-V4-Flash-0731")
+			for _, p := range o.providerManager.ListAll() {
+				if p.Type() == "gemini_web" || p.Type() == "gemini_scrape" {
+					if !strings.HasPrefix(strings.ToLower(policy.ModelOverride), "gemini-web") {
+						continue
+					}
+				}
+				if strings.EqualFold(p.DefaultModel(), policy.ModelOverride) {
+					if activeProvName == "" {
+						activeProvName = p.Name()
+					}
+					activeProv = p
+					activeModelName = policy.ModelOverride
+					break
+				}
+				for _, m := range p.Models() {
+					if strings.EqualFold(m, policy.ModelOverride) {
+						if activeProvName == "" {
+							activeProvName = p.Name()
+						}
+						activeProv = p
+						activeModelName = policy.ModelOverride
+						break
+					}
+				}
+				if activeProv != nil {
+					break
+				}
+			}
 		}
 	}
 
@@ -396,10 +426,26 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		activeProv, _ = o.providerManager.Get(activeProvName)
 	}
 	if activeProv == nil {
-		allProvs := o.providerManager.ListAll()
-		if len(allProvs) > 0 {
-			activeProv = allProvs[0]
-			activeProvName = activeProv.Name()
+		cfg := config.Get()
+		if cfg != nil && cfg.Defaults.DefaultProvider != "" {
+			if defP, ok := o.providerManager.Get(cfg.Defaults.DefaultProvider); ok && defP != nil {
+				activeProv = defP
+				activeProvName = defP.Name()
+			}
+		}
+		if activeProv == nil {
+			allProvs := o.providerManager.ListAll()
+			for _, p := range allProvs {
+				if p.Type() != "gemini_web" && p.Type() != "gemini_scrape" {
+					activeProv = p
+					activeProvName = p.Name()
+					break
+				}
+			}
+			if activeProv == nil && len(allProvs) > 0 {
+				activeProv = allProvs[0]
+				activeProvName = activeProv.Name()
+			}
 		}
 	} else {
 		activeProvName = activeProv.Name()
@@ -439,12 +485,21 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			parts := strings.SplitN(policy.ModelOverride, ":", 2)
 			provToCall = strings.TrimSpace(parts[0])
 			modelToUse = strings.TrimSpace(parts[1])
+		} else if activeProv != nil {
+			provToCall = activeProv.Name()
 		}
 		activeModelName = modelToUse
 	}
 
 	// 4a. Custom Dedicated Execution Path for Gemini Web Scrape
-	if provider.IsGeminiWeb(provToCall) || provider.IsGeminiWeb(modelToUse) || provider.IsGeminiWeb(req.PreferredModel) || provider.IsGeminiWeb(policy.ModelOverride) {
+	// Only route to Gemini Web Scraper if explicitly requested or calling gemini_web with scraper-compatible model
+	isExplicitGeminiWeb := strings.HasPrefix(strings.ToLower(modelToUse), "gemini-web") ||
+		strings.HasPrefix(strings.ToLower(req.PreferredModel), "gemini-web") ||
+		strings.HasPrefix(strings.ToLower(policy.ModelOverride), "gemini-web")
+
+	isGeminiWebProv := provider.IsGeminiWeb(provToCall) && (modelToUse == "" || strings.EqualFold(modelToUse, "auto") || strings.HasPrefix(strings.ToLower(modelToUse), "gemini-web"))
+
+	if isExplicitGeminiWeb || isGeminiWebProv {
 		provToCall = "gemini_web"
 		if modelToUse == "" || strings.EqualFold(modelToUse, "auto") || strings.EqualFold(modelToUse, "gemini_web") || strings.EqualFold(modelToUse, "gemini-web") {
 			modelToUse = "gemini-web-pro"

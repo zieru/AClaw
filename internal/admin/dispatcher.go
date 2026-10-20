@@ -569,7 +569,11 @@ func (a *AdminBot) handleDynamicCallback(c tele.Context) error {
 		modVal := strings.TrimPrefix(data, "lim_mod_set_")
 		if sess, ok := a.limitsUI.GetSession(c.Sender().ID); ok {
 			pol := a.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
-			pol.ModelOverride = modVal
+			if !strings.HasPrefix(strings.ToLower(modVal), "combo:") {
+				pol.ModelOverride = "combo:" + modVal
+			} else {
+				pol.ModelOverride = modVal
+			}
 			_ = a.db.SavePolicy(pol)
 			_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🔀 Combo '%s' aktif!", modVal)})
 			return a.limitsUI.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)

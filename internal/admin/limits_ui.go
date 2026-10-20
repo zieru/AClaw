@@ -1105,10 +1105,10 @@ func (ui *LimitsUI) HandlePickProviderModel(c tele.Context, provName string, mod
 
 	chosenModel := allModels[modelIdx]
 	pol := ui.db.GetOrCreatePolicy(sess.Scope, sess.ScopeID)
-	pol.ModelOverride = chosenModel
+	pol.ModelOverride = fmt.Sprintf("%s:%s", p.Name(), chosenModel)
 	_ = ui.db.SavePolicy(pol)
 
-	_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🎯 Model '%s' aktif!", chosenModel)})
+	_ = c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("🎯 Model '%s' (%s) aktif!", chosenModel, p.Name())})
 	return ui.RenderScopeLimitsDashboard(c, sess.Scope, sess.ScopeID)
 }
 
