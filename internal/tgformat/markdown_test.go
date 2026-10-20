@@ -72,6 +72,48 @@ func TestMarkdownToTelegramHTML_Table(t *testing.T) {
 	}
 }
 
+func TestMarkdownToTelegramHTML_Table_StripAsterisks(t *testing.T) {
+	// Test standard markdown table with bold and links inside cells
+	inputMd := `Berikut jadwal:
+
+| **Tanggal** | **Waktu Maghrib (WIB)** |
+|---|---|
+| **01 Okt 2026** | 18:21 |
+| **02 Okt 2026** | 18:21 |
+| [15 Okt 2026](https://example.com) | ` + "`18:15`" + ` |`
+
+	resultMd := MarkdownToTelegramHTML(inputMd)
+
+	if strings.Contains(resultMd, "**") {
+		t.Errorf("Expected bold asterisks ** to be stripped from table cells, got:\n%s", resultMd)
+	}
+	if !strings.Contains(resultMd, "01 Okt 2026") || !strings.Contains(resultMd, "18:21") {
+		t.Errorf("Expected clean dates and times in table, got:\n%s", resultMd)
+	}
+	if !strings.Contains(resultMd, "15 Okt 2026") {
+		t.Errorf("Expected markdown link label extracted in table, got:\n%s", resultMd)
+	}
+
+	// Test already-bordered ASCII table with ** asterisks
+	inputAscii := `Berikut tabel:
+
++-----------------+---------------------+
+| Tanggal         | Waktu Maghrib (WIB) |
++-----------------+---------------------+
+| **01 Okt 2026** | 18:21               |
+| **02 Okt 2026** | 18:21               |
++-----------------+---------------------+`
+
+	resultAscii := MarkdownToTelegramHTML(inputAscii)
+
+	if strings.Contains(resultAscii, "**") {
+		t.Errorf("Expected bold asterisks ** to be stripped from ASCII table, got:\n%s", resultAscii)
+	}
+	if !strings.Contains(resultAscii, "01 Okt 2026") {
+		t.Errorf("Expected clean date in ASCII table, got:\n%s", resultAscii)
+	}
+}
+
 func TestMarkdownToTelegramHTML_LaTeX(t *testing.T) {
 	input := `(rumus Hukum Ohm: $\Delta V / \Delta I$) 
 1. Hitung Spesifikasi Jika Diseri (10 Keping):

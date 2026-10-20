@@ -132,15 +132,39 @@ func replaceItalic(text string) string {
 	return text
 }
 
-// convertMarkdownTablesToPre detects markdown tables and wraps them into monospace ASCII code blocks
+// convertMarkdownTablesToPre detects markdown and ASCII tables and wraps them into monospace ASCII code blocks
 func convertMarkdownTablesToPre(text string) string {
 	lines := strings.Split(text, "\n")
 	var newLines []string
 	i := 0
+	inCodeBlock := false
 
 	for i < len(lines) {
 		line := lines[i]
 		trimmed := strings.TrimSpace(line)
+
+		// Do not process lines inside an existing fenced code block
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			newLines = append(newLines, line)
+			i++
+			continue
+		}
+		if inCodeBlock {
+			newLines = append(newLines, line)
+			i++
+			continue
+		}
+
+		// Check for optional leading top border of an ASCII table: +---+---+
+		if isTableSeparator(trimmed) && i+1 < len(lines) && isTableLine(lines[i+1]) {
+			if i+2 < len(lines) && isTableSeparator(lines[i+2]) {
+				// Skip this top border and treat lines[i+1] as the header
+				i++
+				line = lines[i]
+				trimmed = strings.TrimSpace(line)
+			}
+		}
 
 		// Check if current line is a table header followed by a separator line
 		if isTableLine(trimmed) && i+1 < len(lines) && isTableSeparator(lines[i+1]) {
@@ -148,7 +172,16 @@ func convertMarkdownTablesToPre(text string) string {
 			i += 2 // Skip header and separator
 
 			var dataRows [][]string
-			for i < len(lines) && isTableLine(lines[i]) {
+			for i < len(lines) {
+				currTrimmed := strings.TrimSpace(lines[i])
+				// Skip separator lines between or at the end of rows (like +---+ in ASCII tables)
+				if isTableSeparator(currTrimmed) {
+					i++
+					continue
+				}
+				if !isTableLine(currTrimmed) {
+					break
+				}
 				row := parseTableRow(lines[i])
 				if len(row) > 0 {
 					dataRows = append(dataRows, row)
@@ -176,14 +209,50 @@ func isTableLine(line string) bool {
 
 func isTableSeparator(line string) bool {
 	trimmed := strings.TrimSpace(line)
-	if !strings.Contains(trimmed, "|") || !strings.Contains(trimmed, "-") {
+	if (!strings.Contains(trimmed, "|") && !strings.Contains(trimmed, "+")) || (!strings.Contains(trimmed, "-") && !strings.Contains(trimmed, "=")) {
 		return false
 	}
 	clean := strings.ReplaceAll(trimmed, "|", "")
+	clean = strings.ReplaceAll(clean, "+", "")
 	clean = strings.ReplaceAll(clean, "-", "")
 	clean = strings.ReplaceAll(clean, ":", "")
+	clean = strings.ReplaceAll(clean, "=", "")
 	clean = strings.ReplaceAll(clean, " ", "")
 	return clean == ""
+}
+
+var mdLinkInCellRegex = regexp.MustCompile(`\[([^\]]+)\]\([^\)]+\)`)
+
+// cleanTableCell strips markdown bold (**), italic (*, _), strikethrough (~~), and code ticks (`) from cell contents
+// so they render cleanly in Telegram monospace tables without raw asterisks or markup syntax.
+func cleanTableCell(val string) string {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return ""
+	}
+
+	// Remove markdown links: [label](url) -> label
+	val = mdLinkInCellRegex.ReplaceAllString(val, "$1")
+
+	// Remove bold and bold-italic markdown markers: ***text***, **text**, ___text___, __text__
+	val = strings.ReplaceAll(val, "***", "")
+	val = strings.ReplaceAll(val, "**", "")
+	val = strings.ReplaceAll(val, "___", "")
+	val = strings.ReplaceAll(val, "__", "")
+	val = strings.ReplaceAll(val, "~~", "")
+	val = strings.ReplaceAll(val, "`", "")
+
+	// Strip outer single asterisks (*text*) or underscores (_text_)
+	if strings.HasPrefix(val, "*") && strings.HasSuffix(val, "*") && len(val) >= 2 {
+		val = strings.TrimPrefix(val, "*")
+		val = strings.TrimSuffix(val, "*")
+	}
+	if strings.HasPrefix(val, "_") && strings.HasSuffix(val, "_") && len(val) >= 2 {
+		val = strings.TrimPrefix(val, "_")
+		val = strings.TrimSuffix(val, "_")
+	}
+
+	return strings.TrimSpace(val)
 }
 
 func parseTableRow(line string) []string {
@@ -194,7 +263,7 @@ func parseTableRow(line string) []string {
 	rawCols := strings.Split(trimmed, "|")
 	var cols []string
 	for _, col := range rawCols {
-		cols = append(cols, strings.TrimSpace(col))
+		cols = append(cols, cleanTableCell(col))
 	}
 	return cols
 }
