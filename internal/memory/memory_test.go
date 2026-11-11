@@ -114,7 +114,7 @@ func TestStandaloneMemoryManager(t *testing.T) {
 		Scope:    "user",
 		ScopeID:  "399999658",
 		Key:      "kai_bypass_ssl",
-		Content:  "Untuk akses KAI WAJIB gunakan camoufox stealth engine dan bypass SSL.",
+		Content:  "Untuk akses KAI WAJIB gunakan browser automation engine dan bypass SSL.",
 		Category: "work",
 	})
 	if err != nil {
@@ -141,12 +141,12 @@ func TestStandaloneMemoryManager(t *testing.T) {
 	}
 
 	// 5. Test SearchMemories (Hybrid / FTS5)
-	searchResults, err := mgr.SearchMemoriesAdvanced("user", "399999658", "camoufox stealth", "hybrid", 5)
+	searchResults, err := mgr.SearchMemoriesAdvanced("user", "399999658", "browser automation", "hybrid", 5)
 	if err != nil {
 		t.Fatalf("SearchMemoriesAdvanced failed: %v", err)
 	}
 	if len(searchResults) == 0 {
-		t.Fatalf("expected at least 1 search result for 'camoufox stealth', got 0")
+		t.Fatalf("expected at least 1 search result for 'browser automation', got 0")
 	}
 	if searchResults[0].Key != "kai_bypass_ssl" {
 		t.Fatalf("expected top result 'kai_bypass_ssl', got: %s", searchResults[0].Key)

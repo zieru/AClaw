@@ -30,7 +30,7 @@ func (b *BrowserAutomationTool) Name() string {
 }
 
 func (b *BrowserAutomationTool) Description() string {
-	return "Browser otomatis (Camoufox Stealth Primary / Chrome / Edge) berbasis arsitektur browser-use & Chrome DevTools Protocol (CDP). Mampu merender website modern berbasis JavaScript (React, Vue, SPA). AI dapat membuka URL, membaca teks bersih, melihat elemen interaktif berindeks numerik [0..N], mengklik elemen via index, mengisi form input via index dengan dukungan event React, menekan tombol keyboard (Enter/Escape/Tab), scroll, atau mengambil screenshot berlabel Set-of-Marks (SoM)."
+	return "Browser otomatis (Chrome / Chromium / Edge CDP berbasis go-rod) terinspirasi arsitektur browser-use & Chrome DevTools Protocol (CDP). Mampu merender website modern berbasis JavaScript (React, Vue, SPA). AI dapat membuka URL, membaca teks bersih, melihat elemen interaktif berindeks numerik [0..N], mengklik elemen via index, mengisi form input via index dengan dukungan event React, menekan tombol keyboard (Enter/Escape/Tab), scroll, atau mengambil screenshot berlabel Set-of-Marks (SoM)."
 }
 
 func (b *BrowserAutomationTool) Parameters() ParametersSchema {
@@ -385,7 +385,6 @@ func (b *BrowserAutomationTool) Execute(ctx context.Context, args map[string]int
 }
 
 // ensureDockerChrome memeriksa apakah port CDP 9222 sudah aktif (jika ada CDP lokal/Docker yang berjalan).
-// Kita abaikan pemaksaan auto-launch Docker zenika/alpine-chrome agar Camoufox menjadi primary dan resource hemat.
 func ensureDockerChrome(ctx context.Context) (string, error) {
 	client := &http.Client{Timeout: 1 * time.Second}
 

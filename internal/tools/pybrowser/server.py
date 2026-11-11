@@ -1,12 +1,13 @@
 import asyncio
 import atexit
 import os
+import re
 import shutil
 import socket
 import sys
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict
 from dotenv import load_dotenv
 
 # Muat file .env dari folder project jika ada
@@ -19,6 +20,7 @@ if not project_root:
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 load_dotenv(os.path.join(project_root, ".env"))
 
+
 def format_attachment_path(local_path: str) -> str:
     host_data_dir = os.getenv("HOST_DATA_DIR")
     if host_data_dir:
@@ -30,6 +32,7 @@ def format_attachment_path(local_path: str) -> str:
             return local_path
     return local_path
 
+
 def is_cdp_available(host: str = "127.0.0.1", port: int = 9222, timeout: float = 0.5) -> bool:
     """Cek apakah headless Chromium di Docker/CDP aktif dan siap menerima koneksi"""
     try:
@@ -38,11 +41,52 @@ def is_cdp_available(host: str = "127.0.0.1", port: int = 9222, timeout: float =
     except OSError:
         return False
 
+
+def find_host_browser_binary() -> Optional[str]:
+    """Cari executable Chrome/Chromium/Edge yang tersedia di host"""
+    custom_path = os.getenv("CHROME_PATH")
+    if custom_path and os.path.isfile(custom_path):
+        return custom_path
+
+    candidates = []
+    if sys.platform == "win32":
+        candidates = [
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
+            os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
+            os.path.expandvars(r"%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        ]
+    elif sys.platform == "darwin":
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ]
+    else:  # Linux / Unix
+        candidates = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+            "/usr/bin/brave-browser",
+        ]
+
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
 from mcp.server.fastmcp import FastMCP
 from browser_use.agent.service import Agent
 from browser_use.browser.profile import BrowserProfile
 from browser_use.browser.session import BrowserSession
 from browser_use.llm import ChatOpenAI, ChatGoogle, ChatDeepSeek
+
 try:
     from playwright_stealth import Stealth
     _STEALTH_AVAILABLE = True
@@ -52,6 +96,37 @@ except ImportError:
 mcp_host = os.getenv("MCP_HOST", "0.0.0.0")
 mcp_port = int(os.getenv("FASTMCP_PORT") or os.getenv("MCP_PORT") or "20129")
 mcp = FastMCP("browser-use-server", host=mcp_host, port=mcp_port)
+
+# Persistent active sessions for reuse & clean teardown
+_ACTIVE_SESSIONS: Dict[str, BrowserSession] = {}
+_SESSION_LOCK = asyncio.Lock()
+
+
+async def _close_session(session_id: str) -> bool:
+    async with _SESSION_LOCK:
+        sess = _ACTIVE_SESSIONS.pop(session_id, None)
+        if sess:
+            try:
+                await sess.stop()
+            except Exception:
+                pass
+            return True
+        return False
+
+
+async def _close_all_sessions() -> int:
+    async with _SESSION_LOCK:
+        count = 0
+        for sid in list(_ACTIVE_SESSIONS.keys()):
+            sess = _ACTIVE_SESSIONS.pop(sid, None)
+            if sess:
+                try:
+                    await sess.stop()
+                except Exception:
+                    pass
+                count += 1
+        return count
+
 
 def get_db_providers():
     """Mengambil provider aktif dari database SQLite goassistant.db"""
@@ -69,8 +144,10 @@ def get_db_providers():
     except Exception:
         return []
 
+
 def is_valid_key(val: Optional[str]) -> bool:
     return bool(val and not val.startswith("${") and val.strip() != "")
+
 
 def resolve_llm_and_vision(
     model_name: Optional[str] = None,
@@ -195,7 +272,7 @@ async def call_llm(llm, prompt_text: str, image_b64: Optional[str] = None) -> st
         if hasattr(resp, "content"):
             return str(resp.content)
         return str(resp)
-    except Exception as e1:
+    except Exception:
         try:
             from langchain_core.messages import HumanMessage
             if image_b64:
@@ -212,732 +289,13 @@ async def call_llm(llm, prompt_text: str, image_b64: Optional[str] = None) -> st
             return ""
 
 
-def is_camoufox_ready() -> bool:
-    """Cek apakah binary browser Camoufox sudah terpasang dan siap digunakan"""
-    try:
-        from camoufox.pkgman import installed_verstr
-        return installed_verstr() is not None
-    except Exception:
-        return False
-
-
-# ---------------------------------------------------------------------------
-# SESSION MANAGER — Camoufox Persistent Context (Lifecycle & Memory Control)
-# ---------------------------------------------------------------------------
-# Setiap `session_id` mendapat persistent context sendiri (user_data_dir di disk)
-# sehingga cookie/login/localStorage/lokasi halaman dipertahankan antar panggilan tool.
-# Manajemen Memori:
-# - CAMOUFOX_MAX_SESSIONS: Batas maksimum sesi aktif di RAM (default: 1). Jika ada sesi baru,
-#   sesi yang paling lama tidak digunakan (LRU) otomatis ditutup dan disimpan ke disk.
-# - CAMOUFOX_SESSION_TTL: Waktu idle maksimum (detik) sebelum sesi ditutup otomatis (default: 300s = 5m).
-# - Tab Reuse: Memanfaatkan tab awal bawaan Playwright (pages[0]) alih-alih membuka tab baru terus-menerus.
-# - Explicit Close: Aksi action="close" menutup sesi seketika dan melepaskan seluruh memori RAM.
-# ---------------------------------------------------------------------------
-
-CAMOUFOX_MAX_SESSIONS = int(os.getenv("CAMOUFOX_MAX_SESSIONS", "1"))
-CAMOUFOX_SESSION_TTL = float(os.getenv("CAMOUFOX_SESSION_TTL", "300"))  # 5 menit
-
-_SESSION_LOCK = asyncio.Lock()
-# session_id -> { "ctx": BrowserContext, "page": Page, "browser": AsyncCamoufox, "user_data_dir": str, "last_activity": float, "ignore_ssl": bool }
-_ACTIVE_SESSIONS: dict = {}
-_REAPER_TASK: Optional[asyncio.Task] = None
-
-
-async def _ensure_reaper_started() -> None:
-    global _REAPER_TASK
-    if _REAPER_TASK is None or _REAPER_TASK.done():
-        try:
-            loop = asyncio.get_running_loop()
-            _REAPER_TASK = loop.create_task(_session_reaper())
-        except RuntimeError:
-            pass
-
-
-async def _session_reaper() -> None:
-    """Background task untuk membersihkan sesi browser yang idle melebihi TTL."""
-    while True:
-        try:
-            await asyncio.sleep(30)
-            now = time.time()
-            async with _SESSION_LOCK:
-                expired = [
-                    sid for sid, data in _ACTIVE_SESSIONS.items()
-                    if (now - data.get("last_activity", now)) > CAMOUFOX_SESSION_TTL
-                ]
-                for sid in expired:
-                    await _close_session_locked(sid)
-        except asyncio.CancelledError:
-            break
-        except Exception:
-            pass
-
-
-async def _close_session_locked(session_id: str) -> bool:
-    """Tutup sesi Camoufox, semua halamannya, dan hentikan proses binary agar memori RAM terbebas penuh."""
-    entry = _ACTIVE_SESSIONS.pop(session_id, None)
-    if not entry:
-        return False
-
-    ctx = entry.get("ctx")
-    if ctx is not None:
-        try:
-            for p in list(getattr(ctx, "pages", [])):
-                try:
-                    await p.close()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        try:
-            await ctx.close()
-        except Exception:
-            pass
-
-    browser = entry.get("browser")
-    if browser is not None:
-        try:
-            await browser.__aexit__(None, None, None)
-        except Exception:
-            pass
-
-    return True
-
-
-async def _evict_oldest_session_if_needed() -> None:
-    """Jika jumlah sesi mencapai batas maksimum, tutup sesi tertua (LRU) untuk menghindari OOM."""
-    while len(_ACTIVE_SESSIONS) >= CAMOUFOX_MAX_SESSIONS and _ACTIVE_SESSIONS:
-        oldest_sid = min(
-            _ACTIVE_SESSIONS.keys(),
-            key=lambda sid: _ACTIVE_SESSIONS[sid].get("last_activity", 0)
-        )
-        await _close_session_locked(oldest_sid)
-
-
-async def _get_or_create_camoufox_session(
-    session_id: str,
-    headless: bool,
-    ignore_ssl: bool = False,
-) -> "tuple":
-    """
-    Ambil sesi Camoufox yang sudah ada untuk session_id, atau buat baru (persistent context).
-    Mengembalikan (context, page).
-    """
-    import re
-    from camoufox.async_api import AsyncCamoufox
-
-    await _ensure_reaper_started()
-
-    async with _SESSION_LOCK:
-        entry = _ACTIVE_SESSIONS.get(session_id)
-        # Jika opsi ignore_ssl berubah (misal retry SSL fallback), buat ulang sesi
-        if entry is not None and entry.get("ignore_ssl") != ignore_ssl:
-            await _close_session_locked(session_id)
-            entry = None
-
-        if entry is not None:
-            ctx = entry.get("ctx")
-            page = entry.get("page")
-            # Validasi page masih responsif
-            if page is not None:
-                try:
-                    await page.evaluate("() => 1")
-                    entry["last_activity"] = time.time()
-                    return ctx, page
-                except Exception:
-                    try:
-                        await page.close()
-                    except Exception:
-                        pass
-                    entry["page"] = None
-
-            if ctx is not None:
-                try:
-                    pages = getattr(ctx, "pages", [])
-                    if pages:
-                        active_p = pages[0]
-                    else:
-                        active_p = await ctx.new_page()
-                        await active_p.set_viewport_size({"width": 1920, "height": 1080})
-
-                    # Tutup tab ekstra yang mungkin tertinggal
-                    for extra in pages[1:]:
-                        try:
-                            await extra.close()
-                        except Exception:
-                            pass
-
-                    entry["page"] = active_p
-                    entry["last_activity"] = time.time()
-                    return ctx, active_p
-                except Exception:
-                    pass
-
-            # Sesi tidak valid -> tutup & buat baru
-            await _close_session_locked(session_id)
-
-        # ---- Buat sesi baru (persistent context) ----
-        await _evict_oldest_session_if_needed()
-
-        sess_root = os.path.abspath(os.path.join(project_root, "data", "browser", "sessions"))
-        os.makedirs(sess_root, exist_ok=True)
-        safe_id = re.sub(r'[^A-Za-z0-9_.-]', '_', session_id) if session_id else "default"
-        user_data_dir = os.path.join(sess_root, f"camoufox_{safe_id}")
-
-        # Konfigurasi efisiensi RAM Firefox
-        firefox_user_prefs = {
-            "browser.sessionhistory.max_total_viewers": 0,  # Bebaskan memori bfcache
-            "browser.sessionhistory.max_entries": 3,
-            "browser.cache.memory.enable": False,
-            "dom.ipc.processCount": 1,                      # Batasi sub-proses content
-        }
-
-        launch_kwargs = {
-            "headless": headless,
-            "humanize": True,
-            "geoip": True,
-            "persistent_context": True,
-            "user_data_dir": user_data_dir,
-            "firefox_user_prefs": firefox_user_prefs,
-        }
-        if ignore_ssl:
-            launch_kwargs["ignore_https_errors"] = True
-
-        browser = AsyncCamoufox(**launch_kwargs)
-        ctx = await browser.__aenter__()
-
-        # Playwright persistent context otomatis membuka tab awal (ctx.pages[0])
-        pages = getattr(ctx, "pages", [])
-        if pages:
-            active_page = pages[0]
-        else:
-            active_page = await ctx.new_page()
-            await active_page.set_viewport_size({"width": 1920, "height": 1080})
-
-        # Tutup tab ekstra bila ada
-        for extra in pages[1:]:
-            try:
-                await extra.close()
-            except Exception:
-                pass
-
-        entry = {
-            "ctx": ctx,
-            "page": active_page,
-            "browser": browser,
-            "user_data_dir": user_data_dir,
-            "last_activity": time.time(),
-            "ignore_ssl": ignore_ssl,
-        }
-        _ACTIVE_SESSIONS[session_id] = entry
-        return ctx, active_page
-
-
-async def run_camoufox_task(
-    clean_task: str,
-    target_url: Optional[str],
-    llm,
-    action: Optional[str] = None,
-    model_name: Optional[str] = "Auto",
-    headless: bool = True,
-    attach_screenshot: bool = True,
-    ignore_ssl: bool = False,
-    session_id: Optional[str] = None,
-    force_reload: bool = False,
-) -> str:
-    """
-    Eksekusi penjelajahan web stealth tingkat tinggi menggunakan Camoufox (Firefox C++ engine-level spoofing)
-    untuk membobol Cloudflare Turnstile, WAF, bot detection, dan proteksi fingerprinting (Pixelscan, KAI, dll).
-
-    ignore_ssl (bool): Jika True, abaikan error sertifikat SSL (ignore_https_errors) pada context session ini saja.
-    Hanya untuk akses read-only, bukan transaksi/pembayaran. Per-sesi, tidak global.
-
-    session_id (str): Identitas sesi persisten. Jika sama dengan panggilan sebelumnya, browser & halaman
-    yang sama dipertahankan (resume browsing) sehingga login/cookie/lokasi halaman tidak hilang.
-    force_reload (bool): Jika True, paksa navigasi ulang ke target_url meski sesi sudah berada di halaman itu.
-    """
-    import re
-    from urllib.parse import urljoin
-    from camoufox.async_api import AsyncCamoufox
-
-    if not session_id:
-        session_id = "default"
-
-    # Penanganan aksi tutup browser secara eksplisit
-    if (action or "").lower() in ["close", "exit", "quit", "tutup"]:
-        async with _SESSION_LOCK:
-            await _close_session_locked(session_id)
-        return f"🦊 Sesi Camoufox '{session_id}' berhasil ditutup dan memori sistem telah dibebaskan.", False
-
-    # Resolusi URL awal dari task jika url tidak diberikan langsung
-    url_to_open = target_url
-    if not url_to_open:
-        urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', clean_task)
-        if urls:
-            url_to_open = urls[0]
-            if not url_to_open.startswith("http"):
-                url_to_open = f"https://{url_to_open}"
-        elif "pixelscan" in clean_task.lower():
-            url_to_open = "https://pixelscan.net/"
-        elif "kai" in clean_task.lower():
-            url_to_open = "https://booking.kai.id/"
-        else:
-            clean_q = clean_task.replace("cari", "").replace("buka", "").strip()
-            url_to_open = f"https://duckduckgo.com/?q={clean_q}"
-
-    screenshot_dir = os.path.abspath(os.path.join(project_root, "data", "browser", "screenshots"))
-    os.makedirs(screenshot_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    screenshot_path = os.path.join(screenshot_dir, f"camoufox_{timestamp}.png")
-
-    ssl_error_detected = False
-
-    try:
-        ctx, page = await _get_or_create_camoufox_session(session_id, headless, ignore_ssl=ignore_ssl)
-
-        # Resume navigation: hanya navigasi bila belum di URL target atau dipaksa reload.
-        current_page_url = ""
-        try:
-            current_page_url = page.url
-        except Exception:
-            current_page_url = ""
-
-        need_navigate = force_reload or not current_page_url or current_page_url == "about:blank"
-        if url_to_open and current_page_url and current_page_url != "about:blank":
-            try:
-                from urllib.parse import urlparse
-                if urlparse(current_page_url).netloc != urlparse(url_to_open).netloc:
-                    need_navigate = True
-                elif url_to_open.rstrip("/") != current_page_url.rstrip("/"):
-                    need_navigate = True
-            except Exception:
-                need_navigate = True
-
-        if need_navigate and url_to_open:
-            try:
-                await page.goto(url_to_open, wait_until="domcontentloaded", timeout=45000)
-            except Exception:
-                pass
-
-        # Deteksi halaman peringatan sertifikat SSL Firefox (mis. sertifikat expired/invalid).
-        # Ini menjadi pemicu auto-fallback untuk retry dengan ignore_ssl=True.
-        try:
-            _ssl_title = await page.title()
-            _ssl_content = await page.content()
-            ssl_error_detected = any(
-                k in _ssl_title for k in [
-                    "Warning: Security Risk", "Potential Security Issue",
-                    "Your connection is not secure", "did not connect",
-                ]
-            ) or any(
-                k in _ssl_content for k in [
-                    "SEC_ERROR", "SSL_ERROR", "MOZILLA_PKIX_ERROR",
-                    "Certificate is not trusted", "safety warning",
-                ]
-            )
-        except Exception:
-            ssl_error_detected = False
-
-        # Berikan waktu jeda agar Cloudflare Turnstile / inisialisasi skrip selesai
-        await asyncio.sleep(4)
-
-        # Cek jika masih di halaman challenge Turnstile, tunggu tambahan beberapa detik
-        title = await page.title()
-        content = await page.content()
-        if "Just a moment" in title or "Checking your browser" in content or "Attention Required" in title:
-            await asyncio.sleep(5)
-            title = await page.title()
-
-        # -----------------------------------------------------------------
-        # INTERACTIVE ACTION EXECUTOR (Form Filling, Typing, Clicking, Scan)
-        # -----------------------------------------------------------------
-        interactive_keywords = [
-            "login", "masuk", "isi", "ketik", "klik", "submit", "daftar",
-            "pesan", "booking", "cari", "username", "password", "email",
-            "scan", "test", "cek", "check", "verifikasi", "fingerprint",
-            "jalankan", "run", "pilih", "select", "tombol", "button", "tekan", "press"
-        ]
-        wants_interaction = (action in ["click", "type", "fill", "press_key", "eval_js"]) or any(kw in clean_task.lower() for kw in interactive_keywords)
-
-        action_log = []
-        if wants_interaction:
-            import json
-
-            max_interaction_steps = 4
-            if action in ["click", "type", "fill", "press_key", "eval_js"]:
-                max_interaction_steps = 1  # Single explicit action requested
-
-            executed_history = []
-
-            for step_num in range(1, max_interaction_steps + 1):
-                # 0. Auto dismiss cookie banners if present
-                try:
-                    cookie_btn = page.locator("button:has-text('Got it!'), button:has-text('Accept'), button:has-text('Setuju'), a:has-text('Got it!')").first
-                    if await cookie_btn.count() > 0 and await cookie_btn.is_visible():
-                        await cookie_btn.click(timeout=2000)
-                        await asyncio.sleep(0.5)
-                except Exception:
-                    pass
-
-                # 1. Kumpulkan seluruh elemen interaktif yang terlihat (termasuk menembus Shadow DOM Vue / Web Components)
-                elements = await page.evaluate("""
-                    () => {
-                        const items = [];
-                        window._camoufoxInteractive = [];
-                        const selectors = 'button, a, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [role="tab"], [role="checkbox"]';
-
-                        function collect(root) {
-                            if (!root) return;
-                            try {
-                                const nodes = root.querySelectorAll(selectors);
-                                nodes.forEach((el) => {
-                                    try {
-                                        const rect = el.getBoundingClientRect();
-                                        const style = window.getComputedStyle(el);
-                                        if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0') {
-                                            const idx = items.length;
-                                            window._camoufoxInteractive.push(el);
-                                            try { el.setAttribute('data-camoufox-idx', idx.toString()); } catch(e) {}
-                                                
-                                            let label = (el.innerText || el.value || el.getAttribute('aria-label') || el.title || el.placeholder || '').trim();
-                                            if (label.length > 80) label = label.slice(0, 80) + '...';
-                                                
-                                            let sel = '';
-                                            if (el.id) {
-                                                sel = '#' + CSS.escape(el.id);
-                                            } else if (el.name) {
-                                                sel = `${el.tagName.toLowerCase()}[name="${CSS.escape(el.name)}"]`;
-                                            } else if (el.tagName.toLowerCase() === 'a' && el.getAttribute('href')) {
-                                                const href = el.getAttribute('href');
-                                                if (href && !href.startsWith('javascript:')) {
-                                                    sel = `a[href="${CSS.escape(href)}"]`;
-                                                }
-                                            }
-                                            if (!sel) {
-                                                sel = `[data-camoufox-idx="${idx}"]`;
-                                            }
-
-                                            items.push({
-                                                idx: idx,
-                                                tag: el.tagName.toLowerCase(),
-                                                type: el.type || '',
-                                                id: el.id || '',
-                                                name: el.name || '',
-                                                selector: sel,
-                                                text: label,
-                                                href: el.getAttribute('href') || '',
-                                                placeholder: el.placeholder || '',
-                                            });
-                                        }
-                                    } catch(e) {}
-
-                                    if (el.shadowRoot) {
-                                        collect(el.shadowRoot);
-                                    }
-                                });
-
-                                const allNodes = root.querySelectorAll('*');
-                                allNodes.forEach((el) => {
-                                    if (el.shadowRoot && !el.matches(selectors)) {
-                                        collect(el.shadowRoot);
-                                    }
-                                });
-                            } catch(e) {}
-                        }
-
-                        collect(document);
-                        return items.slice(0, 100);
-                    }
-                """)
-
-                # 2. Cek jika ada gambar captcha di halaman
-                captcha_detected = False
-                captcha_val = ""
-                try:
-                    captcha_elem = await page.query_selector('img[src*="captcha"], #captchaImg, img[alt*="captcha"]')
-                    if captcha_elem:
-                        captcha_detected = True
-                        captcha_bytes = await captcha_elem.screenshot()
-                        import base64
-                        b64_captcha = base64.b64encode(captcha_bytes).decode('utf-8')
-                        ocr_prompt = "Baca teks atau angka pada gambar captcha ini dengan persis. Balas HANYA dengan karakter captchanya saja tanpa spasi atau kata pengantar:"
-                        raw_c = await call_llm(llm, ocr_prompt, image_b64=b64_captcha)
-                        captcha_val = re.sub(r'[^a-zA-Z0-9]', '', raw_c.strip())
-                except Exception:
-                    pass
-
-                captcha_info = f"Teks Captcha yang berhasil di-OCR: '{captcha_val}'" if captcha_val else "Tidak ada atau gagal membaca captcha"
-                history_desc = "\n".join(f"- {h}" for h in executed_history) if executed_history else "Belum ada tindakan sebelumnya (Langkah awal)"
-                cur_title = await page.title()
-
-                planner_prompt = f"""Kamu adalah browser automation controller otonom (Langkah {step_num}/{max_interaction_steps}).
-Tugas Pengguna: {clean_task}
-Halaman Saat Ini: {cur_title} ({page.url})
-Riwayat Tindakan yang Sudah Dilakukan:
-{history_desc}
-
-Elemen Interaktif di Halaman (Top 100):
-{json.dumps(elements, indent=2, ensure_ascii=False)}
-Status Captcha: {captcha_info}
-
-Berdasarkan tugas pengguna dan keadaan halaman saat ini, tentukan daftar aksi interaksi berikutnya (click, fill, type, press, eval_js).
-PENTING:
-- Jika tugas pengguna SUDAH SELESAI (misalnya sudah berhasil login, atau hasil pencarian sudah terbuka, atau tidak perlu tindakan lagi), balas HANYA dengan `[]`.
-- Gunakan field `idx` (nomor indeks numerik dari daftar elemen di atas) agar browser dapat mengklik/mengisi target secara presisi tanpa salah sasaran.
-- Balas HANYA dengan valid JSON array berisi daftar aksi, contoh:
-[
-  {{"action": "click", "idx": 5, "text": "Masuk"}},
-  {{"action": "fill", "idx": 2, "value": "user@example.com"}}
-]
-"""
-                actions = []
-                try:
-                    raw_plan = await call_llm(llm, planner_prompt)
-                    m = re.search(r'\[\s*\{.*\}\s*\]', raw_plan, re.DOTALL)
-                    if m:
-                        try:
-                            actions = json.loads(m.group(0))
-                        except Exception:
-                            actions = []
-                except Exception:
-                    actions = []
-
-                # Heuristic fallback jika AI planner tidak menghasilkan aksi:
-                if not actions:
-                    if any(k in clean_task.lower() for k in ["login", "masuk"]):
-                        has_email_input = any(el.get("type") == "email" or "email" in el.get("name", "").lower() or "email" in el.get("placeholder", "").lower() or "user" in el.get("name", "").lower() for el in elements)
-                        has_pwd_input = any(el.get("type") == "password" or "pass" in el.get("name", "").lower() or "pass" in el.get("placeholder", "").lower() or "sandi" in el.get("placeholder", "").lower() for el in elements)
-
-                        if not (has_email_input or has_pwd_input):
-                            # Tahap 1: Klik tombol Masuk / Login untuk membuka form modal
-                            for el in elements:
-                                el_txt = el.get("text", "").lower()
-                                if el_txt in ["masuk", "login", "sign in", "masuk / daftar"] or ("masuk" in el_txt and "daftar" not in el_txt):
-                                    actions.append({
-                                        "action": "click",
-                                        "idx": el.get("idx"),
-                                        "selector": el.get("selector"),
-                                        "text": el.get("text")
-                                    })
-                                    break
-                        else:
-                            # Tahap 2: Input email & password sudah ada di layar, isi dan klik submit!
-                            user_match = re.search(r'([\w\.-]+@[\w\.-]+\.\w+)', clean_task)
-                            pass_match = re.search(r'password\s+([^\s,]+)', clean_task, re.IGNORECASE)
-                            if user_match:
-                                for el in elements:
-                                    e_type = el.get("type", "").lower()
-                                    e_name = el.get("name", "").lower()
-                                    e_ph = el.get("placeholder", "").lower()
-                                    if (e_type == "email" or "email" in e_name or "email" in e_ph or "user" in e_name):
-                                        actions.append({"action": "fill", "idx": el.get("idx"), "selector": el.get("selector"), "value": user_match.group(1)})
-                                        break
-                            if pass_match:
-                                for el in elements:
-                                    e_type = el.get("type", "").lower()
-                                    e_name = el.get("name", "").lower()
-                                    e_ph = el.get("placeholder", "").lower()
-                                    if (e_type == "password" or "pass" in e_name or "pass" in e_ph or "sandi" in e_ph):
-                                        actions.append({"action": "fill", "idx": el.get("idx"), "selector": el.get("selector"), "value": pass_match.group(1)})
-                                        break
-                            if captcha_val:
-                                for el in elements:
-                                    if "captcha" in el.get("name", "").lower() or "captcha" in el.get("id", "").lower():
-                                        actions.append({"action": "fill", "idx": el.get("idx"), "selector": el.get("selector"), "value": captcha_val})
-                                        break
-                            for el in elements:
-                                el_txt = el.get("text", "").lower()
-                                if (el.get("type") == "submit" or el_txt in ["masuk", "login", "submit", "sign in"]) and el.get("idx") not in [a.get("idx") for a in actions]:
-                                    actions.append({"action": "click", "idx": el.get("idx"), "selector": el.get("selector"), "text": el.get("text")})
-                                    break
-
-                    elif any(k in clean_task.lower() for k in ["pixelscan", "fingerprint", "scan"]):
-                        for el in elements:
-                            el_txt = el.get("text", "").lower()
-                            if "scan my browser" in el_txt or "fingerprint check" in el_txt:
-                                actions.append({
-                                    "action": "click",
-                                    "idx": el.get("idx"),
-                                    "selector": el.get("selector"),
-                                    "text": el.get("text"),
-                                    "href": el.get("href")
-                                })
-                                break
-
-                # Jika planner mengembalikan array kosong `[]`, berarti sasaran tugas sudah tercapai
-                if not actions:
-                    break
-
-                for act in actions:
-                    action_type = act.get("action", "").lower()
-                    idx = act.get("idx")
-                    sel = act.get("selector", "")
-                    text_val = act.get("text", "")
-                    val = act.get("value", "")
-                    href = act.get("href", "")
-                    if not href and idx is not None:
-                        for el in elements:
-                            if el.get("idx") == idx:
-                                href = el.get("href", "")
-                                break
-
-                    try:
-                        if action_type in ["fill", "type"]:
-                            filled = False
-                            if idx is not None:
-                                filled = await page.evaluate("""({i, v}) => {
-                                    const el = (window._camoufoxInteractive && window._camoufoxInteractive[i]) || document.querySelector(`[data-camoufox-idx="${i}"]`);
-                                    if (el) {
-                                        el.focus();
-                                        el.value = v;
-                                        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-                                        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-                                        return true;
-                                    }
-                                    return false;
-                                }""", {"i": idx, "v": str(val)})
-                            if not filled and sel:
-                                await page.fill(sel, str(val), timeout=5000)
-                                filled = True
-
-                            is_pwd = "pass" in str(sel).lower() or "pwd" in str(sel).lower() or "sandi" in str(sel).lower()
-                            display_val = "••••••••" if is_pwd else val
-                            action_desc = f"Mengisi {sel or f'elemen [{idx}]'}: {display_val}"
-                            action_log.append(f"• {action_desc}")
-                            executed_history.append(action_desc)
-
-                        elif action_type == "click":
-                            clicked = False
-                            target_desc = text_val or sel or (f"elemen [{idx}]" if idx is not None else "tombol")
-
-                            # 1. Klik DOM via idx
-                            if idx is not None:
-                                clicked = await page.evaluate("""(i) => {
-                                    const el = (window._camoufoxInteractive && window._camoufoxInteractive[i]) || document.querySelector(`[data-camoufox-idx="${i}"]`);
-                                    if (el) {
-                                        el.scrollIntoView({ behavior: 'instant', block: 'center' });
-                                        el.click();
-                                        return true;
-                                    }
-                                    return false;
-                                }""", idx)
-
-                            # 2. Klik via Playwright Locator Text
-                            if not clicked and text_val:
-                                try:
-                                    loc = page.locator(f"text={text_val}").first
-                                    if await loc.count() > 0:
-                                        await loc.click(timeout=5000)
-                                        clicked = True
-                                except Exception:
-                                    pass
-
-                            # 3. Klik via CSS Selector
-                            if not clicked and sel:
-                                try:
-                                    await page.click(sel, timeout=5000)
-                                    clicked = True
-                                except Exception:
-                                    clicked = await page.evaluate("""(s) => {
-                                        const el = document.querySelector(s);
-                                        if (el) {
-                                            el.scrollIntoView({ behavior: 'instant', block: 'center' });
-                                            el.click();
-                                            return true;
-                                        }
-                                        return false;
-                                    }""", sel)
-
-                            # 4. Navigasi langsung jika elemen bertipe tautan <a> dengan href
-                            await asyncio.sleep(1)
-                            if href and (not clicked or page.url == url_to_open):
-                                full_target = urljoin(page.url, href)
-                                if page.url != full_target:
-                                    try:
-                                        await page.goto(full_target, wait_until="domcontentloaded", timeout=30000)
-                                        clicked = True
-                                    except Exception:
-                                        pass
-
-                            if clicked:
-                                action_desc = f"Berhasil mengklik: {target_desc}"
-                                action_log.append(f"• {action_desc}")
-                                executed_history.append(action_desc)
-                            else:
-                                action_desc = f"Gagal mengklik: {target_desc}"
-                                action_log.append(f"• {action_desc}")
-                                executed_history.append(action_desc)
-
-                            await asyncio.sleep(2)
-
-                        elif action_type == "eval_js":
-                            script = act.get("script", "") or val
-                            if script:
-                                js_out = await page.evaluate(script)
-                                action_desc = f"Eksekusi JS: {js_out}"
-                                action_log.append(f"• {action_desc}")
-                                executed_history.append(action_desc)
-
-                        elif action_type == "press":
-                            key = act.get("key") or val or "Enter"
-                            await page.keyboard.press(str(key))
-                            action_desc = f"Menekan tombol keyboard {key}"
-                            action_log.append(f"• {action_desc}")
-                            executed_history.append(action_desc)
-                            await asyncio.sleep(1)
-
-                    except Exception as act_err:
-                        action_log.append(f"• Kendala aksi {action_type}: {act_err}")
-
-                # Tunggu jeda setelah eksekusi langkah agar DOM / modal / AJAX baru termuat
-                await asyncio.sleep(3)
-                if "pixelscan" in page.url or "pixelscan" in clean_task.lower():
-                    await asyncio.sleep(7)
-                    break  # Pixelscan cukup 1 siklus klik scan
-
-        attachment_tag = ""
-        if attach_screenshot:
-            try:
-                await page.screenshot(path=screenshot_path, full_page=False)
-                if os.path.exists(screenshot_path):
-                    reported_shot = format_attachment_path(screenshot_path)
-                    attachment_tag = f"\n\n[ATTACH_FILE:{reported_shot}|CAPTION:Tangkapan Layar Camoufox Stealth ({page.url})]"
-            except Exception:
-                pass
-
-        page_text = await page.inner_text("body")
-        truncated_text = page_text[:8000] if page_text else ""
-
-        action_log_str = "\n".join(action_log) if action_log else ""
-        analysis_prompt = (
-            f"Kamu telah berhasil membuka situs {page.url} menggunakan Camoufox Stealth Engine (Firefox anti-detect).\n"
-            f"Judul Halaman Sekarang: {title}\n"
-            f"Tugas Pengguna: {clean_task}\n\n"
-            f"Aksi yang Baru Saja Dijalankan:\n{action_log_str if action_log_str else 'Hanya membaca halaman'}\n\n"
-            f"Isi Konten Halaman Saat Ini (Setelah Aksi):\n{truncated_text}\n\n"
-            f"Jelaskan apakah scan/aksi/tugas tersebut berhasil atau gagal berdasarkan isi halaman yang termuat, dan berikan laporan informatif yang rapi."
-        )
-        summary = await call_llm(llm, analysis_prompt)
-        if not summary:
-            summary = f"Berhasil memproses {page.url} (Judul: {title}).\nRingkasan isi halaman:\n{truncated_text[:800]}"
-
-        actions_header = f"📋 <b>Aksi yang Dijalankan:</b>\n{action_log_str}\n\n" if action_log_str else ""
-        report = f"🦊 <b>[Camoufox Stealth Engine - {model_name}]</b>\n\n{actions_header}{summary}{attachment_tag}"
-        async with _SESSION_LOCK:
-            if session_id in _ACTIVE_SESSIONS:
-                _ACTIVE_SESSIONS[session_id]["last_activity"] = time.time()
-        return report, ssl_error_detected
-    except Exception as err:
-        return f"❌ Gagal menjalankan Camoufox Stealth Engine: {err}", False
-
-
 @mcp.tool(
     name="browser",
     description=(
-        "Browser otonom (autonomous web agent) berbasis Python dengan Camoufox Stealth Engine sebagai PRIMARY browser. "
-        "Camoufox menggunakan Firefox C++ spoofing engine level tanpa ketergantungan Docker/Zenika, mampu menembus Cloudflare Turnstile, "
-        "WAF, anti-bot, serta anti-fingerprinting (Pixelscan, CreepJS, KAI, dll). "
-        "AI dapat menjelajahi web secara mandiri, membuka URL, mengklik tombol, mengisi form formulir, mengekstrak data dari berbagai halaman web, "
-        "atau menutup sesi browser untuk membebaskan memori RAM sistem (action='close'). "
+        "Browser otonom (autonomous web agent) berbasis Python menggunakan arsitektur browser-use dan Playwright/CDP. "
+        "Mendukung browser Chromium, Google Chrome, Microsoft Edge di host atau Docker headless CDP (zenika/alpine-chrome). "
+        "AI dapat menjelajahi web secara mandiri, membuka URL, mengklik elemen/tombol, mengisi formulir, mengekstrak data dari berbagai halaman web, "
+        "mengambil screenshot visualisasi, atau menutup sesi browser untuk membebaskan memori RAM sistem (action='close'). "
         "Mendukung model apa pun (DeepSeek, GLM, Gemini, GPT-4o, Claude) dan otomatis mewarisi model aktif orchestrator."
     )
 )
@@ -953,45 +311,36 @@ async def browser(
     max_steps: int = 15,
     use_vision: Optional[bool] = None,
     attach_screenshot: bool = True,
-    engine: str = "camoufox",
+    engine: Optional[str] = None,
     ignore_ssl: bool = False,
     session_id: Optional[str] = None,
     force_reload: bool = False,
 ) -> str:
     """
     Eksekusi tugas browser otonom dengan kontrol dinamis dan dukungan model multi-provider.
-    Camoufox Stealth adalah Primary Browser default (bebas Docker Zenika).
-    Chromium CDP tersedia sebagai opsi sekunder jika engine='chromium'.
+    Menggunakan browser Chromium / Google Chrome yang tersedia di host atau Docker CDP.
 
     action (str): Aksi khusus seperti 'open', 'click', 'type', atau 'close' untuk menutup
     sesi browser dan membebaskan RAM secara instan.
 
-    ignore_ssl (bool): Jika True, abaikan error sertifikat SSL pada sesi Camoufox ini saja
-    (ignore_https_errors). Tanpa Chromium — tetap Camoufox. Untuk akses read-only, bukan transaksi.
-    Per-sesi, tidak global. Saat False dan halaman menampilkan peringatan sertifikat, otomatis
-    di-retry sekali dengan bypass SSL.
-
     session_id (str): Identitas sesi persisten (resume browsing). Gunakan nilai yang sama untuk
     mempertahankan browser/login/cookie/lokasi halaman antar panggilan tool (misal setelah tanya
-    kredensial lalu lanjut). Jika kosong, dianggap sesi 'default'.
-    force_reload (bool): Jika True, paksa navigasi ulang ke URL meski sesi sudah di halaman itu.
+    kredensial lalu lanjut). Jika kosong, dianggap sesi sekali pakai ('default').
     """
     try:
         act_lower = (action or "").strip().lower()
         if act_lower in ["close", "exit", "quit", "tutup"]:
             target_sess = session_id or "default"
-            async with _SESSION_LOCK:
-                if target_sess == "all":
-                    count = len(_ACTIVE_SESSIONS)
-                    for sid in list(_ACTIVE_SESSIONS.keys()):
-                        await _close_session_locked(sid)
-                    return f"✅ Berhasil menutup seluruh ({count}) sesi browser Camoufox dan membebaskan RAM sistem."
+            if target_sess == "all":
+                count = await _close_all_sessions()
+                return f"✅ Berhasil menutup seluruh ({count}) sesi browser dan membebaskan RAM sistem."
+            else:
+                closed = await _close_session(target_sess)
+                if closed:
+                    return f"✅ Sesi browser '{target_sess}' berhasil ditutup dan memori sistem telah dibebaskan."
                 else:
-                    closed = await _close_session_locked(target_sess)
-                    if closed:
-                        return f"✅ Sesi browser '{target_sess}' berhasil ditutup dan memori sistem telah dibebaskan."
-                    else:
-                        return f"ℹ️ Sesi browser '{target_sess}' tidak sedang aktif di memori."
+                    return f"ℹ️ Sesi browser '{target_sess}' tidak sedang aktif di memori."
+
         clean_task = (task or "").strip()
         if not clean_task:
             if url:
@@ -1004,83 +353,28 @@ async def browser(
         llm, vision_enabled = resolve_llm_and_vision(model, provider, use_vision, api_base, api_key)
 
         # -------------------------------------------------------------
-        # DUAL-ENGINE ROUTING: Camoufox is PRIMARY (Docker Zenika bypassed)
-        # -------------------------------------------------------------
-        is_chromium_forced = (engine.lower() == "chromium")
-        use_camoufox = not is_chromium_forced and is_camoufox_ready()
-
-        if use_camoufox:
-            # Eksplisit: ignore_ssl=True langsung bypass sejak awal (domain apa pun).
-            if ignore_ssl:
-                result, _ = await run_camoufox_task(
-                    clean_task,
-                    url,
-                    llm,
-                    action=action,
-                    model_name=model,
-                    headless=headless,
-                    attach_screenshot=attach_screenshot,
-                    ignore_ssl=True,
-                    session_id=session_id,
-                    force_reload=force_reload,
-                )
-                return result
-
-            # Normal: coba tanpa bypass SSL.
-            result, ssl_error = await run_camoufox_task(
-                clean_task,
-                url,
-                llm,
-                action=action,
-                model_name=model,
-                headless=headless,
-                attach_screenshot=attach_screenshot,
-                ignore_ssl=False,
-                session_id=session_id,
-                force_reload=force_reload,
-            )
-
-            # Auto-fallback: halaman menampilkan peringatan sertifikat SSL -> retry sekali dgn bypass.
-            if ssl_error:
-                result, _ = await run_camoufox_task(
-                    clean_task,
-                    url,
-                    llm,
-                    action=action,
-                    model_name=model,
-                    headless=headless,
-                    attach_screenshot=attach_screenshot,
-                    ignore_ssl=True,
-                    session_id=session_id,
-                    force_reload=force_reload,
-                )
-                result += "\n\n⚠️ <i>Peringatan sertifikat SSL terdeteksi; akses di-retry dengan bypass SSL (per-sesi, read-only).</i>"
-            return result
-        elif engine.lower() == "camoufox" and not is_camoufox_ready():
-            return "⚠️ Engine Camoufox belum terpasang binary-nya di sistem. Silakan jalankan 'uv run python -m camoufox fetch' di server."
-
-        # -------------------------------------------------------------
-        # ENGINE 2 (Fallback / Secondary): Chromium CDP / Local Chrome
+        # RESOLUSI BROWSER CDP / CHROME HOST / PLAYWRIGHT CHROMIUM
         # -------------------------------------------------------------
         # 1. Cek apakah ada Docker Chromium CDP aktif di 127.0.0.1:9222 atau env CDP_URL
         cdp_endpoint = os.getenv("CDP_URL")
         if not cdp_endpoint and is_cdp_available("127.0.0.1", 9222):
             cdp_endpoint = "http://127.0.0.1:9222"
 
-        # 2. Jika tidak ada CDP Docker, baru fallback ke binary browser lokal
+        # 2. Jika tidak ada CDP Docker, cari executable binary browser di host lokal
         executable_path = None
         if not cdp_endpoint:
-            executable_path = os.getenv("CHROME_PATH")
-            if not executable_path:
-                for p in ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/snap/bin/chromium"]:
-                    if os.path.exists(p):
-                        executable_path = p
-                        break
+            executable_path = find_host_browser_binary()
 
         default_ua = os.getenv(
             "BROWSER_USER_AGENT",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
         )
+
+        safe_sid = re.sub(r'[^a-zA-Z0-9_-]', '_', session_id or "default")
+        user_data_dir = os.path.join(project_root, "data", "browser", "profiles", safe_sid) if session_id else None
+        if user_data_dir:
+            os.makedirs(user_data_dir, exist_ok=True)
+
         profile = BrowserProfile(
             headless=headless,
             disable_security=True,
@@ -1090,8 +384,9 @@ async def browser(
             },
             cdp_url=cdp_endpoint,
             executable_path=executable_path if not cdp_endpoint else None,
+            user_data_dir=user_data_dir,
         )
-        
+
         # Ensure provider attribute exists for Agent telemetry and logging
         if not hasattr(llm, "provider") or not getattr(llm, "provider", None):
             try:
@@ -1099,9 +394,14 @@ async def browser(
             except Exception:
                 pass
 
+        target_sess = session_id or "default"
+        async with _SESSION_LOCK:
+            browser_session = _ACTIVE_SESSIONS.get(target_sess)
+            if browser_session is None:
+                browser_session = BrowserSession(browser_profile=profile)
+                _ACTIVE_SESSIONS[target_sess] = browser_session
+
         # Terapkan playwright-stealth pada BrowserContext jika tersedia
-        # Stealth patches: navigator.webdriver, chrome runtime, plugins, dll agar tidak terdeteksi Cloudflare/WAF
-        browser_session = BrowserSession(browser_profile=profile)
         if _STEALTH_AVAILABLE:
             try:
                 await browser_session.start()
@@ -1123,23 +423,9 @@ async def browser(
             max_actions_per_step=3,
             use_vision=vision_enabled
         )
-        
+
         history = await agent.run(max_steps=max_steps)
         final_result = history.final_result() or "Tugas penjelajahan web selesai tanpa kesimpulan teks khusus."
-        
-        # Auto-fallback: Jika Engine 1 terblokir Cloudflare WAF, otomatis oper ke Engine 2 (Camoufox)!
-        is_blocked = (
-            "you have been blocked" in final_result.lower()
-            or "unable to access kai.id" in final_result.lower()
-            or "attention required! | cloudflare" in final_result.lower()
-            or "just a moment..." in final_result.lower()
-        )
-        if is_blocked and is_camoufox_ready() and engine.lower() != "chromium":
-            result, ssl_error = await run_camoufox_task(clean_task, url, llm, action=action, model_name=model, headless=headless, attach_screenshot=attach_screenshot, session_id=session_id, force_reload=force_reload)
-            if ssl_error:
-                result, _ = await run_camoufox_task(clean_task, url, llm, action=action, model_name=model, headless=headless, attach_screenshot=attach_screenshot, ignore_ssl=True, session_id=session_id, force_reload=force_reload)
-                result += "\n\n⚠️ <i>Peringatan sertifikat SSL terdeteksi; akses di-retry dengan bypass SSL (per-sesi, read-only).</i>"
-            return result
 
         # Ambil screenshot halaman terakhir jika diminta dan tersedia
         attachment_tag = ""
@@ -1155,19 +441,22 @@ async def browser(
                     try:
                         shutil.copy2(last_shot, dest_path)
                         reported_dest = format_attachment_path(dest_path)
-                        attachment_tag = f"\n\n[ATTACH_FILE:{reported_dest}|CAPTION:Tangkapan Layar Hasil Browser-Use ({model})]"
+                        attachment_tag = f"\n\n[ATTACH_FILE:{reported_dest}|CAPTION:Tangkapan Layar Hasil Browser-Use ({model or 'default'})]"
                     except Exception:
                         reported_shot = format_attachment_path(last_shot)
-                        attachment_tag = f"\n\n[ATTACH_FILE:{reported_shot}|CAPTION:Tangkapan Layar Hasil Browser-Use ({model})]"
-                
-        mode_str = "Vision" if vision_enabled else "Text-DOM (DeepSeek Mode)"
-        if is_blocked and not is_camoufox_ready():
-            final_result += "\n\n💡 <i>Tips: Halaman ini terproteksi Cloudflare Bot Management. Anda dapat mengaktifkan Engine Camoufox di VPS dengan menjalankan: <code>uv run python -m camoufox fetch</code></i>"
+                        attachment_tag = f"\n\n[ATTACH_FILE:{reported_shot}|CAPTION:Tangkapan Layar Hasil Browser-Use ({model or 'default'})]"
 
-        return f"🌐 <b>[Browser-Use Autonomous Agent - {model} ({mode_str})]</b>\n\n{final_result}{attachment_tag}"
-        
+        # Jika bukan sesi persisten (tidak ada session_id yang diberikan caller), tutup sesi agar hemat RAM
+        if not session_id:
+            await _close_session(target_sess)
+
+        mode_str = "Vision" if vision_enabled else "Text-DOM (DeepSeek Mode)"
+        chosen_model_name = getattr(llm, "model", model or "default")
+        return f"🌐 <b>[Browser-Use Autonomous Agent - {chosen_model_name} ({mode_str})]</b>\n\n{final_result}{attachment_tag}"
+
     except Exception as err:
         return f"❌ Gagal menjalankan tugas browser-use: {err}"
+
 
 if __name__ == "__main__":
     transport = os.getenv("MCP_TRANSPORT", "stdio").lower()

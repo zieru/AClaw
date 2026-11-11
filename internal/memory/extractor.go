@@ -27,7 +27,7 @@ Tugasmu adalah menganalisis interaksi percakapan dan mengekstrak informasi penti
 Kategori Tipe Memori:
 1. 'factual': Preferensi personal pengguna, profil, data login/akses, konfigurasi server/alat, informasi lingkungan.
 2. 'episodic': Kejadian/tugas spesifik yang baru diselesaikan, progres yang dicapai, keputusan tindakan yang diambil (decision).
-3. 'procedural': Panduan langkah kerja, SOP, aturan teknis wajib (contoh: "WAJIB gunakan engine camoufox untuk KAI").
+3. 'procedural': Panduan langkah kerja, SOP, aturan teknis wajib (contoh: "WAJIB gunakan browser automation untuk KAI").
 4. 'semantic': Konsep, definisi, pemahaman struktur halaman web/antarmuka (contoh: "form booking ada di shadow DOM").
 
 Aturan Ekstraksi:

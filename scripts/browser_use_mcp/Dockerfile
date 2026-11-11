@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install system dependencies for Camoufox (Firefox) and Playwright
+# Install system dependencies for Playwright Chromium
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
@@ -44,11 +44,9 @@ RUN if [ ! -e /usr/local/bin/uvx ]; then ln -s /usr/local/bin/uv /usr/local/bin/
 # Copy project dependency files and source
 COPY pyproject.toml README.md server.py ./
 
-# Sync dependencies, install geoip, fetch Camoufox & Playwright Chromium
+# Sync dependencies and install Playwright Chromium
 RUN uv sync --no-install-project && \
-    uv add "camoufox[geoip]" && \
-    uv run python -m camoufox fetch && \
-    uv run playwright install chromium
+    uv run playwright install --with-deps chromium
 
 EXPOSE 20129
 

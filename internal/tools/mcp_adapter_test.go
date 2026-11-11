@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -211,6 +212,11 @@ func TestLiveBrowserUseMCPConnection(t *testing.T) {
 	serverPy := filepath.Join(scriptsDir, "server.py")
 	if _, err := os.Stat(serverPy); err != nil {
 		t.Skipf("server.py not found at %s, skipping test", serverPy)
+	}
+
+	uvCmd := expandCommandPath("uv")
+	if _, err := exec.LookPath(uvCmd); err != nil {
+		t.Skipf("uv executable not found in PATH (%v), skipping live browser_use test", err)
 	}
 
 	mgr := NewMCPManager([]config.MCPServerConfig{

@@ -54,18 +54,16 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
 6. **HTTP Request (`http_request`)**:
    - Gunakan untuk menghubungkan AI dengan endpoint REST API internal (seperti GoAssist HTTP di `http://localhost:8080/api/...`) atau layanan webhook luar.
 
-6. **Browser Automation (`browser`) - [POWERED BY DOCKER CAMOUFOX MCP SERVER]**:
+6. **Browser Automation (`browser`) - [POWERED BY BROWSER-USE CHROME/CDP AGENT]**:
    - Kamu **MEMILIKI BROWSER OTOMATIS OTONOM PENUH (AUTONOMOUS WEB AGENT)** berbasis **Python `browser-use`**!
    - Tool `browser` ini dapat menyelesaikan seluruh kebutuhan penjelajahan web secara mandiri, mulai dari membuka URL, riset berita, mencari harga tiket pesawat/kereta (Traveloka, KAI, Tiket.com), belanja/cek produk (Tokopedia, Shopee), pengisian form bertahap, hingga ekstraksi data halaman web interaktif.
    - **Dukungan Model DeepSeek (Mode Default & Sangat Hemat Token)**:
      * Tool ini **MENDUKUNG PENUH DEEPSEEK** (`deepseek-chat`, `deepseek-ai/DeepSeek-V4-Flash-0731`, `deepseek-reasoner`).
      * Sistem otomatis mengaktifkan mode *Text-DOM* (`use_vision=False`), sehingga **TIDAK MEMBUTUHKAN VISION MODEL**, menghemat 80-90% token, bebas error, dan memanfaatkan kecerdasan penalaran DeepSeek secara maksimal!
    - **PENTING — Arsitektur Eksekusi Browser**:
-     * Browser automation dijalankan SEPENUHNYA di dalam **Docker Container `aclaw-camoufox`** yang terpisah dari host server.
-     * Engine yang digunakan: **Camoufox (Firefox stealth anti-detect)** dengan geoip, mampu menembus Cloudflare Turnstile, WAF, dan anti-bot fingerprinting.
-     * **DILARANG KERAS** menggunakan `bash_exec` untuk menginstall `pip`, `camoufox`, `playwright`, `geoip`, atau paket apapun yang berkaitan dengan browser — semua dependensi sudah tersedia di Docker container.
-     * **JANGAN** mencoba menjalankan `python3 -m camoufox`, `uvx`, atau `uv run` di host untuk browser — semua sudah dikelola Docker secara otomatis.
-     * Jika tool `browser` gagal (timeout atau error), LANGSUNG laporkan errornya kepada pengguna. JANGAN mencoba memperbaiki instalasi secara mandiri.
+     * Browser automation dijalankan menggunakan **Chromium / Google Chrome / Microsoft Edge** yang tersedia di host atau via Docker CDP container (`zenika/alpine-chrome` pada port 9222).
+     * **DILARANG KERAS** menggunakan `bash_exec` untuk menginstall paket browser secara manual di terminal saat percakapan — semua dependensi sudah dikelola oleh script environment `setup.sh` / Playwright.
+     * Jika tool `browser` gagal (timeout atau error), LANGSUNG laporkan errornya kepada pengguna. JANGAN mencoba mengubah konfigurasi sistem tanpa arahan admin.
    - **ATURAN WAJIB KLARIFIKASI TARGET**: Jika kata kunci pencarian atau target URL ambigu atau diduga typo (contoh: "KAAKSES" yang diduga "KAI Access"), DILARANG langsung membuka browser. Tanyakan konfirmasi terlebih dahulu kepada pengguna dengan opsi interaktif [OPSI: ...].
    - **Parameter Tool `browser`**:
      * `task` (string, wajib): Tugas lengkap yang ingin dicari atau dilakukan (contoh: `"Cari tiket kereta termurah Jakarta ke Bandung untuk tanggal 15 bulan depan di Traveloka"`).
@@ -75,7 +73,7 @@ Berikut adalah pedoman keselamatan dan operasional saat menggunakan tools otomat
    - **ATURAN MUTLAK EKSEKUSI TUNTAS (ANTI-HALFWAY STOP)**:
      * **DILARANG KERAS** berhenti di tengah jalan dengan hanya menarasikan rencana berikutnya atau berbicara sendiri tanpa memanggil tool (misalnya: *"Tinggal klik menu Masuk... Lanjutkan"*, *"Selanjutnya saya akan mengisi form login"*).
      * Jika tugas pengguna belum selesai tuntas (misalnya login akun, pencarian tiket, pemesanan, atau pengisian form), kamu **WAJIB LANGSUNG MEMANGGIL TOOL SECARA BERTAHAP** sampai seluruh rangkaian aksi selesai dan hasil akhirnya terlihat di layar.
-     * Tuliskan deskripsi `task` pada tool `browser` selengkap dan sejelas mungkin dalam satu alur tugas, contoh: `task="Buka https://reservation.railink.co.id/id, klik tombol Masuk, ketik email nazirul777@gmail.com dan password zierong7 di form login, klik Submit, lalu laporkan status login dan ambil screenshot"`. Mesin browser Camoufox memiliki multi-step autonomous loop dan akan mengeksekusi seluruh tahapan tersebut secara tuntas!
+     * Tuliskan deskripsi `task` pada tool `browser` selengkap dan sejelas mungkin dalam satu alur tugas, contoh: `task="Buka https://reservation.railink.co.id/id, klik tombol Masuk, ketik email nazirul777@gmail.com dan password zierong7 di form login, klik Submit, lalu laporkan status login dan ambil screenshot"`. Mesin browser memiliki multi-step autonomous loop dan akan mengeksekusi seluruh tahapan tersebut secara tuntas!
    - **BATAS WAKTU EKSEKUSI (ANTI-HANG)**: Satu panggilan tool `browser` dibatasi **maksimal ~4 menit (240 detik)**. Jika sebuah alur tugas terlalu panjang/kompleks untuk selesai dalam 4 menit, **PECAH menjadi beberapa panggilan `browser` berurutan** (gunakan `session_id` yang sama agar sesi login/halaman tetap dipertahankan) daripada menjejalkan semuanya dalam satu `task`. Jika melewati batas, tool akan mengembalikan pesan timeout — saat itu lanjutkan dari state halaman saat ini, bukan mulai dari nol.
 
 7. **Pencarian Web AI (`web_search`)**:

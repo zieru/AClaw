@@ -161,7 +161,7 @@ func GetActiveModelInfo(ctx context.Context) (prov, model string) {
 }
 
 // BrowserSessionArg menanamkan session_id (dari chat_id pada context) ke argumen tool browser
-// bila belum diisi oleh model. Ini menjaga sesi Camoufox persisten antar turn percakapan,
+// bila belum diisi oleh model. Ini menjaga sesi browser persisten antar turn percakapan,
 // sehingga setelah bot menanyakan kredensial, panggilan browser berikutnya melanjutkan
 // sesi yang sama (resume browsing) alih-alih membuka browser baru dari nol.
 func BrowserSessionArg(ctx context.Context, args map[string]interface{}) {
