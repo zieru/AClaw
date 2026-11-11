@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"goassistant/internal/tools/pypptx"
 )
 
 type PPTXTool struct{}
@@ -182,20 +184,23 @@ func resolvePython() (string, error) {
 	return "", fmt.Errorf("interpreter Python tidak ditemukan. Pastikan Python terinstall dan python-pptx tersedia")
 }
 
-// findScriptPath mencari lokasi script pptx_cli.py
+// findScriptPath mencari lokasi script pptx_cli.py di disk atau mengekstraknya otomatis dari binary ter-embed
 func findScriptPath() (string, error) {
 	cwd, _ := os.Getwd()
 	candidates := []string{
 		filepath.Join(cwd, "scripts", "pptx_engine", "pptx_cli.py"),
+		filepath.Join(cwd, "data", "pptx_engine", "pptx_cli.py"),
 		filepath.Join(cwd, "..", "scripts", "pptx_engine", "pptx_cli.py"),
 		filepath.Join(cwd, "..", "..", "scripts", "pptx_engine", "pptx_cli.py"),
 		"scripts/pptx_engine/pptx_cli.py",
+		"data/pptx_engine/pptx_cli.py",
 	}
 
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
 		candidates = append(candidates,
 			filepath.Join(exeDir, "scripts", "pptx_engine", "pptx_cli.py"),
+			filepath.Join(exeDir, "data", "pptx_engine", "pptx_cli.py"),
 			filepath.Join(exeDir, "..", "scripts", "pptx_engine", "pptx_cli.py"),
 		)
 	}
@@ -206,7 +211,23 @@ func findScriptPath() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("script pptx_cli.py tidak ditemukan di folder scripts/pptx_engine/")
+	// Jika file belum ada di disk (misal binary standalone di server), otomatis ekstrak dari binary ter-embed!
+	extractDirs := []string{
+		filepath.Join(cwd, "scripts", "pptx_engine"),
+		filepath.Join(cwd, "data", "pptx_engine"),
+		filepath.Join(os.TempDir(), "goassistant_pptx"),
+	}
+
+	for _, targetDir := range extractDirs {
+		if err := pypptx.EnsureScriptsExtracted(targetDir); err == nil {
+			cand := filepath.Join(targetDir, "pptx_cli.py")
+			if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+				return filepath.Abs(cand)
+			}
+		}
+	}
+
+	return "", fmt.Errorf("script pptx_cli.py tidak ditemukan dan gagal diekstrak dari binary")
 }
 
 func (t *PPTXTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -363,6 +384,9 @@ func (t *PPTXTool) Execute(ctx context.Context, args map[string]interface{}) (st
 	outputStr := strings.TrimSpace(string(out))
 
 	if err != nil {
+		if strings.Contains(outputStr, "No module named 'pptx'") || strings.Contains(outputStr, "No module named pptx") {
+			return fmt.Sprintf("❌ Modul Python 'python-pptx' belum terinstall di server (%s).\nSilakan jalankan di terminal server: pip install python-pptx", pythonBin), nil
+		}
 		return fmt.Sprintf("❌ Gagal mengeksekusi PPTX engine (action: %s): %v\nOutput: %s", action, err, outputStr), nil
 	}
 
