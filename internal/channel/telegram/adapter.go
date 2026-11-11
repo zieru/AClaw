@@ -241,6 +241,16 @@ func (a *BotAdapter) registerHandlers() {
 					images = append(images, fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(optBytes)))
 				} else if isTextExt(ext) && len(docBytes) <= 150*1024 {
 					prompt = fmt.Sprintf("[📎 Berkas: %s]\n```\n%s\n```\n\n%s", doc.FileName, string(docBytes), caption)
+				} else {
+					// Simpan berkas dokumen (PPTX, DOCX, XLSX, PDF, dll.) ke data/uploads/ agar dapat diakses oleh tools
+					uploadsDir := filepath.Join("data", "uploads")
+					_ = os.MkdirAll(uploadsDir, 0755)
+					cleanFileName := filepath.Base(doc.FileName)
+					savedPath := filepath.Join(uploadsDir, fmt.Sprintf("%d_%s", time.Now().Unix(), cleanFileName))
+					if err := os.WriteFile(savedPath, docBytes, 0644); err == nil {
+						absSavedPath, _ := filepath.Abs(savedPath)
+						prompt = fmt.Sprintf("[📎 Dokumen Terlampir: %s (Path Lokal: %s, Ukuran: %.2f MB)]\n\n%s", doc.FileName, absSavedPath, fileMB, caption)
+					}
 				}
 			}
 		}

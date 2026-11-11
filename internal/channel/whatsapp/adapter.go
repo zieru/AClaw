@@ -689,6 +689,26 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 				} else if err != nil {
 					log.Printf("⚠️ [Channel-WA] Gagal mengunduh dokumen gambar: %v", err)
 				}
+			} else {
+				// Simpan dokumen non-gambar (PPTX, DOCX, XLSX, PDF, dsb.) ke data/uploads/
+				if data, err := a.client.Download(context.Background(), docMsg); err == nil && len(data) > 0 {
+					attachedFileMB = float64(len(data)) / (1024 * 1024)
+					uploadsDir := filepath.Join("data", "uploads")
+					_ = os.MkdirAll(uploadsDir, 0755)
+					cleanFileName := filepath.Base(docMsg.GetFileName())
+					savedPath := filepath.Join(uploadsDir, fmt.Sprintf("%d_%s", time.Now().Unix(), cleanFileName))
+					if writeErr := os.WriteFile(savedPath, data, 0644); writeErr == nil {
+						absSavedPath, _ := filepath.Abs(savedPath)
+						userCaption := cleanText
+						if userCaption == "" {
+							userCaption = fmt.Sprintf("Analisis dan proses berkas dokumen terlampir: %s", docMsg.GetFileName())
+						}
+						cleanText = fmt.Sprintf("[📎 Dokumen Terlampir: %s (Path Lokal: %s, Ukuran: %.2f MB)]\n\n%s", docMsg.GetFileName(), absSavedPath, attachedFileMB, userCaption)
+						log.Printf("📎 [Channel-WA] Berhasil menyimpan berkas %s ke %s (%.2f MB)", docMsg.GetFileName(), savedPath, attachedFileMB)
+					}
+				} else if err != nil {
+					log.Printf("⚠️ [Channel-WA] Gagal mengunduh dokumen: %v", err)
+				}
 			}
 		}
 	}

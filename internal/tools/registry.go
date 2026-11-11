@@ -31,6 +31,7 @@ func GetRegistry() *Registry {
 		defaultRegistry.Register(&SendFileTool{})
 		defaultRegistry.Register(&VisitPerformanceTool{})
 		defaultRegistry.Register(&TelkomselSearchTool{})
+		defaultRegistry.Register(&PPTXTool{})
 	})
 	return defaultRegistry
 }
