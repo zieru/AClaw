@@ -715,16 +715,22 @@ func respToChatResponse(resp *schemas.BifrostChatResponse, req provider.ChatRequ
 	return out
 }
 
-// bifrostToErr converts a BifrostError to a Go error.
+// bifrostToErr converts a BifrostError to a Go error with status codes and failure classification.
 func bifrostToErr(berr *schemas.BifrostError) error {
 	if berr == nil {
 		return errors.New("bifrost: unknown error")
 	}
-	if berr.Error != nil && berr.Error.Message != "" {
-		return errors.New(berr.Error.Message)
-	}
+	var parts []string
 	if berr.StatusCode != nil {
-		return fmt.Errorf("bifrost: status %d", *berr.StatusCode)
+		parts = append(parts, fmt.Sprintf("status %d", *berr.StatusCode))
 	}
-	return errors.New("bifrost: request failed")
+	if berr.ExtraFields.ErrorType != "" {
+		parts = append(parts, string(berr.ExtraFields.ErrorType))
+	}
+	if berr.Error != nil && berr.Error.Message != "" {
+		parts = append(parts, berr.Error.Message)
+	} else if len(parts) == 0 {
+		parts = append(parts, "request failed")
+	}
+	return fmt.Errorf("bifrost: %s", strings.Join(parts, ": "))
 }

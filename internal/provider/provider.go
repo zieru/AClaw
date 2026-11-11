@@ -158,6 +158,19 @@ type Manager struct {
 var globalManager *Manager
 var managerOnce sync.Once
 
+// NewManager creates a fresh standalone Manager instance (used in tests or isolated routers)
+func NewManager() *Manager {
+	return &Manager{
+		providers:     make(map[string]Provider),
+		providersByID: make(map[string]Provider),
+		priorities:    make(map[string]int),
+		combos:        make(map[string]*storage.ModelComboRecord),
+		comboCounters: make(map[string]*uint64),
+		comboLatency:  make(map[string]map[string]*comboLatencyEntry),
+		stopProbe:     make(chan struct{}),
+	}
+}
+
 // GetManager returns the singleton provider manager
 func GetManager() *Manager {
 	managerOnce.Do(func() {

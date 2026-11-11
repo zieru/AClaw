@@ -741,31 +741,54 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				log.Printf("⚠️ [GeminiWeb] Kendala eksekusi web scraper: %v", genErr)
 				return nil, genErr
 			}
-			// Check if error is timeout, stream stalled, context length exceeded, or network issue
-			errStr := strings.ToLower(genErr.Error())
-			isStreamStalled := strings.Contains(errStr, "stream stalled") ||
-				strings.Contains(errStr, "stream read error") ||
-				strings.Contains(errStr, "unexpected eof")
-			isContextOrTimeout := strings.Contains(errStr, "context deadline exceeded") ||
-				strings.Contains(errStr, "timeout") ||
-				strings.Contains(errStr, "context_length_exceeded") ||
-				strings.Contains(errStr, "maximum context length") ||
-				strings.Contains(errStr, "token limit") ||
-				strings.Contains(errStr, "rate limit") ||
-				isStreamStalled
+
+			// If fatal auth error (401/403/invalid key), abort immediately without waiting
+			if provider.IsAuthFatal(genErr) {
+				return nil, genErr
+			}
 
 			retrySeconds := 120
 			if cfg := config.Get(); cfg != nil && cfg.Timeouts.RetrySeconds > 0 {
 				retrySeconds = cfg.Timeouts.RetrySeconds
 			}
 
-			// If error happened and we had history turns in the request, try auto-compacting and retrying once with minimal context
-			if isContextOrTimeout && len(history) > 0 {
-				if isStreamStalled {
-					tracker.SetCurrent("Aliran respon AI sempat terhenti, menyambung ulang otomatis")
-				} else {
-					tracker.SetCurrent("Konteks penuh/timeout, merampingkan riwayat & mencoba ulang")
+			// Case A: Rate Limit (RPM / 429) or Server Overload (503/529) -> Resilient Adaptive Wait-and-Retry Loop
+			// Important: DO NOT truncate chat history! Preserve context and wait for cooldown window to clear.
+			if provider.IsRateLimitOrOverload(genErr) && ctx.Err() == nil {
+				maxRateLimitRetries := 5
+				baseDelay := 5 * time.Second
+				maxDelay := 45 * time.Second
+
+				for rateAttempt := 0; rateAttempt < maxRateLimitRetries; rateAttempt++ {
+					waitDur := provider.ParseRetryAfterDuration(genErr.Error(), rateAttempt, baseDelay, maxDelay)
+					statusMsg := fmt.Sprintf("⏳ Batas frekuensi API (RPM) tercapai. Menunggu %d detik sebelum mencoba kembali otomatis (Percobaan %d/%d)...", int(waitDur.Seconds()), rateAttempt+1, maxRateLimitRetries)
+					tracker.SetCurrent(statusMsg)
+					if req.OnProgress != nil {
+						req.OnProgress(statusMsg)
+					}
+
+					select {
+					case <-time.After(waitDur):
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+
+					retryCtx, cancelRetry := context.WithTimeout(ctx, time.Duration(retrySeconds)*time.Second)
+					genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, chatReq)
+					cancelRetry()
+
+					if genErr == nil {
+						break
+					}
+					if !provider.IsRateLimitOrOverload(genErr) {
+						break
+					}
 				}
+			}
+
+			// Case B: Context Length Exceeded (only when model genuinely cannot fit token budget)
+			if genErr != nil && provider.IsContextLengthExceeded(genErr) && len(history) > 0 && ctx.Err() == nil {
+				tracker.SetCurrent("Konteks melebihi batas model, merampingkan riwayat & mencoba ulang")
 
 				// Auto clean old session messages in DB (keep only the very latest 2 messages)
 				_ = o.db.TruncateOldMessages(session.ID, 2)
@@ -801,25 +824,20 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 					StreamCallback:  req.OnStreamChunk,
 				}
 
-				// Linked context that respects parent cancellation and timeout budget
-				retryCtx, cancelRetry := context.WithTimeout(ctx,
-					time.Duration(retrySeconds)*time.Second)
+				retryCtx, cancelRetry := context.WithTimeout(ctx, time.Duration(retrySeconds)*time.Second)
 				genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, retryChatReq)
 				cancelRetry()
-			} else if ctx.Err() == nil {
-				// Auto-retry once for transient provider/network glitches before failing
-				if isStreamStalled {
-					tracker.SetCurrent("Aliran respon AI terputus, memulihkan koneksi...")
-				} else {
-					tracker.SetCurrent("Kendala koneksi/server sementara, mencoba ulang otomatis")
-				}
+			}
+
+			// Case C: Stream stalled or transient network error
+			if genErr != nil && provider.IsStreamStalledOrNetwork(genErr) && ctx.Err() == nil {
+				tracker.SetCurrent("Aliran respon AI terputus/jaringan sementara, memulihkan koneksi...")
 				select {
-				case <-time.After(1200 * time.Millisecond):
+				case <-time.After(2 * time.Second):
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				}
-				retryCtx, cancelRetry := context.WithTimeout(ctx,
-					time.Duration(retrySeconds)*time.Second)
+				retryCtx, cancelRetry := context.WithTimeout(ctx, time.Duration(retrySeconds)*time.Second)
 				genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, chatReq)
 				cancelRetry()
 			}
@@ -1035,6 +1053,14 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		}
 
 		synthResp, synthErr := o.providerManager.GenerateWithFallback(ctx, provToCall, synthReq)
+		if synthErr != nil && provider.IsRateLimitOrOverload(synthErr) && ctx.Err() == nil {
+			waitDur := provider.ParseRetryAfterDuration(synthErr.Error(), 0, 4*time.Second, 20*time.Second)
+			select {
+			case <-time.After(waitDur):
+				synthResp, synthErr = o.providerManager.GenerateWithFallback(ctx, provToCall, synthReq)
+			case <-ctx.Done():
+			}
+		}
 		if synthErr != nil && ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -1331,8 +1357,8 @@ func FormatUserFriendlyErrorForChannel(err error, isGrapariOnly bool) string {
 		return "⏳ **Waktu Tunggu Habis (Timeout)**\nServer AI membutuhkan waktu terlalu lama untuk memproses (beban server tinggi atau konteks terlalu panjang). Riwayat percakapan telah disederhanakan secara otomatis. Silakan coba kirim ulang pertanyaan Anda (gunakan `/retry`), atau gunakan `/reset` jika kendala berlanjut."
 	case strings.Contains(errStr, "context_length_exceeded") || strings.Contains(errStr, "maximum context length") || strings.Contains(errStr, "token limit"):
 		return "📏 **Batas Konteks Terlampaui**\nRiwayat percakapan melebihi kapasitas memori model AI. Riwayat telah dibersihkan otomatis. Silakan kirim ulang pertanyaan Anda atau gunakan `/retry`."
-	case strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "429") || strings.Contains(errStr, "quota"):
-		return "⚠️ **Batas Kuota / Rate Limit**\nLayanan AI sedang mencapai batas frekuensi panggilan atau kuota provider telah habis. Silakan coba beberapa saat lagi dengan `/retry` atau hubungi admin."
+	case strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "429") || strings.Contains(errStr, "quota") || strings.Contains(errStr, "resource has been exhausted") || strings.Contains(errStr, "provider_rate_limited") || strings.Contains(errStr, "provider_credentials_exhausted"):
+		return "⚠️ **Batas Kuota / Rate Limit (Telah Dicoba Berulang Kali)**\nLayanan AI mencapai batas frekuensi panggilan (RPM) atau kuota provider telah habis. Sistem telah mencoba menunggu cooldown dan melakukan pemanggilan ulang secara otomatis beberapa kali namun provider masih belum dapat merespons. Silakan periksa sisa kuota API key Anda, coba beberapa saat lagi dengan `/retry`, atau tambahkan key cadangan di menu `/provider`."
 	case strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no such host") || strings.Contains(errStr, "dial tcp"):
 		return "🔌 **Koneksi Terputus**\nGagal terhubung ke endpoint server AI. Mohon periksa koneksi jaringan atau coba beberapa saat lagi dengan `/retry`."
 	case strings.Contains(errStr, "seluruh target gagal"):

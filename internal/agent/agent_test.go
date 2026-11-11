@@ -583,3 +583,162 @@ func TestSubagentModelInheritanceAndSanitization(t *testing.T) {
 		t.Errorf("Case 4: expected explicit model 'mock-custom-model', got '%s'", mockProv.lastReq.Model)
 	}
 }
+
+type mockRateLimitRetryProvider struct {
+	attempts int
+}
+
+func (m *mockRateLimitRetryProvider) Name() string                     { return "mock_ratelimit_prov" }
+func (m *mockRateLimitRetryProvider) Type() string                     { return "mock" }
+func (m *mockRateLimitRetryProvider) DefaultModel() string             { return "mock-model" }
+func (m *mockRateLimitRetryProvider) Models() []string                 { return []string{"mock-model"} }
+func (m *mockRateLimitRetryProvider) SetHTTPClient(client interface{}) {}
+func (m *mockRateLimitRetryProvider) GenerateChat(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	m.attempts++
+	if m.attempts <= 2 {
+		return nil, fmt.Errorf("status 429: rate limit reached (RPM). Please try again in 50ms")
+	}
+	return &provider.ChatResponse{
+		Content: "Resilient retry succeeded!",
+	}, nil
+}
+
+func TestProcessMessage_ResilientRateLimitRetry(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_ratelimit.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+	defer db.Close()
+
+	sm := memory.NewSessionManager(db)
+	mm := memory.NewManager(db, config.MemoryConfig{}, nil, nil)
+	loader := NewMDLoader(tempDir)
+	pb := NewPromptBuilder(loader)
+	tr := tools.GetRegistry()
+
+	pm := provider.NewManager()
+	mockP := &mockRateLimitRetryProvider{}
+	pm.Register(mockP, 1)
+
+	orch := NewOrchestrator(db, sm, mm, pb, tr, pm)
+
+	sess, _ := sm.GetOrCreate("tg_test_chan", "chat_rl_123", "user_rl_456")
+	_ = sm.AddMessage(sess.ID, "user", "previous message 1", 10)
+	_ = sm.AddMessage(sess.ID, "assistant", "previous reply 1", 10)
+	_ = sm.AddMessage(sess.ID, "user", "previous message 2", 10)
+
+	var progressUpdates []string
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := orch.ProcessMessage(ctx, UserRequest{
+		ChannelType:   "telegram",
+		ChannelID:     "tg_test_chan",
+		ChatID:        "chat_rl_123",
+		UserID:        "user_rl_456",
+		UserName:      "TestUser",
+		UserPrompt:    "Halo, tolong bantu saya",
+		PreferredProv: "mock_ratelimit_prov",
+		OnProgress: func(status string) {
+			progressUpdates = append(progressUpdates, status)
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("expected success after resilient retries, got error: %v", err)
+	}
+	if resp == nil || !strings.Contains(resp.Text, "Resilient retry succeeded!") {
+		t.Fatalf("expected successful response, got %+v", resp)
+	}
+
+	// Verify that provider was called at least 3 times
+	if mockP.attempts != 3 {
+		t.Errorf("expected 3 provider attempts, got %d", mockP.attempts)
+	}
+
+	// Verify that history was preserved (not truncated by mistake on rate limit)
+	historyMessages, err := sm.GetHistory(sess.ID, 10)
+	if err != nil {
+		t.Fatalf("failed to get session messages: %v", err)
+	}
+	// Original 3 messages + current user message + assistant reply = 5 messages
+	if len(historyMessages) < 4 {
+		t.Errorf("expected session history to be preserved (> 3 messages), got %d", len(historyMessages))
+	}
+
+	// Verify that progress updates were received
+	if len(progressUpdates) == 0 {
+		t.Errorf("expected progress updates during rate limit wait, got none")
+	}
+}
+
+type mockContextExceededProvider struct {
+	attempts int
+}
+
+func (m *mockContextExceededProvider) Name() string                     { return "mock_context_prov" }
+func (m *mockContextExceededProvider) Type() string                     { return "mock" }
+func (m *mockContextExceededProvider) DefaultModel() string             { return "mock-model" }
+func (m *mockContextExceededProvider) Models() []string                 { return []string{"mock-model"} }
+func (m *mockContextExceededProvider) SetHTTPClient(client interface{}) {}
+func (m *mockContextExceededProvider) GenerateChat(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	m.attempts++
+	if m.attempts == 1 {
+		return nil, fmt.Errorf("context_length_exceeded: maximum context length is 4096 tokens")
+	}
+	return &provider.ChatResponse{
+		Content: "Compacted retry succeeded!",
+	}, nil
+}
+
+func TestProcessMessage_ContextLengthExceededCompaction(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_context.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+	defer db.Close()
+
+	sm := memory.NewSessionManager(db)
+	mm := memory.NewManager(db, config.MemoryConfig{}, nil, nil)
+	loader := NewMDLoader(tempDir)
+	pb := NewPromptBuilder(loader)
+	tr := tools.GetRegistry()
+
+	pm := provider.NewManager()
+	mockP := &mockContextExceededProvider{}
+	pm.Register(mockP, 1)
+
+	orch := NewOrchestrator(db, sm, mm, pb, tr, pm)
+
+	sess, _ := sm.GetOrCreate("tg_test_chan", "chat_ctx_123", "user_ctx_456")
+	for i := 0; i < 6; i++ {
+		_ = sm.AddMessage(sess.ID, "user", fmt.Sprintf("long history message %d", i), 100)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := orch.ProcessMessage(ctx, UserRequest{
+		ChannelType:   "telegram",
+		ChannelID:     "tg_test_chan",
+		ChatID:        "chat_ctx_123",
+		UserID:        "user_ctx_456",
+		UserName:      "TestUser",
+		UserPrompt:    "Pertanyaan berikutnya",
+		PreferredProv: "mock_context_prov",
+	})
+
+	if err != nil {
+		t.Fatalf("expected success after context compaction retry, got error: %v", err)
+	}
+	if resp == nil || !strings.Contains(resp.Text, "Compacted retry succeeded!") {
+		t.Fatalf("expected successful response, got %+v", resp)
+	}
+	if mockP.attempts != 2 {
+		t.Errorf("expected 2 provider attempts (1 failed context + 1 compacted success), got %d", mockP.attempts)
+	}
+}
