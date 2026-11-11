@@ -162,4 +162,70 @@ func TestPPTXTool(t *testing.T) {
 	if !strings.Contains(resInspectAdded, "Kesimpulan Akhir") {
 		t.Errorf("File hasil add_slide harus memuat slide 'Kesimpulan Akhir', got: %s", resInspectAdded)
 	}
+
+	// 6. Test Edit Slide In-Place with Rich Styling (KPIs, Badges, Columns, Callout)
+	outEdited := filepath.Join(tempDir, "test_edited.pptx")
+	editSlideArgs := map[string]interface{}{
+		"action":       "edit_slide",
+		"file_path":    outAdded,
+		"output_path":  outEdited,
+		"slide_number": 2, // Re-style slide 2
+		"slide_data": map[string]interface{}{
+			"title":          "Executive Worklist Summary",
+			"subtitle":       "Area Sumatera • Periode November 2026",
+			"category_badge": "CONFIDENTIAL",
+			"theme":          "telkomsel_red",
+			"kpis": []interface{}{
+				map[string]interface{}{"title": "Total Target", "value": "14.776", "badge": "100%", "badge_type": "neutral"},
+				map[string]interface{}{"title": "Obsolete", "value": "13.854", "badge": "93.8%", "badge_type": "danger"},
+				map[string]interface{}{"title": "Ready Success", "value": "11.205", "badge": "75.8%", "badge_type": "success"},
+			},
+			"columns": []interface{}{
+				map[string]interface{}{
+					"title": "Validasi Parameter",
+					"items": []interface{}{
+						"<b>NTE ACS:</b> Obsolete Version 13.854",
+						"<b>Tiket Open:</b> 2.455 tiket berjalan",
+					},
+				},
+				map[string]interface{}{
+					"title":   "Gap Analysis",
+					"callout": "Potensi sukses 75.8% (11.205 SSL)",
+					"items": []interface{}{
+						"Prioritaskan eksekusi batch 1",
+						"Selesaikan tiket berjalan paralel",
+					},
+				},
+			},
+			"callout": map[string]interface{}{
+				"title": "Rekomendasi Utama",
+				"text":  "Segera distribusikan worklist tervalidasi ke tim lapangan.",
+				"type":  "warning",
+			},
+			"notes": "Speaker notes slide 2 dipertahankan dan diperbarui.",
+		},
+	}
+	resEdit, err := tool.Execute(ctx, editSlideArgs)
+	if err != nil {
+		t.Fatalf("Execute edit_slide gagal: %v", err)
+	}
+	if !strings.Contains(resEdit, "[ATTACH_FILE:") {
+		t.Fatalf("Respon edit_slide harus mengandung tag [ATTACH_FILE:], got: %s", resEdit)
+	}
+
+	// Verifikasi slide yang diedit via inspect
+	inspectEditedArgs := map[string]interface{}{
+		"action":    "inspect",
+		"file_path": outEdited,
+	}
+	resInspectEdited, err := tool.Execute(ctx, inspectEditedArgs)
+	if err != nil {
+		t.Fatalf("Execute inspect on edited file gagal: %v", err)
+	}
+	if !strings.Contains(resInspectEdited, "Executive Worklist Summary") {
+		t.Errorf("File hasil edit_slide harus memuat 'Executive Worklist Summary', got: %s", resInspectEdited)
+	}
+	if !strings.Contains(resInspectEdited, "Speaker notes slide 2") {
+		t.Errorf("File hasil edit_slide harus memuat speaker notes baru, got: %s", resInspectEdited)
+	}
 }

@@ -23,9 +23,11 @@ func (t *PPTXTool) Name() string {
 
 func (t *PPTXTool) Description() string {
 	return "Tool internal untuk menginspeksi, mengedit, dan membuat berkas presentasi PowerPoint (.pptx). " +
-		"Mendukung: 1) 'inspect' untuk membaca struktur & isi teks slide, 2) 'replace_text' untuk mengganti teks/placeholder " +
-		"template seperti {{variabel}}, 3) 'create' untuk membuat presentasi baru secara dinamis, dan 4) 'add_slide' untuk " +
-		"menambahkan slide baru. Berkas presentasi hasil olahan otomatis dilampirkan langsung ke chat pengguna."
+		"Mendukung: 1) 'inspect' untuk membaca struktur, teks & tabel slide, 2) 'replace_text' untuk mengganti teks/placeholder, " +
+		"3) 'create' untuk membuat presentasi baru dengan desain kaya (KPIs, multi-kolom, callout, tabel, elemen bebas), " +
+		"4) 'add_slide' untuk menambahkan slide baru, dan 5) 'edit_slide' untuk mendesain ulang/merombak tata letak visual " +
+		"slide tertentu pada berkas yang sudah ada secara in-place (misal: merapikan styling, kartu KPI ber-badge warna, " +
+		"layout 2 kolom berdampingan, alert/callout box). Berkas presentasi hasil olahan otomatis dilampirkan langsung ke chat pengguna."
 }
 
 func (t *PPTXTool) Parameters() ParametersSchema {
@@ -34,16 +36,16 @@ func (t *PPTXTool) Parameters() ParametersSchema {
 		Properties: map[string]ParameterProperty{
 			"action": {
 				Type:        "string",
-				Description: "Aksi yang ingin dilakukan: 'inspect' (baca konten & tabel slide), 'replace_text' (ganti teks/placeholder), 'create' (buat presentasi baru), 'add_slide' (tambah slide ke file yang ada).",
-				Enum:        []string{"inspect", "replace_text", "create", "add_slide"},
+				Description: "Aksi yang ingin dilakukan: 'inspect' (baca konten slide & tabel), 'replace_text' (ganti teks/placeholder), 'create' (buat presentasi baru), 'add_slide' (tambah slide baru), 'edit_slide' (desain ulang / styling in-place slide tertentu).",
+				Enum:        []string{"inspect", "replace_text", "create", "add_slide", "edit_slide"},
 			},
 			"file_path": {
 				Type:        "string",
-				Description: "Path ke berkas PPTX sumber di server (wajib untuk action 'inspect', 'replace_text', dan 'add_slide').",
+				Description: "Path ke berkas PPTX sumber di server (wajib untuk 'inspect', 'replace_text', 'add_slide', dan 'edit_slide'). Mendukung path absolut maupun tilde ('~/AClaw/...').",
 			},
 			"output_path": {
 				Type:        "string",
-				Description: "Path berkas PPTX output hasil olahan (opsional, jika tidak diisi otomatis disimpan di folder data/output/).",
+				Description: "Path berkas PPTX output hasil olahan (opsional, untuk 'edit_slide' jika tidak diisi otomatis overwrite file sumber).",
 			},
 			"replacements": {
 				Type:        "object",
@@ -51,15 +53,15 @@ func (t *PPTXTool) Parameters() ParametersSchema {
 			},
 			"slide_number": {
 				Type:        "integer",
-				Description: "Nomor slide target (1-based) jika ingin membatasi operasi pada slide tertentu (opsional).",
+				Description: "Nomor slide target (1-based). Wajib untuk action 'edit_slide', opsional untuk 'replace_text'.",
 			},
 			"presentation_data": {
 				Type:        "object",
-				Description: "Struktur data presentasi lengkap (untuk action 'create'). Contoh: {'title': 'Judul', 'subtitle': 'Subjudul', 'theme': 'telkomsel_red', 'slides': [{'title': 'Slide 1', 'bullets': ['Poin 1', 'Poin 2']}]}.",
+				Description: "Struktur data presentasi lengkap (untuk action 'create') berisi 'title', 'subtitle', 'theme', dan 'slides' (array slide_data kaya).",
 			},
 			"slide_data": {
 				Type:        "object",
-				Description: "Struktur data slide baru (untuk action 'add_slide'). Contoh: {'title': 'Rencana Q4', 'bullets': ['Poin A', 'Poin B'], 'notes': 'Catatan'}.",
+				Description: "Spesifikasi tata letak dan konten visual slide kaya (untuk 'add_slide' dan 'edit_slide'). Mendukung komponen: 'title', 'subtitle', 'category_badge', 'theme', 'kpis' (array kartu metrik dengan {title, value, badge, badge_type: 'success'|'danger'|'warning'|'neutral', desc, color}), 'columns' (array kolom berdampingan dengan {title, callout, items: ['<b>Bold:</b> info', ...]}), 'callout' ({title, text, type}), 'table' ({headers: [...], rows: [[...]]}), 'elements' (canvas bebas: [{type: 'card'|'textbox'|'table'|'line', x, y, w, h, fill, border, ...}]), dan 'notes' (catatan pembicara).",
 			},
 			"theme": {
 				Type:        "string",
@@ -199,9 +201,47 @@ func resolvePython() (string, error) {
 	return "", fmt.Errorf("interpreter Python tidak ditemukan. Pastikan Python terinstall dan python-pptx tersedia")
 }
 
-// findScriptPath mencari lokasi script pptx_cli.py di disk atau mengekstraknya otomatis dari binary ter-embed
+func normalizePath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	if strings.HasPrefix(p, "~/") || p == "~" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			if p == "~" {
+				return home
+			}
+			return filepath.Join(home, p[2:])
+		}
+	}
+	return p
+}
+
+// findScriptPath mencari lokasi script pptx_cli.py di disk dan memastikan script ter-embed diekstrak/diperbarui
 func findScriptPath() (string, error) {
 	cwd, _ := os.Getwd()
+	extractDirs := []string{
+		filepath.Join(cwd, "scripts", "pptx_engine"),
+		filepath.Join(cwd, "data", "pptx_engine"),
+		filepath.Join(os.TempDir(), "goassistant_pptx"),
+	}
+
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		if exeDir != cwd {
+			extractDirs = append([]string{filepath.Join(exeDir, "scripts", "pptx_engine"), filepath.Join(exeDir, "data", "pptx_engine")}, extractDirs...)
+		}
+	}
+
+	for _, targetDir := range extractDirs {
+		if err := pypptx.EnsureScriptsExtracted(targetDir); err == nil {
+			cand := filepath.Join(targetDir, "pptx_cli.py")
+			if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+				return filepath.Abs(cand)
+			}
+		}
+	}
+
 	candidates := []string{
 		filepath.Join(cwd, "scripts", "pptx_engine", "pptx_cli.py"),
 		filepath.Join(cwd, "data", "pptx_engine", "pptx_cli.py"),
@@ -211,34 +251,9 @@ func findScriptPath() (string, error) {
 		"data/pptx_engine/pptx_cli.py",
 	}
 
-	if exe, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exe)
-		candidates = append(candidates,
-			filepath.Join(exeDir, "scripts", "pptx_engine", "pptx_cli.py"),
-			filepath.Join(exeDir, "data", "pptx_engine", "pptx_cli.py"),
-			filepath.Join(exeDir, "..", "scripts", "pptx_engine", "pptx_cli.py"),
-		)
-	}
-
 	for _, c := range candidates {
 		if info, err := os.Stat(c); err == nil && !info.IsDir() {
 			return filepath.Abs(c)
-		}
-	}
-
-	// Jika file belum ada di disk (misal binary standalone di server), otomatis ekstrak dari binary ter-embed!
-	extractDirs := []string{
-		filepath.Join(cwd, "scripts", "pptx_engine"),
-		filepath.Join(cwd, "data", "pptx_engine"),
-		filepath.Join(os.TempDir(), "goassistant_pptx"),
-	}
-
-	for _, targetDir := range extractDirs {
-		if err := pypptx.EnsureScriptsExtracted(targetDir); err == nil {
-			cand := filepath.Join(targetDir, "pptx_cli.py")
-			if info, err := os.Stat(cand); err == nil && !info.IsDir() {
-				return filepath.Abs(cand)
-			}
 		}
 	}
 
@@ -279,6 +294,7 @@ func (t *PPTXTool) Execute(ctx context.Context, args map[string]interface{}) (st
 		if !ok || strings.TrimSpace(filePathVal) == "" {
 			return "", fmt.Errorf("parameter 'file_path' wajib diisi untuk action 'inspect'")
 		}
+		filePathVal = normalizePath(filePathVal)
 		cmdArgs = []string{scriptPath, "inspect", "--file", filePathVal}
 
 	case "replace_text":
@@ -286,12 +302,14 @@ func (t *PPTXTool) Execute(ctx context.Context, args map[string]interface{}) (st
 		if !ok || strings.TrimSpace(filePathVal) == "" {
 			return "", fmt.Errorf("parameter 'file_path' wajib diisi untuk action 'replace_text'")
 		}
+		filePathVal = normalizePath(filePathVal)
 		replMap, ok := args["replacements"].(map[string]interface{})
 		if !ok || len(replMap) == 0 {
 			return "", fmt.Errorf("parameter 'replacements' (object key-value) wajib diisi untuk action 'replace_text'")
 		}
 
 		outPath, _ = args["output_path"].(string)
+		outPath = normalizePath(outPath)
 		if strings.TrimSpace(outPath) == "" {
 			_ = os.MkdirAll("data/output", 0755)
 			baseName := filepath.Base(filePathVal)
@@ -324,9 +342,10 @@ func (t *PPTXTool) Execute(ctx context.Context, args map[string]interface{}) (st
 		}
 
 		outPath, _ = args["output_path"].(string)
+		outPath = normalizePath(outPath)
 		if strings.TrimSpace(outPath) == "" {
 			if pOut, ok := presData["output_path"].(string); ok && strings.TrimSpace(pOut) != "" {
-				outPath = pOut
+				outPath = normalizePath(pOut)
 			} else {
 				_ = os.MkdirAll("data/output", 0755)
 				outPath = filepath.Join("data", "output", fmt.Sprintf("presentasi_%d.pptx", time.Now().Unix()))
@@ -355,12 +374,14 @@ func (t *PPTXTool) Execute(ctx context.Context, args map[string]interface{}) (st
 		if !ok || strings.TrimSpace(filePathVal) == "" {
 			return "", fmt.Errorf("parameter 'file_path' wajib diisi untuk action 'add_slide'")
 		}
+		filePathVal = normalizePath(filePathVal)
 		slideData, ok := args["slide_data"].(map[string]interface{})
 		if !ok || len(slideData) == 0 {
 			return "", fmt.Errorf("parameter 'slide_data' wajib diisi untuk action 'add_slide'")
 		}
 
 		outPath, _ = args["output_path"].(string)
+		outPath = normalizePath(outPath)
 		if strings.TrimSpace(outPath) == "" {
 			_ = os.MkdirAll("data/output", 0755)
 			baseName := filepath.Base(filePathVal)
@@ -386,8 +407,51 @@ func (t *PPTXTool) Execute(ctx context.Context, args map[string]interface{}) (st
 
 		cmdArgs = []string{scriptPath, "add_slide", "--file", filePathVal, "--output", outPath, "--slide-json", tmpSlideFile, "--theme", theme}
 
+	case "edit_slide":
+		filePathVal, ok := args["file_path"].(string)
+		if !ok || strings.TrimSpace(filePathVal) == "" {
+			return "", fmt.Errorf("parameter 'file_path' wajib diisi untuk action 'edit_slide'")
+		}
+		filePathVal = normalizePath(filePathVal)
+
+		slideNum := 0
+		if sNumFloat, ok := args["slide_number"].(float64); ok && sNumFloat > 0 {
+			slideNum = int(sNumFloat)
+		} else if sNumInt, ok := args["slide_number"].(int); ok && sNumInt > 0 {
+			slideNum = sNumInt
+		}
+		if slideNum <= 0 {
+			return "", fmt.Errorf("parameter 'slide_number' (integer >= 1) wajib diisi untuk action 'edit_slide'")
+		}
+
+		slideData, ok := args["slide_data"].(map[string]interface{})
+		if !ok || len(slideData) == 0 {
+			return "", fmt.Errorf("parameter 'slide_data' wajib diisi untuk action 'edit_slide'")
+		}
+
+		outPath, _ = args["output_path"].(string)
+		outPath = normalizePath(outPath)
+		if strings.TrimSpace(outPath) == "" {
+			outPath = filePathVal // in-place overwrite file sumber secara default
+		}
+
+		slideBytes, err := json.Marshal(slideData)
+		if err != nil {
+			return "", fmt.Errorf("gagal memproses parameter slide_data: %w", err)
+		}
+		tmpSlideFile := filepath.Join(tmpDir, fmt.Sprintf("slide_edit_%d.json", time.Now().UnixNano()))
+		if err := os.WriteFile(tmpSlideFile, slideBytes, 0644); err != nil {
+			return "", fmt.Errorf("gagal menulis file konfigurasi edit slide: %w", err)
+		}
+		defer os.Remove(tmpSlideFile)
+
+		cmdArgs = []string{scriptPath, "edit_slide", "--file", filePathVal, "--slide", fmt.Sprintf("%d", slideNum), "--slide-json", tmpSlideFile, "--output", outPath}
+		if themeVal, ok := args["theme"].(string); ok && themeVal != "" {
+			cmdArgs = append(cmdArgs, "--theme", themeVal)
+		}
+
 	default:
-		return "", fmt.Errorf("action '%s' tidak didukung. Pilih: inspect, replace_text, create, atau add_slide", action)
+		return "", fmt.Errorf("action '%s' tidak didukung. Pilih: inspect, replace_text, create, add_slide, atau edit_slide", action)
 	}
 
 	// Eksekusi script Python
@@ -485,6 +549,11 @@ func (t *PPTXTool) Execute(ctx context.Context, args map[string]interface{}) (st
 		}
 		caption := "Presentasi dengan Slide Tambahan Baru"
 		return fmt.Sprintf("[ATTACH_FILE:%s|CAPTION:%s] ✅ Slide baru berhasil ditambahkan! Total slide sekarang: %d. Berkas tersimpan di: %s", outPath, caption, totalSlides, outPath), nil
+
+	case "edit_slide":
+		slideNumStr := fmt.Sprintf("%v", args["slide_number"])
+		caption := fmt.Sprintf("Presentasi Hasil Restyling Slide %s", slideNumStr)
+		return fmt.Sprintf("[ATTACH_FILE:%s|CAPTION:%s] ✅ Slide %s pada berkas presentasi berhasil di-styling ulang secara in-place dengan kualitas eksekutif! Berkas tersimpan di: %s", outPath, caption, slideNumStr, outPath), nil
 	}
 
 	return outputStr, nil
