@@ -3,13 +3,76 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"html"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
+
+const pythonPtyScript = `import pty, os, select, sys
+raw_pass = sys.stdin.readline()
+password = raw_pass[:-1] if raw_pass.endswith('\n') else raw_pass
+cmd = os.environ.get('DOAS_CMD', '')
+if not cmd:
+    sys.exit(1)
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp('sh', ['sh', '-c', cmd])
+else:
+    buf = b''
+    sent = False
+    try:
+        while True:
+            r, _, _ = select.select([fd], [], [], 0.5)
+            if not r:
+                if sent:
+                    continue
+            try:
+                data = os.read(fd, 1024)
+            except OSError:
+                break
+            if not data:
+                break
+            buf += data
+            if not sent and (b'password' in buf.lower() or b':' in buf):
+                os.write(fd, (password + '\n').encode('utf-8'))
+                sent = True
+    finally:
+        os.close(fd)
+        _, status = os.waitpid(pid, 0)
+    out = buf.decode('utf-8', errors='replace')
+    lines = [l for l in out.splitlines() if not ('password' in l.lower() and ':' in l)]
+    print('\n'.join(lines).strip())
+    sys.exit(os.waitstatus_to_exitcode(status))
+`
+
+var b64PtyScript = base64.StdEncoding.EncodeToString([]byte(pythonPtyScript))
+
+var (
+	isDoasShimOnce   sync.Once
+	cachedIsDoasShim bool
+)
+
+func isDoasShim() bool {
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	isDoasShimOnce.Do(func() {
+		out, err := exec.Command("sudo", "-h").CombinedOutput()
+		if err == nil || len(out) > 0 {
+			outStr := string(out)
+			if strings.Contains(outStr, "doas shim for sudo") || strings.Contains(outStr, "OpenDoas") {
+				cachedIsDoasShim = true
+			}
+		}
+	})
+	return cachedIsDoasShim
+}
 
 type BashTool struct{}
 
@@ -162,11 +225,15 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]interface{}) (st
 	privTool := detectPrivilege(cmdStr)
 	isPrivileged := runtime.GOOS != "windows" && privTool != PrivilegeNone
 
-	// If command requires sudo and no password is in active session, prompt interactively via Telegram prompter
+	// If command requires sudo or doas and no password is in active session, prompt interactively via Telegram prompter
 	var finishPrompt func()
-	if privTool == PrivilegeSudo && sudoPass == "" {
+	if (privTool == PrivilegeSudo || privTool == PrivilegeDoas) && sudoPass == "" {
+		promptTitle := "Konfirmasi Password Administrator (sudo)"
+		if privTool == PrivilegeDoas {
+			promptTitle = "Konfirmasi Password Administrator (doas)"
+		}
 		if prompter := GetPasswordPrompter(ctx); prompter != nil {
-			pass, finish, err := prompter.PromptPassword(ctx, "Konfirmasi Password Administrator (sudo)", fmt.Sprintf("Perintah yang akan dieksekusi:\n<code>%s</code>", html.EscapeString(cmdStr)))
+			pass, finish, err := prompter.PromptPassword(ctx, promptTitle, fmt.Sprintf("Perintah yang akan dieksekusi:\n<code>%s</code>", html.EscapeString(cmdStr)))
 			if err == nil && pass != "" {
 				sudoPass = pass
 				finishPrompt = finish
@@ -183,18 +250,27 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]interface{}) (st
 	// Prepare actual command string and stdin
 	finalCmdStr := cmdStr
 	var stdinInput string
+	usePtyRunner := false
 
-	if privTool == PrivilegeSudo {
+	if privTool == PrivilegeDoas {
 		if sudoPass != "" {
-			finalCmdStr = injectSudoStdinFlag(cmdStr)
-			stdinInput = sudoPass + "\n"
+			usePtyRunner = true
+		} else {
+			// Anti-freeze: enforce non-interactive so doas fails immediately if password/authorization is required
+			finalCmdStr = injectDoasNonInteractive(cmdStr)
+		}
+	} else if privTool == PrivilegeSudo {
+		if sudoPass != "" {
+			if isDoasShim() {
+				usePtyRunner = true
+			} else {
+				finalCmdStr = injectSudoStdinFlag(cmdStr)
+				stdinInput = sudoPass + "\n"
+			}
 		} else {
 			// Anti-freeze: enforce non-interactive so sudo fails immediately if password is required
 			finalCmdStr = injectSudoNonInteractive(cmdStr)
 		}
-	} else if privTool == PrivilegeDoas {
-		// Anti-freeze: enforce non-interactive so doas fails immediately if password/authorization is required
-		finalCmdStr = injectDoasNonInteractive(cmdStr)
 	}
 
 	// Set timeout of 30 seconds for command execution
@@ -204,12 +280,15 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]interface{}) (st
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(execCtx, "cmd", "/C", cmdStr)
+	} else if usePtyRunner {
+		cmd = exec.CommandContext(execCtx, "python3", "-c", "import base64; exec(base64.b64decode('"+b64PtyScript+"').decode('utf-8'))")
+		cmd.Env = append(os.Environ(), "DOAS_CMD="+cmdStr)
+		cmd.Stdin = strings.NewReader(sudoPass + "\n")
 	} else {
 		cmd = exec.CommandContext(execCtx, "sh", "-c", finalCmdStr)
-	}
-
-	if stdinInput != "" {
-		cmd.Stdin = strings.NewReader(stdinInput)
+		if stdinInput != "" {
+			cmd.Stdin = strings.NewReader(stdinInput)
+		}
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -236,19 +315,19 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]interface{}) (st
 	}
 
 	// Check if privilege escalation failed because authorization / password required
-	if isPrivileged && (strings.Contains(errStr, "a password is required") || strings.Contains(outStr, "a password is required") || strings.Contains(errStr, "password is required") || strings.Contains(errStr, "Operation not permitted") || strings.Contains(errStr, "Authorization failed") || strings.Contains(errStr, "a tty is required") || strings.Contains(errStr, "doas: a tty is required")) {
+	if isPrivileged && (strings.Contains(errStr, "a password is required") || strings.Contains(outStr, "a password is required") || strings.Contains(errStr, "password is required") || strings.Contains(errStr, "Operation not permitted") || strings.Contains(errStr, "Authorization failed") || strings.Contains(errStr, "a tty is required") || strings.Contains(errStr, "doas: a tty is required") || strings.Contains(errStr, "Authentication required") || strings.Contains(outStr, "Authentication required")) {
 		if privTool == PrivilegeDoas {
-			return fmt.Sprintf("[PRIVILEGE_REQUIRED]\nPerintah '%s' membutuhkan hak akses administrator (doas) dan belum diizinkan secara non-interaktif.\n\nINSTRUKSI WAJIB UNTUK AI ASSISTANT:\n1. JANGAN mencoba mengeksekusi perintah ini lagi sekarang.\n2. DILARANG meminta pengguna mengetikkan password di chat percakapan biasa.\n3. Jelaskan kepada pengguna bahwa perintah <code>%s</code> membutuhkan hak akses root/administrator via doas.\n4. Beritahukan pengguna untuk mengizinkan user menjalankan perintah doas (misalnya menambahkan rule 'permit nopass' untuk user bot di /etc/doas.d/).", cmdStr, cmdStr), nil
+			return fmt.Sprintf("[PRIVILEGE_REQUIRED]\nPerintah '%s' membutuhkan hak akses administrator (doas) dan belum diizinkan atau memerlukan password server.\n\nINSTRUKSI WAJIB UNTUK AI ASSISTANT:\n1. JANGAN mencoba mengeksekusi perintah ini lagi tanpa otorisasi password.\n2. DILARANG meminta pengguna mengetikkan password di chat percakapan biasa.\n3. Jelaskan kepada pengguna bahwa perintah <code>%s</code> membutuhkan hak akses root/administrator via doas.\n4. Minta konfirmasi pengguna untuk mengizinkan eksekusi via dialog input password aman Telegram atau perintah /setsudo.", cmdStr, cmdStr), nil
 		}
 		return fmt.Sprintf("[SUDO_PASSWORD_REQUIRED]\nPerintah '%s' membutuhkan hak akses administrator (sudo) dan memerlukan password server.\n\nINSTRUKSI WAJIB UNTUK AI ASSISTANT:\n1. JANGAN mencoba mengeksekusi perintah ini lagi sekarang.\n2. DILARANG meminta pengguna mengetikkan password di chat percakapan biasa.\n3. Jelaskan kepada pengguna bahwa perintah <code>%s</code> membutuhkan hak akses root/sudo.\n4. Beritahukan pengguna untuk mengatur password sudo via perintah /setsudo di Telegram atau ulangi perintah agar sistem memicu dialog aman Telegram.", cmdStr, cmdStr), nil
 	}
 
-	// Check if sudo failed because password was incorrect
-	if privTool == PrivilegeSudo && sudoPass != "" && (strings.Contains(errStr, "incorrect password") || strings.Contains(errStr, "a password is required")) {
+	// Check if sudo/doas failed because password was incorrect
+	if isPrivileged && sudoPass != "" && (strings.Contains(errStr, "incorrect password") || strings.Contains(errStr, "Authentication failed") || strings.Contains(outStr, "Authentication failed")) {
 		if sessionKey != "" {
 			ClearSudoSession(sessionKey) // Invalidate incorrect cached session
 		}
-		return fmt.Sprintf("[SUDO_AUTH_FAILED]\nPassword sudo yang dimasukkan tidak valid / salah.\n\nINSTRUKSI UNTUK AI ASSISTANT:\nBeritahukan kepada pengguna bahwa password sudo salah dan minta pengguna memasukkan password yang benar."), nil
+		return fmt.Sprintf("[SUDO_AUTH_FAILED]\nPassword administrator yang dimasukkan tidak valid / salah.\n\nINSTRUKSI UNTUK AI ASSISTANT:\nBeritahukan kepada pengguna bahwa password administrator salah dan minta pengguna memasukkan password yang benar."), nil
 	}
 
 	var sb strings.Builder

@@ -142,24 +142,39 @@ func resolvePython() (string, error) {
 		}
 	}
 
-	// 3. Kumpulkan kandidat virtualenv yang ada di workspace
+	// 3. Kumpulkan kandidat virtualenv yang ada di workspace dan server home
 	cwd, _ := os.Getwd()
 	checkDirs := []string{cwd, filepath.Join(cwd, ".."), filepath.Join(cwd, "..", "..")}
 
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		if exeDir != cwd {
+			checkDirs = append(checkDirs, exeDir)
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		checkDirs = append(checkDirs, filepath.Join(home, "AClaw"), home)
+	}
+
+	venvNames := []string{
+		"venv-pptx",
+		"venv",
+		".venv",
+		filepath.Join("scripts", "pptx_engine", "venv-pptx"),
+		filepath.Join("scripts", "pptx_engine", "venv"),
+		filepath.Join("scripts", "pptx_engine", ".venv"),
+		filepath.Join("scripts", "browser_use_mcp", "venv"),
+		filepath.Join("scripts", "browser_use_mcp", ".venv"),
+	}
+
 	var candidates []string
 	for _, base := range checkDirs {
-		if runtime.GOOS == "windows" {
-			candidates = append(candidates,
-				filepath.Join(base, "scripts", "pptx_engine", ".venv", "Scripts", "python.exe"),
-				filepath.Join(base, ".venv", "Scripts", "python.exe"),
-				filepath.Join(base, "scripts", "browser_use_mcp", ".venv", "Scripts", "python.exe"),
-			)
-		} else {
-			candidates = append(candidates,
-				filepath.Join(base, "scripts", "pptx_engine", ".venv", "bin", "python"),
-				filepath.Join(base, ".venv", "bin", "python"),
-				filepath.Join(base, "scripts", "browser_use_mcp", ".venv", "bin", "python"),
-			)
+		for _, vName := range venvNames {
+			if runtime.GOOS == "windows" {
+				candidates = append(candidates, filepath.Join(base, vName, "Scripts", "python.exe"))
+			} else {
+				candidates = append(candidates, filepath.Join(base, vName, "bin", "python"))
+			}
 		}
 	}
 
