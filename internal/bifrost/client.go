@@ -516,7 +516,7 @@ func (c *Client) resolve(preferredName string, req provider.ChatRequest) (string
 	}
 
 	// Preferred model fallback (e.g. combo PreferredIfAvailable).
-	if model == "" && preferredModel != "" && !strings.HasPrefix(strings.ToLower(preferredModel), "combo:") {
+	if (model == "" || strings.EqualFold(model, "auto") || strings.EqualFold(model, "default")) && preferredModel != "" && !strings.HasPrefix(strings.ToLower(preferredModel), "combo:") {
 		model = preferredModel
 	}
 
@@ -530,7 +530,7 @@ func (c *Client) resolve(preferredName string, req provider.ChatRequest) (string
 		}
 	}
 	// If no provider was requested explicitly, find one that serves the model.
-	if rec == nil && model != "" {
+	if rec == nil && model != "" && !strings.EqualFold(model, "auto") && !strings.EqualFold(model, "default") {
 		if r := c.findProviderForModel(model); r != nil {
 			rec = r
 			provName = string(providerKey(rec))
@@ -544,7 +544,7 @@ func (c *Client) resolve(preferredName string, req provider.ChatRequest) (string
 			}
 			if rec != nil {
 				provName = string(providerKey(rec))
-				if model == "" {
+				if model == "" || strings.EqualFold(model, "auto") || strings.EqualFold(model, "default") {
 					model = d.Defaults.DefaultModel
 				}
 			}
@@ -563,7 +563,7 @@ func (c *Client) resolve(preferredName string, req provider.ChatRequest) (string
 			}
 		}
 	}
-	if model == "" && rec != nil {
+	if (model == "" || strings.EqualFold(model, "auto") || strings.EqualFold(model, "default")) && rec != nil {
 		model = rec.DefaultModel
 	}
 

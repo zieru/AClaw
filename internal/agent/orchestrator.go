@@ -932,16 +932,39 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 					}
 				}
 			})
-			toolCtx = WithActiveModelInfo(toolCtx, provToCall, modelToUse)
+			effectiveModel := modelToUse
+			if effectiveModel == "" || strings.EqualFold(effectiveModel, "auto") {
+				if resp != nil && resp.Model != "" && !strings.EqualFold(resp.Model, "auto") {
+					effectiveModel = resp.Model
+				} else if lastModel != "" && !strings.EqualFold(lastModel, "auto") {
+					effectiveModel = lastModel
+				} else if activeModelName != "" && !strings.EqualFold(activeModelName, "auto") {
+					effectiveModel = activeModelName
+				} else if activeProv != nil && activeProv.DefaultModel() != "" {
+					effectiveModel = activeProv.DefaultModel()
+				}
+			}
+			effectiveProv := provToCall
+			if effectiveProv == "" || strings.EqualFold(effectiveProv, "auto") {
+				if resp != nil && resp.ProviderName != "" {
+					effectiveProv = resp.ProviderName
+				} else if activeProvName != "" {
+					effectiveProv = activeProvName
+				} else if activeProv != nil {
+					effectiveProv = activeProv.Name()
+				}
+			}
+
+			toolCtx = WithActiveModelInfo(toolCtx, effectiveProv, effectiveModel)
 			if tc.Name == "browser" {
 				if tc.Arguments == nil {
 					tc.Arguments = make(map[string]interface{})
 				}
-				if m, ok := tc.Arguments["model"].(string); !ok || m == "" || m == "auto" {
-					tc.Arguments["model"] = modelToUse
+				if m, ok := tc.Arguments["model"].(string); !ok || m == "" || strings.EqualFold(m, "auto") {
+					tc.Arguments["model"] = effectiveModel
 				}
-				if p, ok := tc.Arguments["provider"].(string); !ok || p == "" {
-					tc.Arguments["provider"] = provToCall
+				if p, ok := tc.Arguments["provider"].(string); !ok || p == "" || strings.EqualFold(p, "auto") {
+					tc.Arguments["provider"] = effectiveProv
 				}
 				BrowserSessionArg(toolCtx, tc.Arguments)
 			}

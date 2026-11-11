@@ -96,7 +96,7 @@ func (s *SubagentTool) Parameters() tools.ParametersSchema {
 			},
 			"model": {
 				Type:        "string",
-				Description: "Model AI spesifik untuk sub-tugas (opsional).",
+				Description: "Model AI spesifik untuk sub-tugas (opsional, biarkan kosong untuk mewarisi model aktif secara otomatis).",
 			},
 			"tasks": {
 				Type:        "string",
@@ -243,6 +243,26 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 		role = "general"
 	}
 
+	// Sanitize modelOverride (remove invalid strings like 'auto', role name, etc.)
+	modelOverride = strings.TrimSpace(modelOverride)
+	lowerModel := strings.ToLower(modelOverride)
+	isInvalidModel := lowerModel == "" ||
+		lowerModel == "auto" ||
+		lowerModel == "default" ||
+		lowerModel == "none" ||
+		lowerModel == strings.ToLower(role) ||
+		lowerModel == "analyst" ||
+		lowerModel == "coder" ||
+		lowerModel == "researcher" ||
+		lowerModel == "secretary" ||
+		lowerModel == "inspector" ||
+		lowerModel == "vision" ||
+		lowerModel == "general"
+
+	if isInvalidModel {
+		modelOverride = ""
+	}
+
 	// Get timeout and default provider/model from config
 	cfg := config.Get()
 	timeout := 75 * time.Second
@@ -255,22 +275,57 @@ func (s *SubagentTool) executeSingleTask(ctx context.Context, task SubTask, mode
 		if cfg.SubAgent.TokenBudgetPerTask > 0 {
 			tokenBudget = cfg.SubAgent.TokenBudgetPerTask
 		}
-		if modelOverride == "" {
-			modelOverride = cfg.Defaults.DefaultModel
-		}
 		preferredProv = cfg.Defaults.DefaultProvider
 	}
 
-	// Inherit active model and provider from parent context if not explicitly overridden
-	parentProv, parentModel := GetActiveModelInfo(ctx)
-	if modelOverride == "" || (cfg != nil && modelOverride == cfg.Defaults.DefaultModel && parentModel != "") {
-		if parentModel != "" {
-			modelOverride = parentModel
+	// Parse provider:model override if explicitly provided (e.g. "openai:gpt-4o")
+	if modelOverride != "" && strings.Contains(modelOverride, ":") && !strings.HasPrefix(strings.ToLower(modelOverride), "combo:") {
+		parts := strings.SplitN(modelOverride, ":", 2)
+		if strings.TrimSpace(parts[0]) != "" {
+			preferredProv = strings.TrimSpace(parts[0])
 		}
+		modelOverride = strings.TrimSpace(parts[1])
 	}
-	if preferredProv == "" || (cfg != nil && preferredProv == cfg.Defaults.DefaultProvider && parentProv != "") {
+
+	// Inherit active model and provider from parent context
+	parentProv, parentModel := GetActiveModelInfo(ctx)
+	parentProv = strings.TrimSpace(parentProv)
+	parentModel = strings.TrimSpace(parentModel)
+
+	if preferredProv == "" || strings.EqualFold(preferredProv, "auto") {
 		if parentProv != "" {
 			preferredProv = parentProv
+		} else if cfg != nil && cfg.Defaults.DefaultProvider != "" {
+			preferredProv = cfg.Defaults.DefaultProvider
+		}
+	}
+
+	// If modelOverride is still empty, resolve hierarchically:
+	// 1. Parent active model
+	// 2. Default model of active provider (from providerManager)
+	// 3. First non-scraper provider's default model
+	// 4. Config default model
+	if modelOverride == "" {
+		if parentModel != "" && !strings.EqualFold(parentModel, "auto") {
+			modelOverride = parentModel
+		} else if preferredProv != "" && s.providerManager != nil {
+			if p, ok := s.providerManager.Get(preferredProv); ok && p != nil && p.DefaultModel() != "" {
+				modelOverride = p.DefaultModel()
+			}
+		}
+		if modelOverride == "" && s.providerManager != nil {
+			for _, p := range s.providerManager.ListAll() {
+				if p.Type() != "gemini_web" && p.Type() != "gemini_scrape" && p.DefaultModel() != "" {
+					modelOverride = p.DefaultModel()
+					if preferredProv == "" {
+						preferredProv = p.Name()
+					}
+					break
+				}
+			}
+		}
+		if modelOverride == "" && cfg != nil && cfg.Defaults.DefaultModel != "" {
+			modelOverride = cfg.Defaults.DefaultModel
 		}
 	}
 

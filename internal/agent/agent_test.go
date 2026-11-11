@@ -488,3 +488,98 @@ func TestVisionGuard(t *testing.T) {
 		t.Errorf("expected notice 'Gambar diproses dengan model vision: gemini-2.0-flash', got: %s", respWithFallback.Text)
 	}
 }
+
+type mockSubagentProv struct {
+	name         string
+	defaultModel string
+	models       []string
+	lastReq      provider.ChatRequest
+}
+
+func (m *mockSubagentProv) Name() string                     { return m.name }
+func (m *mockSubagentProv) Type() string                     { return "openai" }
+func (m *mockSubagentProv) DefaultModel() string             { return m.defaultModel }
+func (m *mockSubagentProv) Models() []string                 { return m.models }
+func (m *mockSubagentProv) SetHTTPClient(client interface{}) {}
+func (m *mockSubagentProv) GenerateChat(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	m.lastReq = req
+	return &provider.ChatResponse{
+		Content:     "Hasil sub-agen berhasil",
+		Model:       req.Model,
+		TotalTokens: 20,
+	}, nil
+}
+
+func TestSubagentModelInheritanceAndSanitization(t *testing.T) {
+	tempDir := t.TempDir()
+	loader := NewMDLoader(tempDir)
+	pb := NewPromptBuilder(loader)
+	tr := tools.GetRegistry()
+
+	mockProv := &mockSubagentProv{
+		name:         "test_prov",
+		defaultModel: "mock-default-model",
+		models:       []string{"mock-default-model", "mock-custom-model"},
+	}
+
+	pm := provider.GetManager()
+	pm.Register(mockProv, 10)
+	defer pm.Unregister(mockProv.Name())
+
+	subTool := NewSubagentTool(pb, tr, pm)
+
+	// Case 1: Active context has parentModel="parent-flash". LLM passes model="auto"
+	ctx1 := WithActiveModelInfo(context.Background(), "test_prov", "parent-flash")
+	_, err := subTool.Execute(ctx1, map[string]interface{}{
+		"role":        "analyst",
+		"instruction": "Hitung rasio",
+		"model":       "auto",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error in Case 1: %v", err)
+	}
+	if mockProv.lastReq.Model != "parent-flash" {
+		t.Errorf("Case 1: expected inherited model 'parent-flash', got '%s'", mockProv.lastReq.Model)
+	}
+
+	// Case 2: Active context has parentModel="parent-flash". LLM hallucinates model="analyst"
+	_, err = subTool.Execute(ctx1, map[string]interface{}{
+		"role":        "analyst",
+		"instruction": "Hitung rasio lagi",
+		"model":       "analyst",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error in Case 2: %v", err)
+	}
+	if mockProv.lastReq.Model != "parent-flash" {
+		t.Errorf("Case 2: expected inherited model 'parent-flash' after sanitizing 'analyst', got '%s'", mockProv.lastReq.Model)
+	}
+
+	// Case 3: Parent context has empty parentModel="". LLM passes model=""
+	// Must fallback to provider's DefaultModel ("mock-default-model"), NOT fictional config model
+	ctx3 := WithActiveModelInfo(context.Background(), "test_prov", "")
+	_, err = subTool.Execute(ctx3, map[string]interface{}{
+		"role":        "coder",
+		"instruction": "Tulis fungsi",
+		"model":       "",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error in Case 3: %v", err)
+	}
+	if mockProv.lastReq.Model != "mock-default-model" {
+		t.Errorf("Case 3: expected provider DefaultModel 'mock-default-model', got '%s'", mockProv.lastReq.Model)
+	}
+
+	// Case 4: Explicit valid provider:model format override
+	_, err = subTool.Execute(ctx1, map[string]interface{}{
+		"role":        "coder",
+		"instruction": "Tulis test",
+		"model":       "test_prov:mock-custom-model",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error in Case 4: %v", err)
+	}
+	if mockProv.lastReq.Model != "mock-custom-model" {
+		t.Errorf("Case 4: expected explicit model 'mock-custom-model', got '%s'", mockProv.lastReq.Model)
+	}
+}
