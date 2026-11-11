@@ -705,8 +705,12 @@ func (a *NativeAdapter) handleMessage(msg *events.Message) {
 			}
 		}
 
+		timeoutSec := config.Get().Timeouts.HandlerSeconds
+		if timeoutSec <= 0 {
+			timeoutSec = 180
+		}
 		ctx, cancel := context.WithTimeout(context.Background(),
-			time.Duration(config.Get().Timeouts.HandlerSeconds)*time.Second)
+			time.Duration(timeoutSec)*time.Second)
 		a.activeTasks.Store(chatID, cancel)
 		defer func() {
 			a.activeTasks.Delete(chatID)

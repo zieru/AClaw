@@ -728,7 +728,11 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 
 		var genResp *provider.ChatResponse
 		var genErr error
-		genResp, genErr = o.providerManager.GenerateWithFallback(ctx, provToCall, chatReq)
+		attemptTimeout := provider.CalculateAttemptTimeout(ctx, 50*time.Second, 15*time.Second)
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, attemptTimeout)
+		genResp, genErr = o.providerManager.GenerateWithFallback(attemptCtx, provToCall, chatReq)
+		cancelAttempt()
+
 		if genErr != nil {
 			if errors.Is(ctx.Err(), context.Canceled) || errors.Is(genErr, context.Canceled) {
 				return nil, context.Canceled
@@ -747,11 +751,6 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				return nil, genErr
 			}
 
-			retrySeconds := 120
-			if cfg := config.Get(); cfg != nil && cfg.Timeouts.RetrySeconds > 0 {
-				retrySeconds = cfg.Timeouts.RetrySeconds
-			}
-
 			// Case A: Rate Limit (RPM / 429) or Server Overload (503/529) -> Resilient Adaptive Wait-and-Retry Loop
 			// Important: DO NOT truncate chat history! Preserve context and wait for cooldown window to clear.
 			if provider.IsRateLimitOrOverload(genErr) && ctx.Err() == nil {
@@ -761,6 +760,13 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 
 				for rateAttempt := 0; rateAttempt < maxRateLimitRetries; rateAttempt++ {
 					waitDur := provider.ParseRetryAfterDuration(genErr.Error(), rateAttempt, baseDelay, maxDelay)
+
+					// Deadline Guard: Check if we can afford to wait this duration without hitting context deadline
+					if !provider.CanAffordWait(ctx, waitDur, 2500*time.Millisecond) {
+						log.Printf("⚠️ [DeadlineGuard] Sisa waktu context tidak cukup untuk menunggu cooldown (%v). Membatalkan jeda tidur.", waitDur)
+						break
+					}
+
 					statusMsg := fmt.Sprintf("⏳ Batas frekuensi API (RPM) tercapai. Menunggu %d detik sebelum mencoba kembali otomatis (Percobaan %d/%d)...", int(waitDur.Seconds()), rateAttempt+1, maxRateLimitRetries)
 					tracker.SetCurrent(statusMsg)
 					if req.OnProgress != nil {
@@ -773,7 +779,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 						return nil, ctx.Err()
 					}
 
-					retryCtx, cancelRetry := context.WithTimeout(ctx, time.Duration(retrySeconds)*time.Second)
+					retryAttemptTimeout := provider.CalculateAttemptTimeout(ctx, 50*time.Second, 10*time.Second)
+					retryCtx, cancelRetry := context.WithTimeout(ctx, retryAttemptTimeout)
 					genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, chatReq)
 					cancelRetry()
 
@@ -824,7 +831,8 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 					StreamCallback:  req.OnStreamChunk,
 				}
 
-				retryCtx, cancelRetry := context.WithTimeout(ctx, time.Duration(retrySeconds)*time.Second)
+				retryAttemptTimeout := provider.CalculateAttemptTimeout(ctx, 50*time.Second, 10*time.Second)
+				retryCtx, cancelRetry := context.WithTimeout(ctx, retryAttemptTimeout)
 				genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, retryChatReq)
 				cancelRetry()
 			}
@@ -837,12 +845,31 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				}
-				retryCtx, cancelRetry := context.WithTimeout(ctx, time.Duration(retrySeconds)*time.Second)
+				retryAttemptTimeout := provider.CalculateAttemptTimeout(ctx, 50*time.Second, 10*time.Second)
+				retryCtx, cancelRetry := context.WithTimeout(ctx, retryAttemptTimeout)
 				genResp, genErr = o.providerManager.GenerateWithFallback(retryCtx, provToCall, chatReq)
 				cancelRetry()
 			}
 
 			if genErr != nil {
+				// Rescue: If tools were already executed and provider failed/timed out,
+				// deliver the collected tool data rather than failing with an error!
+				if len(allToolsCalled) > 0 && (errors.Is(genErr, context.DeadlineExceeded) || strings.Contains(strings.ToLower(genErr.Error()), "deadline") || strings.Contains(strings.ToLower(genErr.Error()), "timeout")) {
+					var toolSummaries []string
+					for _, msg := range messages {
+						if msg.Role == provider.RoleTool && strings.TrimSpace(msg.Content) != "" {
+							preview := strings.TrimSpace(msg.Content)
+							if len(preview) > 600 {
+								preview = preview[:600] + "..."
+							}
+							toolSummaries = append(toolSummaries, preview)
+						}
+					}
+					if len(toolSummaries) > 0 {
+						finalContent = fmt.Sprintf("⏳ **Waktu Proses Habis (Hasil Data Parsial)**\n\nAI kehabisan batas waktu saat memproses respon akhir, namun data berikut telah berhasil diperoleh:\n\n%s\n\n💡 *Gunakan `/retry` jika Anda ingin AI menyusun kembali kesimpulan lengkap.*", strings.Join(toolSummaries, "\n\n---\n\n"))
+						break
+					}
+				}
 				return nil, genErr
 			}
 		}
@@ -935,6 +962,10 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 		for _, tc := range resp.ToolCalls {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
+			}
+			if rem, hasDL := provider.GetRemainingContextTime(ctx); hasDL && rem < 18*time.Second {
+				log.Printf("⚠️ [DeadlineGuard] Sisa waktu context kritis (%v). Menghentikan eksekusi tool lanjutan untuk mengamankan respon akhir.", rem)
+				break
 			}
 			allToolsCalled = append(allToolsCalled, tc.Name)
 			toolDesc := DescribeToolCall(tc.Name, tc.Arguments)
@@ -1052,17 +1083,47 @@ func (o *Orchestrator) ProcessMessage(ctx context.Context, req UserRequest) (res
 			StreamCallback:  req.OnStreamChunk,
 		}
 
-		synthResp, synthErr := o.providerManager.GenerateWithFallback(ctx, provToCall, synthReq)
+		synthTimeout := provider.CalculateAttemptTimeout(ctx, 35*time.Second, 5*time.Second)
+		synthCtx, cancelSynth := context.WithTimeout(ctx, synthTimeout)
+		synthResp, synthErr := o.providerManager.GenerateWithFallback(synthCtx, provToCall, synthReq)
+		cancelSynth()
+
 		if synthErr != nil && provider.IsRateLimitOrOverload(synthErr) && ctx.Err() == nil {
 			waitDur := provider.ParseRetryAfterDuration(synthErr.Error(), 0, 4*time.Second, 20*time.Second)
-			select {
-			case <-time.After(waitDur):
-				synthResp, synthErr = o.providerManager.GenerateWithFallback(ctx, provToCall, synthReq)
-			case <-ctx.Done():
+			if provider.CanAffordWait(ctx, waitDur, 5*time.Second) {
+				select {
+				case <-time.After(waitDur):
+					retrySynthTimeout := provider.CalculateAttemptTimeout(ctx, 30*time.Second, 4*time.Second)
+					retrySynthCtx, cancelRetrySynth := context.WithTimeout(ctx, retrySynthTimeout)
+					synthResp, synthErr = o.providerManager.GenerateWithFallback(retrySynthCtx, provToCall, synthReq)
+					cancelRetrySynth()
+				case <-ctx.Done():
+				}
 			}
 		}
-		if synthErr != nil && ctx.Err() != nil {
-			return nil, ctx.Err()
+
+		if synthErr != nil && (ctx.Err() != nil || errors.Is(synthErr, context.DeadlineExceeded) || strings.Contains(strings.ToLower(synthErr.Error()), "deadline") || strings.Contains(strings.ToLower(synthErr.Error()), "timeout")) {
+			// Rescue: If tools were already executed and context timed out during final synthesis,
+			// extract tool outputs and present them gracefully rather than crashing!
+			if len(allToolsCalled) > 0 {
+				var toolSummaries []string
+				for _, msg := range messages {
+					if msg.Role == provider.RoleTool && strings.TrimSpace(msg.Content) != "" {
+						preview := strings.TrimSpace(msg.Content)
+						if len(preview) > 600 {
+							preview = preview[:600] + "..."
+						}
+						toolSummaries = append(toolSummaries, preview)
+					}
+				}
+				if len(toolSummaries) > 0 {
+					finalContent = fmt.Sprintf("⏳ **Waktu Proses Habis (Hasil Data Parsial)**\n\nAI kehabisan batas waktu saat menyusun kalimat kesimpulan akhir, namun data berikut telah berhasil diperoleh:\n\n%s\n\n💡 *Gunakan `/retry` jika Anda ingin AI menyusun kembali kesimpulan lengkap.*", strings.Join(toolSummaries, "\n\n---\n\n"))
+				} else {
+					return nil, ctx.Err()
+				}
+			} else {
+				return nil, ctx.Err()
+			}
 		}
 		if synthErr == nil && synthResp != nil {
 			if strings.TrimSpace(synthResp.Content) != "" {

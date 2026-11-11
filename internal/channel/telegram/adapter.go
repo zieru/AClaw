@@ -292,7 +292,7 @@ func (a *BotAdapter) executePrompt(c tele.Context, replyTo *tele.Message, userPr
 
 	timeoutSec := config.Get().Timeouts.HandlerSeconds
 	if timeoutSec <= 0 {
-		timeoutSec = 120
+		timeoutSec = 180
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	a.activeTasks.Store(c.Chat().ID, cancel)

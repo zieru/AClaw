@@ -742,3 +742,73 @@ func TestProcessMessage_ContextLengthExceededCompaction(t *testing.T) {
 		t.Errorf("expected 2 provider attempts (1 failed context + 1 compacted success), got %d", mockP.attempts)
 	}
 }
+
+type mockRescueToolProvider struct {
+	attempts int
+}
+
+func (m *mockRescueToolProvider) Name() string                     { return "mock_rescue_prov" }
+func (m *mockRescueToolProvider) Type() string                     { return "mock" }
+func (m *mockRescueToolProvider) DefaultModel() string             { return "mock-model" }
+func (m *mockRescueToolProvider) Models() []string                 { return []string{"mock-model"} }
+func (m *mockRescueToolProvider) SetHTTPClient(client interface{}) {}
+func (m *mockRescueToolProvider) GenerateChat(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	m.attempts++
+	if m.attempts == 1 {
+		return &provider.ChatResponse{
+			ToolCalls: []provider.ToolCall{
+				{
+					ID:        "call_dt_1",
+					Name:      "get_current_datetime",
+					Arguments: map[string]interface{}{},
+				},
+			},
+		}, nil
+	}
+	return nil, context.DeadlineExceeded
+}
+
+func TestProcessMessage_DeadlineGuardToolRescue(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_rescue.db")
+	db, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+	defer db.Close()
+
+	sm := memory.NewSessionManager(db)
+	mm := memory.NewManager(db, config.MemoryConfig{}, nil, nil)
+	loader := NewMDLoader(tempDir)
+	pb := NewPromptBuilder(loader)
+	tr := tools.GetRegistry()
+
+	pm := provider.NewManager()
+	mockP := &mockRescueToolProvider{}
+	pm.Register(mockP, 1)
+
+	orch := NewOrchestrator(db, sm, mm, pb, tr, pm)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := orch.ProcessMessage(ctx, UserRequest{
+		ChannelType:   "telegram",
+		ChannelID:     "tg_test_chan",
+		ChatID:        "chat_rescue_123",
+		UserID:        "user_rescue_456",
+		UserName:      "TestUser",
+		UserPrompt:    "Jam berapa sekarang?",
+		PreferredProv: "mock_rescue_prov",
+	})
+
+	if err != nil {
+		t.Fatalf("expected graceful partial response instead of error, got: %v", err)
+	}
+	if resp == nil {
+		t.Fatalf("expected non-nil rescued response")
+	}
+	if !strings.Contains(resp.Text, "Hasil Data Parsial") {
+		t.Errorf("expected rescue header 'Hasil Data Parsial', got: %s", resp.Text)
+	}
+}
